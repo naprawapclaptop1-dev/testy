@@ -6,6 +6,7 @@ import {
   NetworkTransferDirection,
   SpeedTestServerProbe,
 } from '../types';
+import { getLocalBridgeBases, isHostedOnExeBridge } from './localBridge';
 
 export interface CableStandardSpec {
   id: string;
@@ -90,43 +91,49 @@ export function parseNetAdapterPaste(rawText: string): NetworkAdapterInfo[] {
   return parsed;
 }
 
-export async function probeLocalNetworkAdapters(): Promise<{
+export async function probeLocalNetworkAdapters(force = false): Promise<{
   adapters: NetworkAdapterInfo[];
   source: string;
 }> {
   const fromApi: NetworkAdapterInfo[] = [];
-  try {
-    const resp = await fetch('/api/network/adapters', { cache: 'no-store' });
-    if (resp.ok) {
-      const json = (await resp.json()) as {
-        adapters?: Array<{
-          name?: string;
-          description?: string;
-          type?: string;
-          status?: string;
-          linkSpeedMbps?: number;
-          macAddress?: string;
-        }>;
-      };
-      for (const raw of json.adapters || []) {
-        const type: NetworkAdapterInfo['type'] =
-          raw.type === 'Wi-Fi' ? 'Wi-Fi' : raw.type === 'Ethernet' ? 'Ethernet (LAN)' : 'VPN / Inne';
-        const linkMbps = Number(raw.linkSpeedMbps) || 0;
-        const cls = classifyLinkStandard(linkMbps, type);
-        fromApi.push({
-          name: raw.name || 'Interfejs',
-          description: raw.description || '',
-          type,
-          status: raw.status === 'Up' ? 'Up' : 'Disconnected',
-          linkSpeedMbps: linkMbps,
-          maxStandardLabel: cls.standard,
-          theoreticalMaxTcpMbps: cls.tcpMax,
-          macAddress: raw.macAddress || '',
-        });
+  const bases = getLocalBridgeBases(force);
+  for (const base of bases) {
+    try {
+      const resp = await fetch(`${base}/api/network/adapters`, { cache: 'no-store' });
+      if (resp.ok) {
+        const ct = resp.headers.get('content-type') || '';
+        if (!ct.includes('json')) continue;
+        const json = (await resp.json()) as {
+          adapters?: Array<{
+            name?: string;
+            description?: string;
+            type?: string;
+            status?: string;
+            linkSpeedMbps?: number;
+            macAddress?: string;
+          }>;
+        };
+        for (const raw of json.adapters || []) {
+          const type: NetworkAdapterInfo['type'] =
+            raw.type === 'Wi-Fi' ? 'Wi-Fi' : raw.type === 'Ethernet' ? 'Ethernet (LAN)' : 'VPN / Inne';
+          const linkMbps = Number(raw.linkSpeedMbps) || 0;
+          const cls = classifyLinkStandard(linkMbps, type);
+          fromApi.push({
+            name: raw.name || 'Interfejs',
+            description: raw.description || '',
+            type,
+            status: raw.status === 'Up' ? 'Up' : 'Disconnected',
+            linkSpeedMbps: linkMbps,
+            maxStandardLabel: cls.standard,
+            theoreticalMaxTcpMbps: cls.tcpMax,
+            macAddress: raw.macAddress || '',
+          });
+        }
+        if (fromApi.length > 0) break;
       }
+    } catch {
+      // Running outside Windows .EXE local server -> fall back to Navigator Connection API hint
     }
-  } catch {
-    // Running outside Windows .EXE local server -> fall back to Navigator Connection API hint
   }
 
   if (fromApi.length > 0) {
@@ -703,9 +710,7 @@ export class NetworkTestService {
         : 0;
 
     let lanLoopbackMbps = 0;
-    const isLocalHost =
-      window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost';
-    if (isLocalHost) {
+    if (isHostedOnExeBridge()) {
       const ctrl = new AbortController();
       const timer = window.setTimeout(() => ctrl.abort(), 1600);
       try {

@@ -142,11 +142,61 @@ export interface SmartAttribute {
   note: string;
 }
 
+export interface DiskDriveTarget {
+  id: string;
+  label: string;
+  path: string;
+  kind: 'native_exe' | 'fs_picker' | 'opfs' | 'smbios';
+  interfaceType: string;
+  mediaType?: string;
+  totalGB?: number;
+  freeGB?: number;
+  model?: string;
+  fileSystem?: string;
+  smartStatus?: string;
+  writable: boolean;
+}
+
+export interface DiskTelemetryPoint {
+  step: string;
+  readMBs: number;
+  writeMBs: number;
+  iops: number;
+  latencyMs: number;
+}
+
+export interface ComponentScanCard {
+  id:
+    | 'cpu'
+    | 'gpu'
+    | 'ram'
+    | 'disk'
+    | 'board'
+    | 'display'
+    | 'network'
+    | 'audio_codecs'
+    | 'power'
+    | 'thermal'
+    | 'usb_bus'
+    | 'input_media';
+  title: string;
+  category: string;
+  status: 'OK' | 'UWAGA' | 'WYKRYTO' | 'BRAK_BRIDGE';
+  score: number;
+  headline: string;
+  summary: string;
+  source: 'Auto (.EXE Native)' | 'Auto (Web API)' | 'SMBIOS' | 'Live Probe';
+  metrics: Array<{ label: string; value: string }>;
+  scannedAt: number;
+}
+
 export interface DiskTestResult {
   status: 'idle' | 'running' | 'completed' | 'failed';
   phase: string;
   progress: number;
-  backend: 'OPFS (Native FS)' | 'IndexedDB' | 'Oczekiwanie';
+  backend: 'OPFS (Native FS)' | 'IndexedDB' | 'Native .EXE (Direct Disk)' | 'Wybrany Dysk (FS Picker)' | 'Oczekiwanie';
+  targetDriveId?: string;
+  targetDriveLabel?: string;
   seqWriteMBs: number;
   seqReadMBs: number;
   rand4kWriteMBs: number;
@@ -171,6 +221,8 @@ export interface DiskTestResult {
   smartHealthPct: number;
   smartStatus: 'ZDROWY' | 'UWAGA' | 'KRYTYCZNY';
   smartAttributes: SmartAttribute[];
+  telemetry?: DiskTelemetryPoint[];
+  latencySamplesMs?: number[];
   overallScore: number;
 }
 
@@ -228,7 +280,11 @@ export type GpuSceneMode =
   | 'meshlet_nanite_cluster'
   | 'caustic_raytrace_prism'
   | 'temporal_aa_checker'
-  | 'sph_fluid_compute';
+  | 'sph_fluid_compute'
+  | 'rt_reflections_hall'
+  | 'volumetric_clouds_4k'
+  | 'cyber_rain_neon'
+  | 'magma_caldera_sim';
 
 export interface GpuStressMetrics {
   running: boolean;
@@ -628,7 +684,17 @@ export type GameSceneId =
   | 'apache_gunship_heli'
   | 'bugatti_hypercar_450'
   | 'soccer_champions_3d'
-  | 'rally_snow_wrc';
+  | 'rally_snow_wrc'
+  | 'tank_blitz_3d'
+  | 'mech_titan_3d'
+  | 'f18_naval_strike'
+  | 'submarine_hunt_3d'
+  | 'motogp_superbike_3d'
+  | 'starfighter_trench_3d'
+  | 'ac130_gunship_3d'
+  | 'cyber_hoverbike_3d'
+  | 'volcano_heli_rescue'
+  | 'battleship_yamato_3d';
 
 export type PsuStressProfile = 'normal' | 'gpu_intense' | 'cpu_multicore' | 'transient_spike';
 
@@ -678,6 +744,8 @@ export interface GameBenchMetrics {
   isRacingMode?: boolean;
   raceSpeedKmh?: number;
   raceLap?: number;
+  raceTotalLaps?: number;
+  racePosition?: number;
   raceNitroPct?: number;
   isSoccerMode?: boolean;
   soccerScoreHome?: number;
@@ -685,10 +753,22 @@ export interface GameBenchMetrics {
   soccerBallSpeedKmh?: number;
   soccerMatchSec?: number;
   isFlightMode?: boolean;
+  isCombatMode?: boolean;
   flightCategory?: 'jet' | 'plane' | 'helicopter';
   altitudeM?: number;
   machSpeed?: number;
   rotorRpm?: number;
+  gameScore?: number;
+  gameCombo?: number;
+  gameStage?: number;
+  gameMaxStage?: number;
+  gameHealthPct?: number;
+  gameMissionText?: string;
+  gameBannerText?: string;
+  gameTargetsDestroyed?: number;
+  gameGatesPassed?: number;
+  targetLocked?: boolean;
+  sfxEnabled?: boolean;
   telemetry: GpuTelemetryPoint[];
   verdict: 'ULTRA PŁYNNOŚĆ' | 'GRYWALNE (60+)' | 'CIĘŻKIE OBCIĄŻENIE' | 'EKSTREMALNY THROTTLING' | 'OCZEKIWANIE';
 }
@@ -807,6 +887,217 @@ export interface FanCurveConfig {
   preset: FanCurvePreset;
   maxRpm: number;
   points: FanCurvePoint[];
+}
+
+export type FanBearingHealthTier = 'HEALTHY' | 'FAIR' | 'DEGRADED' | 'CRITICAL';
+export type FanBearingFailureRiskLevel = 'LOW' | 'MODERATE' | 'ELEVATED' | 'CRITICAL';
+
+export interface FanBearingHealthAcousticContext {
+  lowestBearingHealthIndex: number;
+  avgBearingHealthIndex: number;
+  worstChannelId: string;
+  worstChannelLabel: string;
+  worstTier: FanBearingHealthTier;
+  predictiveFailureProbabilityPct: number;
+  riskLevel: FanBearingFailureRiskLevel;
+}
+
+export interface FanBearingHealthDayPoint {
+  dayOffset: number; // -6..0
+  label: string;
+  score: number; // 0..100
+}
+
+export type FanHeatmapSectionTab = 'resonance' | 'bearing_history';
+
+export interface FanPwmChannelReading {
+  id: string;
+  label: string;
+  header: string;
+  programmedHz: number;
+  measuredHz: number;
+  deviationHz: number;
+  deviationPct: number;
+  jitterHz: number;
+  dutyPct: number;
+  rpm: number;
+  expectedRpm: number;
+  rpmDutyDeviationPct: number;
+  rpmDeviationDurationMs: number;
+  rpmDutyWarningPulse: boolean;
+  rpmDutyFaultHint: string | null;
+  bearingHealthIndex: number; // 0..100 predictive score
+  bearingHealthTier: FanBearingHealthTier;
+  predictedLifeExpectancyPct: number; // 0..100 predicted remaining life expectancy %
+  estimatedRemainingHours: number;
+  maintenanceInstructions: string[];
+  longTermDriftPct: number;
+  driftTrend: 'STABLE' | 'DRIFTING' | 'WORSENING';
+  bearingPrediction: string;
+  bearingHealth7DayHistory: FanBearingHealthDayPoint[];
+  maintenanceAlertTriggered: boolean;
+  status: 'OK' | 'DEVIATION' | 'CRITICAL';
+  reason: string;
+  historyHz: number[];
+}
+
+export interface FanPwmMonitorState {
+  active: boolean;
+  programmedHz: number;
+  tolerancePct: number;
+  driftTestEnabled: boolean;
+  sampleCount: number;
+  lastSampledAt: number | null;
+  deviationCount: number;
+  rpmDutyWarningCount: number;
+  rpmDeviationThresholdPct: number;
+  rpmDeviationHoldSec: number;
+  lowestBearingHealthIndex: number;
+  avgBearingHealthIndex: number;
+  predictiveMaintenanceThresholdPct: number;
+  maintenanceAlertCount: number;
+  channels: FanPwmChannelReading[];
+}
+
+export interface FanFftBin {
+  hz: number;
+  magnitudeDb: number;
+  normalized: number; // 0..1
+}
+
+export interface FanFftHarmonicPeak {
+  hz: number;
+  magnitudeDb: number;
+  prominenceDb: number;
+  harmonicOrder: number | null;
+  classification: string;
+  isExcited: boolean;
+  isMajorHarmonic?: boolean;
+  persistenceCount?: number;
+  persistencePct?: number;
+  avgProminenceDb?: number;
+  predictiveBearingFailurePct?: number;
+  bearingFailureRiskLevel?: FanBearingFailureRiskLevel;
+  bearingImpactSummary?: string;
+}
+
+export interface FanAcousticSample {
+  timestamp: number;
+  rpm: number;
+  noiseDb: number;
+  vibrationScore: number; // 0..100 tonal/mechanical vibration index
+  dominantHz: number | null;
+  harmonics?: FanFftHarmonicPeak[];
+  source: 'microphone' | 'sweep';
+}
+
+export interface FanAcousticHeatmapCell {
+  rpmBinIndex: number;
+  rpmMin: number;
+  rpmMax: number;
+  dbBinIndex: number;
+  dbMin: number;
+  dbMax: number;
+  count: number;
+  avgDb: number;
+  maxDb: number;
+  avgVibrationScore: number;
+  intensity: number; // 0..1 normalized density/severity
+  isResonance: boolean;
+  topHarmonicHz: number | null;
+  topHarmonicLabel: string | null;
+  topHarmonicIsMajor?: boolean;
+  predictiveBearingFailurePct?: number;
+}
+
+export interface FanResonanceZone {
+  rpmMin: number;
+  rpmMax: number;
+  avgDb: number;
+  expectedDb: number;
+  excessDb: number;
+  vibrationScore: number;
+  dominantHz: number | null;
+  excitedHarmonics: Array<{
+    hz: number;
+    classification: string;
+    prominenceDb: number;
+    isMajorHarmonic: boolean;
+    persistencePct: number;
+    predictiveBearingFailurePct: number;
+  }>;
+  severity: 'MODERATE' | 'HIGH';
+  recommendation: string;
+}
+
+export interface FanFftFrequencyBucketEntry {
+  binIndex: number;
+  hzStart: number;
+  hzEnd: number;
+  centerHz: number;
+  magnitudeDb: number;
+  normalized: number;
+}
+
+export interface FanFftSpectrumJsonExport {
+  schema: 'systempulse-fft-spectrum-v1';
+  exportedAt: string;
+  analysisConfig: {
+    fftSize: number;
+    sampleRateHz: number;
+    binResolutionHz: number;
+    totalRawBins: number;
+    displayBucketCount: number;
+    rpm: number;
+    bladeCount: number;
+    fundamentalHz: number;
+    bladePassHz: number;
+    micActive: boolean;
+    currentNoiseDb: number | null;
+    currentVibrationScore: number;
+    currentDominantHz: number | null;
+  };
+  bearingHealthContext: FanBearingHealthAcousticContext;
+  displayBuckets: FanFftFrequencyBucketEntry[];
+  fullFrequencyBuckets: FanFftFrequencyBucketEntry[];
+  currentHarmonics: FanFftHarmonicPeak[];
+  majorHarmonics: FanFftHarmonicPeak[];
+  resonanceZones: FanResonanceZone[];
+}
+
+export interface FanAcousticHeatmapState {
+  capturing: boolean;
+  sweeping: boolean;
+  micActive: boolean;
+  micError: string | null;
+  currentRpm: number;
+  currentNoiseDb: number | null;
+  currentVibrationScore: number;
+  currentDominantHz: number | null;
+  fundamentalHz: number;
+  bladePassHz: number;
+  bladeCount: number;
+  fftSize: number;
+  sampleRateHz: number;
+  fftBins: FanFftBin[];
+  currentHarmonics: FanFftHarmonicPeak[];
+  majorHarmonics: FanFftHarmonicPeak[];
+  bearingHealthContext: FanBearingHealthAcousticContext;
+  sampleCount: number;
+  rpmBins: Array<{ min: number; max: number; label: string }>;
+  dbBins: Array<{ min: number; max: number; label: string }>;
+  cells: FanAcousticHeatmapCell[];
+  rpmSummary: Array<{
+    rpmMin: number;
+    rpmMax: number;
+    avgDb: number | null;
+    expectedDb: number;
+    sampleCount: number;
+    vibrationScore: number;
+    isResonance: boolean;
+  }>;
+  resonanceZones: FanResonanceZone[];
+  samples: FanAcousticSample[];
 }
 
 export interface StressSessionRecord {

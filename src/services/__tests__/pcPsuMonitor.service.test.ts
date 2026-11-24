@@ -138,7 +138,38 @@ describe('PcPsuMonitor & BatteryHealthService PSU Extensions', () => {
 
     batteryHealthService.resetRailAlertMarkersBaseline();
   });
+
+  it('clears the selected rail 5-minute buffer via resetRail5MinHistory and forces a re-sampling period', async () => {
+    batteryHealthService.clearRailHistoryReset();
+    batteryHealthService.captureLiveSample();
+
+    const resetAt = batteryHealthService.resetRail5MinHistory('+12V', {
+      durationMs: 1000,
+      intervalMs: 120,
+    });
+
+    expect(batteryHealthService.getRailHistoryResetAt('+12V')).toBe(resetAt);
+    expect(batteryHealthService.getRailHistoryResetAt('+5V')).toBe(0);
+    expect(batteryHealthService.getRailHistoryResetAt('+3.3V')).toBe(0);
+
+    // Immediately after reset, 0 samples exist at or after resetAt for +12V
+    const immediateState = batteryHealthService.getState();
+    const immediateAfterReset = immediateState.railHistory.filter((pt) => pt.timestamp >= resetAt);
+    expect(immediateAfterReset.length).toBe(0);
+    expect(batteryHealthService.getRailResamplingState('+12V').active).toBe(true);
+
+    // Wait briefly for forced re-sampling ticks to push fresh telemetry points
+    await new Promise((r) => setTimeout(r, 420));
+
+    const resampledState = batteryHealthService.getState();
+    const freshSamples = resampledState.railHistory.filter((pt) => pt.timestamp >= resetAt);
+    expect(freshSamples.length).toBeGreaterThanOrEqual(2);
+    expect(batteryHealthService.getRailResamplingState('+12V').samplesCollected).toBe(freshSamples.length);
+
+    batteryHealthService.clearRailHistoryReset();
+  });
 });
+
 
 
 

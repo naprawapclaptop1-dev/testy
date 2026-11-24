@@ -13,6 +13,7 @@ import {
 import { soundNotificationService } from './soundNotification.service';
 import { psuCalculatorService } from './psuCalculator.service';
 import { thermalMonitorService } from './thermalMonitor.service';
+import { getLocalBridgeBases } from './localBridge';
 
 export const BATTERY_WMI_PS_COMMAND =
   '$s=Get-CimInstance -Namespace root\\WMI -ClassName BatteryStaticData -EA SilentlyContinue|Select -First 1; $f=Get-CimInstance -Namespace root\\WMI -ClassName BatteryFullChargedCapacity -EA SilentlyContinue|Select -First 1; $c=Get-CimInstance -Namespace root\\WMI -ClassName BatteryCycleCount -EA SilentlyContinue|Select -First 1; $st=Get-CimInstance -Namespace root\\WMI -ClassName BatteryStatus -EA SilentlyContinue|Select -First 1; $wb=Get-CimInstance Win32_Battery -EA SilentlyContinue|Select -First 1; [pscustomobject]@{design=$s.DesignedCapacity;full=$f.FullChargedCapacity;cycles=$c.CycleCount;volt=$st.Voltage;rem=$st.RemainingCapacity;crate=$st.ChargeRate;drate=$st.DischargeRate;ac=$st.PowerOnline;name=$wb.Name;pct=$wb.EstimatedChargeRemaining}|ConvertTo-Json -Compress|Set-Clipboard';
@@ -345,6 +346,20 @@ export class BatteryHealthService {
   private highLoadSecCounter = 0;
   private criticalAlertActive = false;
   private railAlertMarkersClearedAt = 0;
+  private railResetCutoffMs: Record<'+12V' | '+5V' | '+3.3V', number> = {
+    '+12V': 0,
+    '+5V': 0,
+    '+3.3V': 0,
+  };
+  private railResamplingTimers: Partial<
+    Record<'+12V' | '+5V' | '+3.3V', ReturnType<typeof setTimeout>>
+  > = {};
+  private railResamplingMeta: Partial<
+    Record<
+      '+12V' | '+5V' | '+3.3V',
+      { startedAt: number; endsAt: number; targetSamples: number; active: boolean }
+    >
+  > = {};
 
   constructor() {
     let initialThreshold = 50.0;
@@ -442,19 +457,24 @@ export class BatteryHealthService {
     return this.getState();
   }
 
-  public async probeLocalWindowsBattery(): Promise<WindowsBatteryWmiSnapshot | null> {
-    try {
-      const resp = await fetch('/api/power/battery', { cache: 'no-store' });
-      if (!resp.ok) return null;
-      const text = await resp.text();
-      const parsed = parseWindowsBatteryWmiPaste(text);
-      if (!parsed) return null;
-      parsed.source = 'exe_wmi';
-      this.applyWindowsBatterySnapshot(parsed);
-      return parsed;
-    } catch {
-      return null;
+  public async probeLocalWindowsBattery(force = false): Promise<WindowsBatteryWmiSnapshot | null> {
+    const bases = getLocalBridgeBases(force);
+    if (bases.length === 0 || typeof fetch !== 'function') return null;
+    for (const base of bases) {
+      try {
+        const resp = await fetch(`${base}/api/power/battery`, { cache: 'no-store' });
+        if (!resp.ok) continue;
+        const text = await resp.text();
+        const parsed = parseWindowsBatteryWmiPaste(text);
+        if (!parsed) continue;
+        parsed.source = 'exe_wmi';
+        this.applyWindowsBatterySnapshot(parsed);
+        return parsed;
+      } catch {
+        // Ignore unavailable bridge
+      }
     }
+    return null;
   }
 
   public applyWindowsBatterySnapshot(snap: WindowsBatteryWmiSnapshot): void {
@@ -581,7 +601,7 @@ export class BatteryHealthService {
     const seeded: BatteryHistoryPoint[] = [];
     const seededRails: Array<{ timeLabel: string; timestamp: number; rail12V: number; rail5V: number; rail3P3V: number; powerW: number }> = [];
 
-    // Seed 6 baseline points (15s ago -> now) so charts render immediately
+    // Seed 6 baseline points for battery history (15s ago -> now)
     for (let i = 5; i >= 0; i--) {
       const d = new Date(nowMs - i * 3000);
       const jitterW = Number((Math.sin(i * 1.1) * 0.4).toFixed(1));
@@ -593,17 +613,30 @@ export class BatteryHealthService {
         levelPct: baseLevel,
         powerW: pW,
       });
+    }
+
+    // Seed 360 baseline points covering the last 15 minutes (900s, every 2.5s) for 1/5/15m PSU rail timeline charts
+    for (let i = 359; i >= 0; i--) {
+      const ts = nowMs - i * 2500;
+      const d = new Date(ts);
+      const phase = (359 - i) * 0.24;
+      const loadWave = Math.sin(phase * 0.7) * 18 + Math.cos(phase * 1.45) * 9;
+      const pW = Math.max(12, Number((Math.max(basePower, this.state.psu.estimatedWattage || 65) + loadWave).toFixed(1)));
+      const droop12 = Math.sin(phase) * 0.055 + Math.cos(phase * 2.1) * 0.025;
+      const droop5 = Math.cos(phase * 0.9) * 0.024 + Math.sin(phase * 1.8) * 0.011;
+      const droop33 = Math.sin(phase * 1.15) * 0.018 + Math.cos(phase * 2.3) * 0.009;
       seededRails.push({
         timeLabel: formatTimeLabel(d),
-        timestamp: d.getTime(),
-        rail12V: this.state.psu.rail12V,
-        rail5V: this.state.psu.rail5V,
-        rail3P3V: this.state.psu.rail3P3V,
+        timestamp: ts,
+        rail12V: Number((this.state.psu.rail12V + (i === 0 ? 0 : droop12)).toFixed(3)),
+        rail5V: Number((this.state.psu.rail5V + (i === 0 ? 0 : droop5)).toFixed(3)),
+        rail3P3V: Number((this.state.psu.rail3P3V + (i === 0 ? 0 : droop33)).toFixed(3)),
         powerW: pW,
       });
     }
     this.state.history = seeded;
     this.state.railHistory = seededRails;
+    psuCalculatorService.seedPowerDrawHistory1m(this.state.psu.estimatedWattage || 120, nowMs);
 
     if (!this.state.efficiencyTrend1h || this.state.efficiencyTrend1h.length < 2) {
       const trend1h: PsuEfficiencyTrendPoint[] = [];
@@ -992,10 +1025,21 @@ export class BatteryHealthService {
   }
 
   private pushHistorySample(): void {
-    const now = new Date();
+    const nowMs = Date.now();
+    const prevRailTs =
+      this.state.railHistory && this.state.railHistory.length > 0
+        ? this.state.railHistory[this.state.railHistory.length - 1].timestamp
+        : 0;
+    const maxResetCutoff = Math.max(
+      this.railResetCutoffMs['+12V'],
+      this.railResetCutoffMs['+5V'],
+      this.railResetCutoffMs['+3.3V']
+    );
+    const sampleTs = Math.max(nowMs, prevRailTs + 1, maxResetCutoff);
+    const now = new Date(sampleTs);
     const point: BatteryHistoryPoint = {
       timeLabel: formatTimeLabel(now),
-      timestamp: now.getTime(),
+      timestamp: sampleTs,
       dateTimeLabel: formatExactDateTime(now),
       levelPct: this.state.levelPct,
       powerW: this.state.currentPowerDrawW,
@@ -1004,13 +1048,13 @@ export class BatteryHealthService {
 
     const railPoint = {
       timeLabel: formatTimeLabel(now),
-      timestamp: now.getTime(),
+      timestamp: sampleTs,
       rail12V: this.state.psu.rail12V,
       rail5V: this.state.psu.rail5V,
       rail3P3V: this.state.psu.rail3P3V,
       powerW: this.state.currentPowerDrawW,
     };
-    this.state.railHistory = [...(this.state.railHistory || []).slice(-120), railPoint];
+    this.state.railHistory = [...(this.state.railHistory || []).slice(-959), railPoint];
 
     const trendPoint: PsuEfficiencyTrendPoint = {
       timestamp: now.getTime(),
@@ -1024,6 +1068,7 @@ export class BatteryHealthService {
       ...(this.state.efficiencyTrend1h || []).filter((p) => p.timestamp >= oneHourAgo).slice(-79),
       trendPoint,
     ];
+    psuCalculatorService.recordPowerDrawSample(this.state.psu.estimatedWattage, sampleTs);
 
     if (this.state.currentPowerDrawW > this.state.powerThresholdW && this.state.soundAlertEnabled) {
       if (!this.lastPowerExceeded) {
@@ -1171,6 +1216,134 @@ export class BatteryHealthService {
     this.railAlertMarkersClearedAt = 0;
   }
 
+  public getRailHistoryResetAt(railName: '+12V' | '+5V' | '+3.3V'): number {
+    return this.railResetCutoffMs[railName] || 0;
+  }
+
+  public getRailResamplingState(railName: '+12V' | '+5V' | '+3.3V'): {
+    active: boolean;
+    railName: '+12V' | '+5V' | '+3.3V';
+    startedAt: number;
+    endsAt: number;
+    samplesCollected: number;
+    targetSamples: number;
+    progressPct: number;
+  } {
+    const meta = this.railResamplingMeta[railName];
+    const resetAt = this.railResetCutoffMs[railName] || 0;
+    if (!meta) {
+      return {
+        active: false,
+        railName,
+        startedAt: 0,
+        endsAt: 0,
+        samplesCollected: 0,
+        targetSamples: 0,
+        progressPct: 100,
+      };
+    }
+    const samplesCollected = (this.state.railHistory || []).filter(
+      (pt) => pt.timestamp >= resetAt
+    ).length;
+    const progressPct =
+      meta.targetSamples > 0
+        ? Math.min(100, Math.round((samplesCollected / meta.targetSamples) * 100))
+        : 100;
+    return {
+      active: meta.active,
+      railName,
+      startedAt: meta.startedAt,
+      endsAt: meta.endsAt,
+      samplesCollected,
+      targetSamples: meta.targetSamples,
+      progressPct,
+    };
+  }
+
+  public resetRail5MinHistory(
+    railName: '+12V' | '+5V' | '+3.3V',
+    opts?: { durationMs?: number; intervalMs?: number }
+  ): number {
+    const prevTimer = this.railResamplingTimers[railName];
+    if (prevTimer !== undefined) {
+      clearTimeout(prevTimer);
+      delete this.railResamplingTimers[railName];
+    }
+
+    const latestTs =
+      this.state.railHistory && this.state.railHistory.length > 0
+        ? this.state.railHistory[this.state.railHistory.length - 1].timestamp
+        : 0;
+    const resetAt = Math.max(Date.now(), latestTs + 1);
+    this.railResetCutoffMs[railName] = resetAt;
+
+    // Clear recent 5-minute alert events for this rail so alerts re-evaluate cleanly
+    const fiveMinCutoff = resetAt - 300000;
+    this.state.railAlertEvents = (this.state.railAlertEvents || []).filter(
+      (ev) => ev.railName !== railName || ev.timestamp < fiveMinCutoff
+    );
+
+    const durationMs = Math.max(1000, opts?.durationMs ?? 10000);
+    const intervalMs = Math.max(100, opts?.intervalMs ?? 500);
+    const targetSamples = Math.max(2, Math.round(durationMs / intervalMs));
+
+    this.railResamplingMeta[railName] = {
+      startedAt: resetAt,
+      endsAt: resetAt + durationMs,
+      targetSamples,
+      active: true,
+    };
+
+    // Emit immediately so UI clears the 5-minute buffer right away
+    this.emit();
+
+    const runStep = () => {
+      const meta = this.railResamplingMeta[railName];
+      if (!meta || !meta.active || this.railResetCutoffMs[railName] !== resetAt) {
+        return;
+      }
+
+      if (this.batteryManager) {
+        this.syncFromApi();
+      } else {
+        this.recompute();
+      }
+      this.pushHistorySample();
+
+      const collected = (this.state.railHistory || []).filter(
+        (pt) => pt.timestamp >= resetAt
+      ).length;
+      if (collected >= meta.targetSamples || Date.now() >= meta.endsAt) {
+        meta.active = false;
+        delete this.railResamplingTimers[railName];
+        this.emit();
+        return;
+      }
+
+      this.emit();
+      this.railResamplingTimers[railName] = globalThis.setTimeout(runStep, intervalMs);
+    };
+
+    // First re-sampled telemetry point lands quickly so the curve visibly rebuilds
+    const firstDelay = Math.min(250, intervalMs);
+    this.railResamplingTimers[railName] = globalThis.setTimeout(runStep, firstDelay);
+
+    return resetAt;
+  }
+
+  public clearRailHistoryReset(railName?: '+12V' | '+5V' | '+3.3V'): void {
+    const rails: Array<'+12V' | '+5V' | '+3.3V'> = railName ? [railName] : ['+12V', '+5V', '+3.3V'];
+    for (const r of rails) {
+      const t = this.railResamplingTimers[r];
+      if (t !== undefined) {
+        clearTimeout(t);
+        delete this.railResamplingTimers[r];
+      }
+      this.railResetCutoffMs[r] = 0;
+      delete this.railResamplingMeta[r];
+    }
+  }
+
   public getState(): BatteryHealthState {
     return {
       ...this.state,
@@ -1201,6 +1374,7 @@ export class BatteryHealthService {
       clearInterval(this.timerId);
       this.timerId = null;
     }
+    this.clearRailHistoryReset();
     this.listeners = [];
   }
 }

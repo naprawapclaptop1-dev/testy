@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { buildBatteryPowerCyclesCsv, buildPsuRailHistoryCsv, formatCycleDateTime } from '../batteryExport.service';
+import {
+  buildAllPsuRailsRawJson,
+  buildBatteryPowerCyclesCsv,
+  buildPsuRailHistoryCsv,
+  buildPsuRailHistoryJson,
+  buildSinglePsuRail5mCsv,
+  formatCycleDateTime,
+} from '../batteryExport.service';
 import { GPU_SCENE_CATALOG } from '../gpuStress.service';
 import { BatteryPowerCycleEntry } from '../../types';
 
@@ -79,10 +86,93 @@ describe('Battery Power Cycles Export & GPU 3D Scene Catalog', () => {
     expect(lines[2]).toContain('145.2');
   });
 
-  it('exposes 44 distinct WebGL 3D GPU stress scenes including all next-gen scenes', () => {
-    expect(GPU_SCENE_CATALOG).toHaveLength(44);
+  it('builds structured JSON log for PSU rail voltage fluctuation history with per-rail stats and alerts', () => {
+    const now = Date.now();
+    const railHistory = [
+      { timeLabel: '12:00:00', timestamp: now - 20000, rail12V: 12.02, rail5V: 5.01, rail3P3V: 3.31, powerW: 120.5 },
+      { timeLabel: '12:00:10', timestamp: now - 10000, rail12V: 11.22, rail5V: 4.98, rail3P3V: 3.29, powerW: 410.8 },
+    ];
+    const { jsonContent, payload } = buildPsuRailHistoryJson(railHistory, {
+      psuMeta: { rating80Plus: '80 PLUS Gold', capacityW: 850, tempC: 44.5, efficiencyPct: 91.2, currentLoadPct: 48 },
+      thresholds: { rail12VThresholdPct: 5, rail5VThresholdPct: 5, rail3P3VThresholdPct: 5, globalDeviationPct: 5 },
+      alertEvents: [{ timestamp: now - 10000, railName: '+12V', voltage: 11.22, deviationPct: 6.5 }],
+    });
+    const parsed = JSON.parse(jsonContent);
+    expect(parsed.schemaVersion).toBe('1.0');
+    expect(parsed.application).toBe('SystemPulse Pro');
+    expect(parsed.summary.sampleCount).toBe(2);
+    expect(parsed.summary.timeSpanSeconds).toBe(10);
+    expect(parsed.summary.rail12V.outOfThresholdCount).toBe(1);
+    expect(parsed.summary.rail12V.peakDeviationPct).toBeCloseTo(6.5, 1);
+    expect(parsed.samples[1].outOfThresholdRails).toContain('+12V');
+    expect(parsed.alertEvents).toHaveLength(1);
+    expect(payload.summary.powerW.max).toBe(410.8);
+  });
+
+  it('builds dedicated 5-minute single-rail CSV with UTF-8 BOM, 300s window filter, and threshold flags', () => {
+    const now = Date.now();
+    const csv = buildSinglePsuRail5mCsv({
+      railName: '+12V',
+      nominalV: 12.0,
+      thresholdPct: 5,
+      samples: [
+        { timestamp: now - 360000, timeLabel: '10:00:00', voltageV: 11.99, powerW: 210 },
+        { timestamp: now - 180000, timeLabel: '10:03:00', voltageV: 11.95, powerW: 240.5 },
+        { timestamp: now - 10000, timeLabel: '10:05:50', voltageV: 11.22, powerW: 410.2 },
+      ],
+    });
+    expect(csv.startsWith('\uFEFF')).toBe(true);
+    const lines = csv.replace(/^\uFEFF/, '').split('\r\n');
+    expect(lines[0]).toContain('Szyna,Czas_Etykieta,Timestamp_Ms,ISO_Timestamp,Data_Czas,Napiecie_V');
+    // Sample at -360s is outside 5-minute window and excluded
+    expect(lines).toHaveLength(3);
+    expect(lines[1]).toContain('+12V,10:03:00');
+    expect(lines[1]).toContain(',11.9500,12.00,');
+    expect(lines[1]).toContain(',NO,240.5');
+    expect(lines[2]).toContain('+12V,10:05:50');
+    expect(lines[2]).toContain(',11.2200,12.00,-0.7800,6.500,5.00,YES,410.2');
+
+    const csv15m = buildSinglePsuRail5mCsv({
+      railName: '+12V',
+      nominalV: 12.0,
+      thresholdPct: 5,
+      windowSeconds: 900,
+      samples: [
+        { timestamp: now - 840000, timeLabel: '09:52:00', voltageV: 12.02, powerW: 190 },
+        { timestamp: now - 360000, timeLabel: '10:00:00', voltageV: 11.99, powerW: 210 },
+        { timestamp: now - 10000, timeLabel: '10:05:50', voltageV: 11.22, powerW: 410.2 },
+      ],
+    });
+    const lines15m = csv15m.replace(/^\uFEFF/, '').split('\r\n');
+    expect(lines15m).toHaveLength(4);
+  });
+
+  it('compiles raw voltage data for all three rails (+12V, +5V, +3.3V) into a single JSON object', () => {
+    const now = Date.now();
+    const { jsonContent } = buildAllPsuRailsRawJson(
+      [
+        { timeLabel: '12:00:00', timestamp: now - 5000, rail12V: 11.98, rail5V: 5.01, rail3P3V: 3.31, powerW: 215.4 },
+        { timeLabel: '12:00:05', timestamp: now, rail12V: 11.24, rail5V: 4.96, rail3P3V: 3.28, powerW: 412.0 },
+      ],
+      {
+        currentRails: { rail12V: 11.24, rail5V: 4.96, rail3P3V: 3.28, powerW: 412.0 },
+        thresholds: { rail12VThresholdPct: 5, rail5VThresholdPct: 5, rail3P3VThresholdPct: 5 },
+        windowSeconds: 60,
+      }
+    );
+    const parsed = JSON.parse(jsonContent);
+    expect(parsed.application).toBe('SystemPulse Pro');
+    expect(Object.keys(parsed.rails)).toEqual(['+12V', '+5V', '+3.3V']);
+    expect(parsed.rails['+12V'].sampleCount).toBe(2);
+    expect(parsed.rails['+12V'].stats.outOfThresholdCount).toBe(1);
+    expect(parsed.rails['+5V'].currentV).toBeCloseTo(4.96, 2);
+    expect(parsed.rails['+3.3V'].samples[1].voltageV).toBeCloseTo(3.28, 2);
+  });
+
+  it('exposes 48 distinct WebGL 3D GPU stress scenes including all next-gen scenes', () => {
+    expect(GPU_SCENE_CATALOG).toHaveLength(48);
     const ids = GPU_SCENE_CATALOG.map((s) => s.id);
-    expect(new Set(ids).size).toBe(44);
+    expect(new Set(ids).size).toBe(48);
     expect(ids).toContain('volumetric_nebula');
     expect(ids).toContain('crystal_caustics');
     expect(ids).toContain('blackhole_lensing');
@@ -105,6 +195,10 @@ describe('Battery Power Cycles Export & GPU 3D Scene Catalog', () => {
     expect(ids).toContain('procedural_planet_atmo');
     expect(ids).toContain('volumetric_fire_tornado');
     expect(ids).toContain('cyber_matrix_hypercube');
+    expect(ids).toContain('rt_reflections_hall');
+    expect(ids).toContain('volumetric_clouds_4k');
+    expect(ids).toContain('cyber_rain_neon');
+    expect(ids).toContain('magma_caldera_sim');
   });
 });
 

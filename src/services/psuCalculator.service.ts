@@ -1,4 +1,5 @@
 import { PsuStressProfile, PsuRailAlertRules } from '../types';
+import type { PowerDrawSample } from '../ui/psuPowerDrawTrend';
 
 export interface PsuPowerCalculation {
   totalSystemPowerW: number;
@@ -87,8 +88,10 @@ class PsuCalculatorService {
   private electricityPricePerKwh = 0.85; // PLN per kWh
   private usageHoursPerDay = 5; // hours / day
   private railDeviationPct = 5.0; // 5% default tolerance
+  private powerAlertThresholdPct = 95; // 95% default capacity alert threshold
   private highPowerSimulationEnabled = false;
   private stressProfile: PsuStressProfile = 'normal';
+  private powerDrawHistory1m: PowerDrawSample[] = [];
   private alertRules: PsuRailAlertRules = {
     rail12VThresholdPct: 5.0,
     rail5VThresholdPct: 5.0,
@@ -122,6 +125,13 @@ class PsuCalculatorService {
           logError: parsed.logError ?? true,
           soundAlert: parsed.soundAlert ?? true,
         };
+      }
+      const pThresh = localStorage.getItem('systempulse_psu_power_alert_threshold_pct');
+      if (pThresh !== null) {
+        const parsedThresh = Number(pThresh);
+        if (Number.isFinite(parsedThresh) && parsedThresh >= 1 && parsedThresh <= 100) {
+          this.powerAlertThresholdPct = Number(parsedThresh.toFixed(1));
+        }
       }
     } catch {}
   }
@@ -184,6 +194,22 @@ class PsuCalculatorService {
     return this.railDeviationPct;
   }
 
+  public getPowerAlertThresholdPct(): number {
+    return this.powerAlertThresholdPct;
+  }
+
+  public setPowerAlertThresholdPct(val: number): number {
+    const parsed = Number(val);
+    const clamped = Number.isFinite(parsed)
+      ? Number(Math.max(1, Math.min(100, parsed)).toFixed(1))
+      : 95;
+    this.powerAlertThresholdPct = clamped;
+    try {
+      localStorage.setItem('systempulse_psu_power_alert_threshold_pct', String(this.powerAlertThresholdPct));
+    } catch {}
+    return this.powerAlertThresholdPct;
+  }
+
   public setHighPowerSimulation(enabled: boolean): void {
     this.highPowerSimulationEnabled = Boolean(enabled);
   }
@@ -202,6 +228,43 @@ class PsuCalculatorService {
 
   public getStressProfileMeta(): PsuStressProfileMeta {
     return PSU_STRESS_PROFILES.find((p) => p.id === this.stressProfile) || PSU_STRESS_PROFILES[0];
+  }
+
+  public seedPowerDrawHistory1m(baselineW: number, nowMs: number = Date.now()): void {
+    if (this.powerDrawHistory1m.length >= 4) return;
+    const safeBase = Math.max(40, Math.round(Number.isFinite(baselineW) ? baselineW : 120));
+    const seeded: PowerDrawSample[] = [];
+    for (let i = 23; i >= 0; i--) {
+      const ts = nowMs - i * 2500;
+      const jitter = Math.round(Math.sin((23 - i) * 0.45) * 6 + Math.cos((23 - i) * 0.9) * 3);
+      seeded.push({
+        timestamp: ts,
+        totalPowerW: Math.max(35, safeBase + jitter),
+      });
+    }
+    this.powerDrawHistory1m = seeded;
+  }
+
+  public recordPowerDrawSample(totalSystemPowerW: number, nowMs: number = Date.now()): void {
+    if (!Number.isFinite(totalSystemPowerW) || totalSystemPowerW < 0) return;
+    const last = this.powerDrawHistory1m[this.powerDrawHistory1m.length - 1];
+    const roundedW = Math.round(totalSystemPowerW);
+    if (last && nowMs - last.timestamp < 500 && Math.abs(last.totalPowerW - roundedW) < 2) {
+      return;
+    }
+    const cutoff = nowMs - 65_000;
+    const pruned = this.powerDrawHistory1m.filter((s) => s.timestamp >= cutoff).slice(-119);
+    pruned.push({ timestamp: nowMs, totalPowerW: roundedW });
+    this.powerDrawHistory1m = pruned;
+  }
+
+  public getPowerDrawSamples1m(nowMs: number = Date.now()): PowerDrawSample[] {
+    const cutoff = nowMs - 60_000;
+    return this.powerDrawHistory1m.filter((s) => s.timestamp >= cutoff);
+  }
+
+  public clearPowerDrawHistory(): void {
+    this.powerDrawHistory1m = [];
   }
 
   public getSimulatedRailsForProfile(baseLoadPct: number): {

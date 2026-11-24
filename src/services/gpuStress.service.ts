@@ -326,6 +326,34 @@ export const GPU_SCENE_CATALOG: GpuSceneCatalogItem[] = [
     targetUnit: 'Smoothed Particle Hydrodynamics',
     description: 'Tysiące cząstek płynu Smoothed Particle Hydrodynamics z kolizjami naczyń, ciśnieniem hydrostatycznym i dynamicznym cieniowaniem.',
   },
+  {
+    id: 'rt_reflections_hall',
+    name: 'Sala Lustrzanych Odbić PBR & Chromowane Rzeźby 4K',
+    shortName: 'Lustra RT PBR',
+    targetUnit: 'Clearcoat Mirror + Specular IBL',
+    description: 'Obsydianowa hala odbić z chromowanymi rzeźbami PBR, podwójnym odbiciem podłogowym, neonowymi łukami i dynamicznymi światłami.',
+  },
+  {
+    id: 'volumetric_clouds_4k',
+    name: 'Wolumetryczne Chmury Burzowe Cumulonimbus 4K',
+    shortName: 'Chmury 4K',
+    targetUnit: 'Raymarched Cloud Scattering + Lightning',
+    description: 'Pełnoekranowy raymarching chmur burzowych z rozpraszaniem Henyey-Greensteina, promieniami słońca i wewnętrznymi błyskawicami.',
+  },
+  {
+    id: 'cyber_rain_neon',
+    name: 'Cyber-Metropolia w Deszczu & Odbicia Neonowe',
+    shortName: 'Cyber Deszcz',
+    targetUnit: 'Instanced Rain + Wet Street Specular',
+    description: 'Nocna metropolia z tysiącami kropel deszczu, mokrym lustrzanym asfaltem, neonowymi hologramami i kałużami uderzeń.',
+  },
+  {
+    id: 'magma_caldera_sim',
+    name: 'Symulacja Kaldery Magmy & Erupcja Piroklastyczna',
+    shortName: 'Kaldera Magmy',
+    targetUnit: 'Domain-Warped Magma + Lava Bombs',
+    description: 'Wrząca kaldera wulkaniczna z proceduralnym shaderem płynącej magmy, bazaltowym kraterem i tysiącami wyrzucanych bomb lawowych.',
+  },
 ];
 
 const PRESET_CONFIG: Record<GpuLoadPreset, { instances: number; label: string; powerBias: number }> = {
@@ -1223,6 +1251,15 @@ export class GpuStressEngine {
   private temporalCheckerGroup: THREE.Group | null = null;
   private sphFluidMesh: THREE.InstancedMesh | null = null;
   private sphFluidData: Float32Array | null = null;
+  private rtHallGroup: THREE.Group | null = null;
+  private volumetricCloudMat: THREE.ShaderMaterial | null = null;
+  private cyberRainGroup: THREE.Group | null = null;
+  private cyberRainMesh: THREE.InstancedMesh | null = null;
+  private cyberRainData: Float32Array | null = null;
+  private magmaCalderaGroup: THREE.Group | null = null;
+  private magmaCalderaMat: THREE.ShaderMaterial | null = null;
+  private magmaBombsMesh: THREE.InstancedMesh | null = null;
+  private magmaBombsData: Float32Array | null = null;
 
   private isSoftwareGl = false;
   private rendererName = 'WebGL GPU';
@@ -1317,13 +1354,20 @@ export class GpuStressEngine {
     const width = Math.max(320, container.clientWidth);
     const height = Math.max(260, container.clientHeight);
 
-    const renderer = new THREE.WebGLRenderer({
-      antialias: !this.isSoftwareGl,
-      powerPreference: 'high-performance',
-    });
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({
+        antialias: !this.isSoftwareGl,
+        powerPreference: 'high-performance',
+      });
+    } catch {
+      container.innerHTML =
+        '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#94a3b8;font-family:var(--font-mono);font-size:13px;padding:16px;text-align:center;">Brak dostępnego kontekstu WebGL w tym środowisku.</div>';
+      return;
+    }
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.12;
+    renderer.toneMappingExposure = 1.18;
     renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
     renderer.setSize(width, height);
     renderer.shadowMap.enabled = !this.isSoftwareGl;
@@ -1332,15 +1376,25 @@ export class GpuStressEngine {
     container.appendChild(renderer.domElement);
     this.renderer = renderer;
 
+    renderer.domElement.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault();
+      this.stop();
+    });
+
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x060911);
-    scene.fog = new THREE.FogExp2(0x060911, 0.036);
+    scene.fog = new THREE.FogExp2(0x060911, 0.032);
     this.scene = scene;
 
-    const pmrem = new THREE.PMREMGenerator(renderer);
-    this.envRenderTarget = pmrem.fromScene(new RoomEnvironment(), 0.04);
-    scene.environment = this.envRenderTarget.texture;
-    pmrem.dispose();
+    try {
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      this.envRenderTarget = pmrem.fromScene(new RoomEnvironment(), 0.04);
+      scene.environment = this.envRenderTarget.texture;
+      scene.environmentIntensity = 1.38;
+      pmrem.dispose();
+    } catch {
+      this.envRenderTarget = null;
+    }
 
     const camera = new THREE.PerspectiveCamera(48, width / height, 0.1, 160);
     camera.position.set(0, 3.3, 7.6);
@@ -1349,25 +1403,25 @@ export class GpuStressEngine {
 
     this.raymarchOrthoCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
-    // Shared balanced 3-point lighting rig
-    const hemi = new THREE.HemisphereLight(0xa5d8ff, 0x1e293b, 1.35);
+    // Shared balanced 3-point cinematic lighting rig
+    const hemi = new THREE.HemisphereLight(0xb8e2ff, 0x1a2639, 1.45);
     scene.add(hemi);
 
-    const keyLight = new THREE.DirectionalLight(0xfff1dc, 2.6);
+    const keyLight = new THREE.DirectionalLight(0xfff1dc, 2.85);
     keyLight.position.set(6, 9, 6);
     if (!this.isSoftwareGl) {
       keyLight.castShadow = true;
-      keyLight.shadow.mapSize.set(1024, 1024);
+      keyLight.shadow.mapSize.set(2048, 2048);
       keyLight.shadow.camera.left = -6;
       keyLight.shadow.camera.right = 6;
       keyLight.shadow.camera.top = 6;
       keyLight.shadow.camera.bottom = -6;
-      keyLight.shadow.bias = -0.0005;
+      keyLight.shadow.bias = -0.0004;
       keyLight.shadow.normalBias = 0.02;
     }
     scene.add(keyLight);
 
-    const rimLight = new THREE.DirectionalLight(0x06b6d4, 1.9);
+    const rimLight = new THREE.DirectionalLight(0x06b6d4, 2.15);
     rimLight.position.set(-7, 4, -6);
     scene.add(rimLight);
 
@@ -1469,6 +1523,15 @@ export class GpuStressEngine {
     this.temporalCheckerGroup = null;
     this.sphFluidMesh = null;
     this.sphFluidData = null;
+    this.rtHallGroup = null;
+    this.volumetricCloudMat = null;
+    this.cyberRainGroup = null;
+    this.cyberRainMesh = null;
+    this.cyberRainData = null;
+    this.magmaCalderaGroup = null;
+    this.magmaCalderaMat = null;
+    this.magmaBombsMesh = null;
+    this.magmaBombsData = null;
   }
 
   private buildActiveScene(): void {
@@ -1616,6 +1679,18 @@ export class GpuStressEngine {
         break;
       case 'sph_fluid_compute':
         this.buildSphFluidComputeScene(group);
+        break;
+      case 'rt_reflections_hall':
+        this.buildRtReflectionsHallScene(group);
+        break;
+      case 'volumetric_clouds_4k':
+        this.buildVolumetricClouds4kScene(group);
+        break;
+      case 'cyber_rain_neon':
+        this.buildCyberRainNeonScene(group);
+        break;
+      case 'magma_caldera_sim':
+        this.buildMagmaCalderaSimScene(group);
         break;
     }
   }
@@ -4327,6 +4402,499 @@ export class GpuStressEngine {
     this.metrics.instanceCount = count;
   }
 
+  /* === SCENE 45: Ray-Traced Mirror Reflections Hall & Chrome Clearcoat Sculptures === */
+  private buildRtReflectionsHallScene(group: THREE.Group): void {
+    if (!this.camera) return;
+    this.camera.position.set(0, 3.2, 10.5);
+    this.camera.lookAt(0, 1.4, 0);
+
+    const hall = new THREE.Group();
+
+    // Glossy obsidian mirror floor with subtle golden grid veins
+    const floorCanvas = document.createElement('canvas');
+    floorCanvas.width = 512;
+    floorCanvas.height = 512;
+    const fctx = floorCanvas.getContext('2d')!;
+    fctx.fillStyle = '#060912';
+    fctx.fillRect(0, 0, 512, 512);
+    fctx.strokeStyle = 'rgba(56, 189, 248, 0.25)';
+    fctx.lineWidth = 2;
+    for (let i = 0; i <= 512; i += 64) {
+      fctx.beginPath();
+      fctx.moveTo(i, 0);
+      fctx.lineTo(i, 512);
+      fctx.stroke();
+      fctx.beginPath();
+      fctx.moveTo(0, i);
+      fctx.lineTo(512, i);
+      fctx.stroke();
+    }
+    const floorTex = new THREE.CanvasTexture(floorCanvas);
+    floorTex.wrapS = floorTex.wrapT = THREE.RepeatWrapping;
+    floorTex.repeat.set(6, 6);
+    floorTex.colorSpace = THREE.SRGBColorSpace;
+
+    const mirrorFloor = new THREE.Mesh(
+      new THREE.CircleGeometry(14, 64),
+      new THREE.MeshPhysicalMaterial({
+        map: floorTex,
+        color: 0x0f172a,
+        metalness: 0.94,
+        roughness: 0.06,
+        clearcoat: 1.0,
+        clearcoatRoughness: 0.04,
+      })
+    );
+    mirrorFloor.rotation.x = -Math.PI / 2;
+    hall.add(mirrorFloor);
+
+    // Sculpted chrome & gold hero centerpiece + mirrored upside-down reflection underneath
+    const sculpture = new THREE.Group();
+    sculpture.name = 'rtCenterpiece';
+    const chromeMat = new THREE.MeshPhysicalMaterial({
+      color: 0xf8fafc,
+      metalness: 1.0,
+      roughness: 0.04,
+      clearcoat: 1.0,
+    });
+    const goldMat = new THREE.MeshPhysicalMaterial({
+      color: 0xfbbf24,
+      metalness: 1.0,
+      roughness: 0.08,
+      clearcoat: 1.0,
+    });
+    const cobaltMat = new THREE.MeshPhysicalMaterial({
+      color: 0x0ea5e9,
+      metalness: 0.92,
+      roughness: 0.06,
+      clearcoat: 1.0,
+      emissive: 0x0284c7,
+      emissiveIntensity: 0.35,
+    });
+
+    const knot = new THREE.Mesh(new THREE.TorusKnotGeometry(1.35, 0.34, 180, 28), chromeMat);
+    knot.position.y = 2.4;
+    const outerRing = new THREE.Mesh(new THREE.TorusGeometry(2.55, 0.08, 16, 84), goldMat);
+    outerRing.position.y = 2.4;
+    const innerCore = new THREE.Mesh(new THREE.IcosahedronGeometry(0.68, 2), cobaltMat);
+    innerCore.position.y = 2.4;
+    sculpture.add(knot, outerRing, innerCore);
+    hall.add(sculpture);
+
+    // Fake planar reflection mirror clone below glass floor for crisp raytraced illusion
+    const reflection = sculpture.clone();
+    reflection.name = 'rtReflection';
+    reflection.scale.y = -1;
+    reflection.position.y = -0.04;
+    reflection.traverse((ch) => {
+      if ((ch as THREE.Mesh).isMesh) {
+        const m = ((ch as THREE.Mesh).material as THREE.MeshPhysicalMaterial).clone();
+        m.transparent = true;
+        m.opacity = 0.34;
+        (ch as THREE.Mesh).material = m;
+      }
+    });
+    hall.add(reflection);
+
+    // 8 Illuminated Cathedral Mirror Columns + Neon Halo Arches
+    const pillarMat = new THREE.MeshPhysicalMaterial({
+      color: 0x1e293b,
+      metalness: 0.95,
+      roughness: 0.12,
+      clearcoat: 0.9,
+    });
+    const archGeo = new THREE.TorusGeometry(6.8, 0.06, 10, 64, Math.PI);
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      const col = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.42, 6.2, 16), pillarMat);
+      col.position.set(Math.cos(a) * 6.8, 3.1, Math.sin(a) * 6.8);
+      const strip = new THREE.Mesh(
+        new THREE.BoxGeometry(0.08, 5.8, 0.08),
+        new THREE.MeshBasicMaterial({ color: i % 2 === 0 ? 0x38bdf8 : 0xf43f5e })
+      );
+      strip.position.set(Math.cos(a) * 6.38, 3.1, Math.sin(a) * 6.38);
+      hall.add(col, strip);
+      if (i < 4) {
+        const arch = new THREE.Mesh(
+          archGeo,
+          new THREE.MeshBasicMaterial({ color: i % 2 === 0 ? 0x06b6d4 : 0xfbbf24 })
+        );
+        arch.rotation.y = (i / 4) * Math.PI;
+        arch.position.y = 0.05;
+        hall.add(arch);
+      }
+    }
+
+    // Orbiting Chrome Mirror Spheres
+    const count = Math.min(450, Math.max(96, Math.round(PRESET_CONFIG[this.preset].instances * 0.08)));
+    const orbMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(0.22, 16, 16), chromeMat, count);
+    orbMesh.name = 'rtMirrorOrbs';
+    for (let i = 0; i < count; i++) {
+      const a = (i / count) * Math.PI * 10;
+      const rad = 3.2 + (i % 6) * 0.85;
+      _dummyObj.position.set(Math.cos(a) * rad, 0.8 + ((i * 7) % 10) * 0.45, Math.sin(a) * rad);
+      _dummyObj.scale.setScalar(0.65 + (i % 4) * 0.25);
+      _dummyObj.updateMatrix();
+      orbMesh.setMatrixAt(i, _dummyObj.matrix);
+    }
+    orbMesh.instanceMatrix.needsUpdate = true;
+    hall.add(orbMesh);
+
+    const pLightA = new THREE.PointLight(0x38bdf8, 32, 22);
+    pLightA.position.set(4.5, 4.2, 4.5);
+    const pLightB = new THREE.PointLight(0xf43f5e, 28, 22);
+    pLightB.position.set(-4.5, 3.8, -4.5);
+    hall.add(pLightA, pLightB);
+
+    group.add(hall);
+    this.rtHallGroup = hall;
+    this.metrics.instanceCount = count;
+  }
+
+  /* === SCENE 46: Full-Screen 4K Raymarched Volumetric Cumulonimbus Storm Clouds + Lightning === */
+  private buildVolumetricClouds4kScene(group: THREE.Group): void {
+    if (!this.renderer) return;
+    const size = new THREE.Vector2();
+    this.renderer.getDrawingBufferSize(size);
+    const steps =
+      this.preset === 'ultra' ? 48 : this.preset === 'extreme' ? 38 : this.preset === 'high' ? 28 : 20;
+
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uTime: { value: 0 },
+        uResolution: { value: size },
+        uSteps: { value: steps },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: `
+        precision highp float;
+        uniform float uTime;
+        uniform vec2 uResolution;
+        uniform int uSteps;
+
+        float hash31(vec3 p) {
+          p = fract(p * 0.1031);
+          p += dot(p, p.yzx + 33.33);
+          return fract((p.x + p.y) * p.z);
+        }
+
+        float noise3(vec3 p) {
+          vec3 i = floor(p);
+          vec3 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          float n000 = hash31(i);
+          float n100 = hash31(i + vec3(1.0, 0.0, 0.0));
+          float n010 = hash31(i + vec3(0.0, 1.0, 0.0));
+          float n110 = hash31(i + vec3(1.0, 1.0, 0.0));
+          float n001 = hash31(i + vec3(0.0, 0.0, 1.0));
+          float n101 = hash31(i + vec3(1.0, 0.0, 1.0));
+          float n011 = hash31(i + vec3(0.0, 1.0, 1.0));
+          float n111 = hash31(i + vec3(1.0, 1.0, 1.0));
+          return mix(
+            mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+            mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y),
+            f.z
+          );
+        }
+
+        float cloudFbm(vec3 p) {
+          float v = 0.0;
+          float a = 0.52;
+          for (int i = 0; i < 4; i++) {
+            v += a * noise3(p);
+            p = p * 2.04 + vec3(0.25, 0.12, -0.18);
+            a *= 0.48;
+          }
+          return v;
+        }
+
+        float cloudDensity(vec3 p) {
+          vec3 q = p * 0.24 + vec3(uTime * 0.14, 0.0, -uTime * 0.28);
+          float base = cloudFbm(q);
+          float heightMask = smoothstep(-2.4, -0.4, p.y) * smoothstep(3.8, 0.9, p.y);
+          return clamp((base - 0.44) * 2.4 * heightMask, 0.0, 1.0);
+        }
+
+        void main() {
+          vec2 uv = (gl_FragCoord.xy - 0.5 * uResolution.xy) / max(1.0, uResolution.y);
+          vec3 ro = vec3(sin(uTime * 0.18) * 1.4, -0.1 + cos(uTime * 0.22) * 0.35, 0.0);
+          vec3 rd = normalize(vec3(uv.x, uv.y + 0.06, -1.15));
+
+          vec3 sunDir = normalize(vec3(0.45, 0.34, -0.82));
+          float sunDot = max(dot(rd, sunDir), 0.0);
+
+          // Dramatic golden-hour storm sky gradient
+          vec3 skyCol = mix(vec3(0.14, 0.22, 0.38), vec3(0.03, 0.07, 0.18), clamp(rd.y * 1.6 + 0.35, 0.0, 1.0));
+          skyCol += vec3(1.0, 0.62, 0.28) * pow(sunDot, 7.0) * 0.72;
+          skyCol += vec3(1.0, 0.92, 0.76) * pow(sunDot, 64.0) * 1.8;
+
+          // Periodic volumetric storm lightning pulse inside the thunderhead
+          float flashCycle = fract(uTime * 0.31);
+          float lightning = smoothstep(0.0, 0.02, flashCycle) * smoothstep(0.08, 0.02, flashCycle) * 2.2;
+          vec3 boltPos = vec3(sin(floor(uTime * 0.31) * 12.4) * 3.5, 0.8, -8.5);
+
+          vec3 accumCol = vec3(0.0);
+          float trans = 1.0;
+          float t = 1.6;
+          float stepLen = 11.5 / float(uSteps);
+
+          for (int i = 0; i < 48; i++) {
+            if (i >= uSteps || trans < 0.02) break;
+            vec3 p = ro + rd * t;
+            float dens = cloudDensity(p);
+            if (dens > 0.008) {
+              // Dual-sample directional sun lighting + internal lightning scatter
+              float lightSample = cloudDensity(p + sunDir * 0.95);
+              float sunShadow = exp(-lightSample * 2.6);
+              float hgPhase = 0.35 + 0.65 * pow(sunDot, 4.0);
+              vec3 cloudLight = mix(vec3(0.18, 0.24, 0.36), vec3(1.0, 0.82, 0.58), sunShadow * hgPhase);
+              float boltDist = length(p - boltPos);
+              cloudLight += vec3(0.55, 0.82, 1.0) * lightning / (1.0 + boltDist * boltDist * 0.25);
+
+              float alpha = 1.0 - exp(-dens * stepLen * 1.35);
+              accumCol += trans * alpha * cloudLight;
+              trans *= (1.0 - alpha);
+            }
+            t += stepLen;
+          }
+
+          vec3 col = accumCol + skyCol * trans;
+          col = col / (col + vec3(0.85));
+          gl_FragColor = vec4(pow(col, vec3(0.92)), 1.0);
+        }
+      `,
+      depthWrite: false,
+      depthTest: false,
+    });
+
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+    group.add(quad);
+    this.volumetricCloudMat = mat;
+    this.metrics.instanceCount = steps * 256;
+  }
+
+  /* === SCENE 47: Cyber Rain Neon Metropolis & Wet Reflective Street === */
+  private buildCyberRainNeonScene(group: THREE.Group): void {
+    if (!this.camera) return;
+    this.camera.position.set(0, 3.0, 11.5);
+    this.camera.lookAt(0, 2.2, -4);
+
+    const city = new THREE.Group();
+
+    // Wet neon-reflective avenue
+    const roadMat = new THREE.MeshPhysicalMaterial({
+      color: 0x070a14,
+      metalness: 0.85,
+      roughness: 0.09,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.05,
+    });
+    const road = new THREE.Mesh(new THREE.PlaneGeometry(24, 34), roadMat);
+    road.rotation.x = -Math.PI / 2;
+    city.add(road);
+
+    // Center neon lane strips
+    const laneMat = new THREE.MeshBasicMaterial({ color: 0x06b6d4 });
+    const laneL = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.03, 30), laneMat);
+    laneL.position.set(-2.4, 0.02, -2);
+    const laneR = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.03, 30), new THREE.MeshBasicMaterial({ color: 0xec4899 }));
+    laneR.position.set(2.4, 0.02, -2);
+    city.add(laneL, laneR);
+
+    // Flanking Cyberpunk Neon Towers + Glowing Holosigns
+    const bMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, metalness: 0.8, roughness: 0.28 });
+    const signColors = [0x06b6d4, 0xec4899, 0xa855f7, 0xfacc15];
+    for (let i = 0; i < 16; i++) {
+      const side = i % 2 === 0 ? -1 : 1;
+      const row = Math.floor(i / 2);
+      const h = 5.5 + (row % 4) * 2.4;
+      const bld = new THREE.Mesh(new THREE.BoxGeometry(2.8, h, 2.8), bMat);
+      bld.position.set(side * (5.6 + (row % 2) * 1.4), h / 2, 8 - row * 3.4);
+      const neonSign = new THREE.Mesh(
+        new THREE.BoxGeometry(0.15, 1.8, 1.6),
+        new THREE.MeshBasicMaterial({ color: signColors[i % signColors.length] })
+      );
+      neonSign.position.set(side * 4.1, 2.6 + (i % 3) * 1.2, 8 - row * 3.4);
+      city.add(bld, neonSign);
+    }
+
+    // High-density Instanced Rain Streaks
+    const rainCount = Math.min(8000, Math.max(1200, Math.round(PRESET_CONFIG[this.preset].instances * 0.45)));
+    const rainGeo = new THREE.BoxGeometry(0.022, 0.65, 0.022);
+    const rainMat = new THREE.MeshBasicMaterial({
+      color: 0xbae6fd,
+      transparent: true,
+      opacity: 0.62,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const rainMesh = new THREE.InstancedMesh(rainGeo, rainMat, rainCount);
+    const rainData = new Float32Array(rainCount * 4);
+    for (let i = 0; i < rainCount; i++) {
+      const x = (Math.random() - 0.5) * 18;
+      const y = Math.random() * 14;
+      const z = (Math.random() - 0.5) * 24;
+      const spd = 14 + Math.random() * 12;
+      rainData[i * 4] = x;
+      rainData[i * 4 + 1] = y;
+      rainData[i * 4 + 2] = z;
+      rainData[i * 4 + 3] = spd;
+      _dummyObj.position.set(x, y, z);
+      _dummyObj.scale.setScalar(1);
+      _dummyObj.updateMatrix();
+      rainMesh.setMatrixAt(i, _dummyObj.matrix);
+    }
+    rainMesh.instanceMatrix.needsUpdate = true;
+    city.add(rainMesh);
+
+    const pA = new THREE.PointLight(0x06b6d4, 42, 24);
+    pA.position.set(-4, 4.5, 2);
+    const pB = new THREE.PointLight(0xec4899, 42, 24);
+    pB.position.set(4, 4.5, -4);
+    city.add(pA, pB);
+
+    group.add(city);
+    this.cyberRainGroup = city;
+    this.cyberRainMesh = rainMesh;
+    this.cyberRainData = rainData;
+    this.metrics.instanceCount = rainCount;
+  }
+
+  /* === SCENE 48: Magma Caldera Shader + Ballistic Pyroclastic Volcanic Eruption === */
+  private buildMagmaCalderaSimScene(group: THREE.Group): void {
+    if (!this.camera) return;
+    this.camera.position.set(0, 4.8, 11.2);
+    this.camera.lookAt(0, 1.2, 0);
+
+    const caldera = new THREE.Group();
+
+    // Animated Domain-Warped GLSL Molten Magma Lake
+    const magmaMat = new THREE.ShaderMaterial({
+      uniforms: { uTime: { value: 0 } },
+      vertexShader: `
+        uniform float uTime;
+        varying vec2 vUv;
+        varying float vWave;
+        void main() {
+          vUv = uv;
+          vec3 p = position;
+          float w = sin(p.x * 1.1 + uTime * 1.6) * cos(p.y * 1.1 - uTime * 1.2) * 0.24;
+          p.z += w;
+          vWave = w;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+        }
+      `,
+      fragmentShader: `
+        precision highp float;
+        uniform float uTime;
+        varying vec2 vUv;
+        varying float vWave;
+        float hash21(vec2 p) {
+          p = fract(p * vec2(123.34, 456.21));
+          p += dot(p, p + 45.32);
+          return fract(p.x * p.y);
+        }
+        float noise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          return mix(
+            mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x),
+            mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x),
+            f.y
+          );
+        }
+        float fbm(vec2 p) {
+          float v = 0.0;
+          float a = 0.5;
+          for (int i = 0; i < 4; i++) {
+            v += a * noise(p);
+            p = mat2(1.6, 1.2, -1.2, 1.6) * p;
+            a *= 0.5;
+          }
+          return v;
+        }
+        void main() {
+          vec2 centered = (vUv - 0.5) * 2.0;
+          float r = length(centered);
+          vec2 uv = centered * 3.4;
+          float warp = fbm(uv + vec2(uTime * 0.22, -uTime * 0.18));
+          float flow = fbm(uv * 1.8 + vec2(warp * 2.1, -warp * 1.7));
+          float heat = smoothstep(0.32, 0.72, flow + (1.0 - r) * 0.35 + vWave * 0.4);
+          vec3 crust = vec3(0.08, 0.05, 0.05);
+          vec3 lavaRed = vec3(1.0, 0.22, 0.02);
+          vec3 lavaGold = vec3(1.0, 0.88, 0.34);
+          vec3 col = mix(crust, lavaRed * 1.4, heat);
+          col = mix(col, lavaGold * 2.1, smoothstep(0.65, 0.92, heat));
+          gl_FragColor = vec4(col, 1.0);
+        }
+      `,
+    });
+    const magmaLake = new THREE.Mesh(new THREE.CircleGeometry(6.4, 64), magmaMat);
+    magmaLake.rotation.x = -Math.PI / 2;
+    caldera.add(magmaLake);
+
+    // Sculpted Basalt Crater Rim Rocks
+    const rockMat = new THREE.MeshStandardMaterial({
+      color: 0x1c1412,
+      emissive: 0x7c2d12,
+      emissiveIntensity: 0.28,
+      roughness: 0.92,
+      metalness: 0.12,
+    });
+    const rockGeo = new THREE.DodecahedronGeometry(1.5, 1);
+    for (let i = 0; i < 20; i++) {
+      const a = (i / 20) * Math.PI * 2;
+      const rock = new THREE.Mesh(rockGeo, rockMat);
+      rock.position.set(Math.cos(a) * 7.2, 0.8 + (i % 3) * 0.45, Math.sin(a) * 7.2);
+      rock.scale.set(1.5 + (i % 3) * 0.4, 1.4 + (i % 4) * 0.5, 1.4);
+      rock.rotation.set(i * 0.5, a, i * 0.3);
+      caldera.add(rock);
+    }
+
+    // Ballistic Erupting Glowing Lava Bombs & Pyroclastic Embers
+    const bombCount = Math.min(4500, Math.max(800, Math.round(PRESET_CONFIG[this.preset].instances * 0.35)));
+    const bombGeo = new THREE.OctahedronGeometry(0.14, 0);
+    const bombMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const bombMesh = new THREE.InstancedMesh(bombGeo, bombMat, bombCount);
+    const bombData = new Float32Array(bombCount * 6);
+    for (let i = 0; i < bombCount; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const spread = 0.6 + Math.random() * 2.8;
+      bombData[i * 6] = Math.cos(a) * (Math.random() * 1.4);
+      bombData[i * 6 + 1] = Math.random() * 5.2;
+      bombData[i * 6 + 2] = Math.sin(a) * (Math.random() * 1.4);
+      bombData[i * 6 + 3] = Math.cos(a) * spread;
+      bombData[i * 6 + 4] = 4.2 + Math.random() * 5.5;
+      bombData[i * 6 + 5] = Math.sin(a) * spread;
+      _colorScratch.setHex(i % 3 === 0 ? 0xfef08a : i % 3 === 1 ? 0xf97316 : 0xef4444);
+      bombMesh.setColorAt(i, _colorScratch);
+    }
+    if (bombMesh.instanceColor) bombMesh.instanceColor.needsUpdate = true;
+    caldera.add(bombMesh);
+
+    const lavaGlow = new THREE.PointLight(0xff5511, 58, 28);
+    lavaGlow.position.set(0, 2.2, 0);
+    caldera.add(lavaGlow);
+
+    group.add(caldera);
+    this.magmaCalderaGroup = caldera;
+    this.magmaCalderaMat = magmaMat;
+    this.magmaBombsMesh = bombMesh;
+    this.magmaBombsData = bombData;
+    this.metrics.instanceCount = bombCount;
+  }
+
   private buildGpuCoreRig(maxAniso: number): THREE.Group {
     const group = new THREE.Group();
 
@@ -4525,17 +5093,22 @@ export class GpuStressEngine {
 
   private renderSingleFrame(): void {
     if (!this.renderer || !this.scene || !this.camera) return;
-    if (
-      (this.sceneMode === 'raymarching' ||
-        this.sceneMode === 'menger_sponge' ||
-        this.sceneMode === 'volumetric_nebula' ||
-        this.sceneMode === 'blackhole_lensing' ||
-        this.sceneMode === 'fractal_julia4d') &&
-      this.raymarchOrthoCam
-    ) {
-      this.renderer.render(this.scene, this.raymarchOrthoCam);
-    } else {
-      this.renderer.render(this.scene, this.camera);
+    try {
+      if (
+        (this.sceneMode === 'raymarching' ||
+          this.sceneMode === 'menger_sponge' ||
+          this.sceneMode === 'volumetric_nebula' ||
+          this.sceneMode === 'blackhole_lensing' ||
+          this.sceneMode === 'fractal_julia4d' ||
+          this.sceneMode === 'volumetric_clouds_4k') &&
+        this.raymarchOrthoCam
+      ) {
+        this.renderer.render(this.scene, this.raymarchOrthoCam);
+      } else {
+        this.renderer.render(this.scene, this.camera);
+      }
+    } catch {
+      this.stop();
     }
   }
 
@@ -5390,6 +5963,88 @@ export class GpuStressEngine {
         this.camera.position.set(Math.sin(a) * 9.2, 2.9 + Math.sin(elapsedSec * 0.35) * 0.7, Math.cos(a) * 9.2);
         this.camera.lookAt(0, 0.75, 0);
       }
+    } else if (this.sceneMode === 'rt_reflections_hall') {
+      if (this.rtHallGroup) {
+        const piece = this.rtHallGroup.getObjectByName('rtCenterpiece');
+        const refl = this.rtHallGroup.getObjectByName('rtReflection');
+        if (piece) {
+          piece.rotation.y = elapsedSec * 0.58;
+          piece.rotation.z = Math.sin(elapsedSec * 0.7) * 0.14;
+        }
+        if (refl && piece) {
+          refl.rotation.y = piece.rotation.y;
+          refl.rotation.z = -piece.rotation.z;
+        }
+        const orbs = this.rtHallGroup.getObjectByName('rtMirrorOrbs');
+        if (orbs) orbs.rotation.y = -elapsedSec * 0.28;
+      }
+      if (this.camera) {
+        const a = elapsedSec * 0.24;
+        this.camera.position.set(Math.sin(a) * 10.2, 2.6 + Math.sin(elapsedSec * 0.42) * 0.85, Math.cos(a) * 10.2);
+        this.camera.lookAt(0, 1.8, 0);
+      }
+    } else if (this.sceneMode === 'volumetric_clouds_4k') {
+      if (this.volumetricCloudMat) {
+        this.volumetricCloudMat.uniforms.uTime.value = elapsedSec;
+      }
+    } else if (this.sceneMode === 'cyber_rain_neon') {
+      if (this.cyberRainMesh && this.cyberRainData && updateCpuHeavy) {
+        const n = this.cyberRainMesh.count;
+        const d = this.cyberRainData;
+        const stepDt = Math.min(0.035, Math.max(0.004, dtSec));
+        for (let i = 0; i < n; i++) {
+          const base = i * 4;
+          let y = d[base + 1] - d[base + 3] * stepDt;
+          if (y < 0.05) y = 13.5 + (i % 7) * 0.35;
+          d[base + 1] = y;
+          _dummyObj.position.set(d[base], y, d[base + 2]);
+          _dummyObj.scale.setScalar(1);
+          _dummyObj.updateMatrix();
+          this.cyberRainMesh.setMatrixAt(i, _dummyObj.matrix);
+        }
+        this.cyberRainMesh.instanceMatrix.needsUpdate = true;
+      }
+      if (this.camera) {
+        this.camera.position.set(Math.sin(elapsedSec * 0.35) * 2.2, 2.6 + Math.sin(elapsedSec * 0.5) * 0.35, 10.8);
+        this.camera.lookAt(0, 2.4, -5);
+      }
+    } else if (this.sceneMode === 'magma_caldera_sim') {
+      if (this.magmaCalderaMat) {
+        this.magmaCalderaMat.uniforms.uTime.value = elapsedSec;
+      }
+      if (this.magmaBombsMesh && this.magmaBombsData && updateCpuHeavy) {
+        const n = this.magmaBombsMesh.count;
+        const d = this.magmaBombsData;
+        const stepDt = Math.min(0.03, Math.max(0.004, dtSec));
+        for (let i = 0; i < n; i++) {
+          const base = i * 6;
+          d[base] += d[base + 3] * stepDt;
+          d[base + 1] += d[base + 4] * stepDt;
+          d[base + 2] += d[base + 5] * stepDt;
+          d[base + 4] -= 7.8 * stepDt;
+          if (d[base + 1] < 0.05) {
+            const a = ((i * 2.39996 + elapsedSec) % (Math.PI * 2));
+            const spread = 0.6 + (i % 10) * 0.28;
+            d[base] = Math.cos(a) * 0.8;
+            d[base + 1] = 0.15;
+            d[base + 2] = Math.sin(a) * 0.8;
+            d[base + 3] = Math.cos(a) * spread;
+            d[base + 4] = 4.6 + (i % 7) * 0.85;
+            d[base + 5] = Math.sin(a) * spread;
+          }
+          _dummyObj.position.set(d[base], d[base + 1], d[base + 2]);
+          _dummyObj.rotation.set(elapsedSec * 2 + i, elapsedSec * 1.5, 0);
+          _dummyObj.scale.setScalar(0.75 + (i % 4) * 0.25);
+          _dummyObj.updateMatrix();
+          this.magmaBombsMesh.setMatrixAt(i, _dummyObj.matrix);
+        }
+        this.magmaBombsMesh.instanceMatrix.needsUpdate = true;
+      }
+      if (this.camera) {
+        const a = elapsedSec * 0.24;
+        this.camera.position.set(Math.sin(a) * 11.2, 4.6 + Math.sin(elapsedSec * 0.4) * 0.9, Math.cos(a) * 11.2);
+        this.camera.lookAt(0, 1.4, 0);
+      }
     }
   }
 
@@ -5540,7 +6195,8 @@ export class GpuStressEngine {
         this.sceneMode === 'menger_sponge' ||
         this.sceneMode === 'volumetric_nebula' ||
         this.sceneMode === 'blackhole_lensing' ||
-        this.sceneMode === 'fractal_julia4d'
+        this.sceneMode === 'fractal_julia4d' ||
+        this.sceneMode === 'volumetric_clouds_4k'
           ? 240
           : 42;
       const fp32Ops = curFps * (pixels * shaderFlopsPerPx + triCount * 140);
@@ -5613,6 +6269,11 @@ export class GpuStressEngine {
       const sz = new THREE.Vector2();
       this.renderer.getDrawingBufferSize(sz);
       this.julia4dMat.uniforms.uResolution.value.copy(sz);
+    }
+    if (this.volumetricCloudMat) {
+      const sz = new THREE.Vector2();
+      this.renderer.getDrawingBufferSize(sz);
+      this.volumetricCloudMat.uniforms.uResolution.value.copy(sz);
     }
     if (!this.running && this.scene) {
       this.renderSingleFrame();

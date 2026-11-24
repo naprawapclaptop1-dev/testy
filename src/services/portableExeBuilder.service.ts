@@ -8,6 +8,8 @@
  *    oraz oknem App-Mode z odblokowanym limitem FPS (--disable-frame-rate-limit --disable-gpu-vsync)
  */
 
+import { isHostedOnExeBridge } from './localBridge';
+
 interface ZipEntryInput {
   name: string;
   content: string;
@@ -72,7 +74,9 @@ export async function preloadPortableAssets(): Promise<void> {
   return preloadPromise;
 }
 
-void preloadPortableAssets();
+if (isHostedOnExeBridge()) {
+  void preloadPortableAssets();
+}
 
 const CRC_TABLE = (() => {
   const table = new Uint32Array(256);
@@ -443,9 +447,28 @@ namespace SystemPulseProSetup
 }
 `;
 
+  const csprojContent = `<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <AssemblyName>SystemPulse-Pro</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Management" Version="8.0.0" />
+  </ItemGroup>
+</Project>
+`;
+
   const csharpSource = `using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
+using System.Management;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
@@ -457,6 +480,7 @@ namespace SystemPulsePro
     static class Program
     {
         private static string cachedEdidJson = null;
+        private static string cachedFullHwJson = null;
         private static readonly byte[] speedtestPayload = new byte[2 * 1024 * 1024];
 
         static Program()
@@ -467,34 +491,340 @@ namespace SystemPulsePro
             }
         }
 
+        private static string EscapeJson(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            return s.Replace("\\\\", "\\\\\\\\").Replace("\\"", "\\\\\\"").Replace("\\r", " ").Replace("\\n", " ").Replace("\\t", " ");
+        }
+
+        private static string DecodeWmiAscii(object raw)
+        {
+            if (raw == null) return "";
+            ushort[] arr = raw as ushort[];
+            if (arr == null) return raw.ToString().Trim();
+            StringBuilder sb = new StringBuilder();
+            foreach (ushort c in arr)
+            {
+                if (c > 31 && c < 127) sb.Append((char)c);
+            }
+            return sb.ToString().Trim();
+        }
+
         private static string QueryLocalMonitorEdidJson()
         {
             if (!string.IsNullOrEmpty(cachedEdidJson)) return cachedEdidJson;
             try
             {
-                ProcessStartInfo psi = new ProcessStartInfo("pnputil.exe", "/enum-devices /class Monitor /connected");
-                psi.RedirectStandardOutput = true;
-                psi.UseShellExecute = false;
-                psi.CreateNoWindow = true;
-                using (Process p = Process.Start(psi))
+                StringBuilder sb = new StringBuilder();
+                sb.Append("{\\"edidMonitors\\":[");
+                bool first = true;
+                using (ManagementObjectSearcher s = new ManagementObjectSearcher("root\\\\WMI", "SELECT ManufacturerName, UserFriendlyName, ProductCodeID, SerialNumberID, YearOfManufacture FROM WmiMonitorID"))
                 {
-                    string output = p.StandardOutput.ReadToEnd();
-                    p.WaitForExit(2500);
-                    string escaped = output.Replace("\\\\", "\\\\\\\\").Replace("\\"", "\\\\\\"").Replace("\\r", "\\\\r").Replace("\\n", "\\\\n");
-                    cachedEdidJson = "{\\"pnpRaw\\":\\"" + escaped + "\\"}";
-                    return cachedEdidJson;
+                    foreach (ManagementObject obj in s.Get())
+                    {
+                        if (!first) sb.Append(",");
+                        first = false;
+                        string m = DecodeWmiAscii(obj["ManufacturerName"]);
+                        string n = DecodeWmiAscii(obj["UserFriendlyName"]);
+                        string p = DecodeWmiAscii(obj["ProductCodeID"]);
+                        string ser = DecodeWmiAscii(obj["SerialNumberID"]);
+                        int yr = obj["YearOfManufacture"] != null ? Convert.ToInt32(obj["YearOfManufacture"]) : 0;
+                        sb.Append("{\\"m\\":\\"").Append(EscapeJson(m))
+                          .Append("\\",\\"n\\":\\"").Append(EscapeJson(n))
+                          .Append("\\",\\"p\\":\\"").Append(EscapeJson(p))
+                          .Append("\\",\\"s\\":\\"").Append(EscapeJson(ser))
+                          .Append("\\",\\"y\\":").Append(yr).Append("}");
+                    }
                 }
+                sb.Append("]}");
+                cachedEdidJson = sb.ToString();
+                return cachedEdidJson;
             }
             catch
             {
-                return "{\\"pnpRaw\\":\\"\\"}";
+                return "{\\"edidMonitors\\":[]}";
             }
         }
 
-        private static string EscapeJson(string s)
+        private static byte[] QueryFullHardwareInventoryJson()
         {
-            if (string.IsNullOrEmpty(s)) return "";
-            return s.Replace("\\\\", "\\\\\\\\").Replace("\\"", "\\\\\\"").Replace("\\r", " ").Replace("\\n", " ").Replace("\\t", " ");
+            if (!string.IsNullOrEmpty(cachedFullHwJson))
+                return Encoding.UTF8.GetBytes(cachedFullHwJson);
+
+            try
+            {
+                StringBuilder sb = new StringBuilder();
+                sb.Append("{\\"os\\":\\"Windows\\",");
+
+                // ComputerSystem
+                string sysMfr = "", sysModel = "";
+                try
+                {
+                    using (ManagementObjectSearcher s = new ManagementObjectSearcher("SELECT Manufacturer, Model FROM Win32_ComputerSystem"))
+                    foreach (ManagementObject o in s.Get()) { sysMfr = Convert.ToString(o["Manufacturer"]); sysModel = Convert.ToString(o["Model"]); break; }
+                } catch {}
+                sb.Append("\\"sys\\":{\\"Manufacturer\\":\\"").Append(EscapeJson(sysMfr)).Append("\\",\\"Model\\":\\"").Append(EscapeJson(sysModel)).Append("\\"},");
+
+                // BaseBoard
+                string bMfr = "", bProd = "";
+                try
+                {
+                    using (ManagementObjectSearcher s = new ManagementObjectSearcher("SELECT Manufacturer, Product FROM Win32_BaseBoard"))
+                    foreach (ManagementObject o in s.Get()) { bMfr = Convert.ToString(o["Manufacturer"]); bProd = Convert.ToString(o["Product"]); break; }
+                } catch {}
+                sb.Append("\\"board\\":{\\"Manufacturer\\":\\"").Append(EscapeJson(bMfr)).Append("\\",\\"Product\\":\\"").Append(EscapeJson(bProd)).Append("\\"},");
+
+                // BIOS
+                string bioMfr = "", bioVer = "";
+                try
+                {
+                    using (ManagementObjectSearcher s = new ManagementObjectSearcher("SELECT Manufacturer, SMBIOSBIOSVersion FROM Win32_BIOS"))
+                    foreach (ManagementObject o in s.Get()) { bioMfr = Convert.ToString(o["Manufacturer"]); bioVer = Convert.ToString(o["SMBIOSBIOSVersion"]); break; }
+                } catch {}
+                sb.Append("\\"bios\\":{\\"Manufacturer\\":\\"").Append(EscapeJson(bioMfr)).Append("\\",\\"SMBIOSBIOSVersion\\":\\"").Append(EscapeJson(bioVer)).Append("\\"},");
+
+                // CPU
+                string cpuName = ""; int cores = 0, logical = 0, maxClk = 0;
+                try
+                {
+                    using (ManagementObjectSearcher s = new ManagementObjectSearcher("SELECT Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed FROM Win32_Processor"))
+                    foreach (ManagementObject o in s.Get())
+                    {
+                        cpuName = Convert.ToString(o["Name"]);
+                        cores = o["NumberOfCores"] != null ? Convert.ToInt32(o["NumberOfCores"]) : 0;
+                        logical = o["NumberOfLogicalProcessors"] != null ? Convert.ToInt32(o["NumberOfLogicalProcessors"]) : 0;
+                        maxClk = o["MaxClockSpeed"] != null ? Convert.ToInt32(o["MaxClockSpeed"]) : 0;
+                        break;
+                    }
+                } catch {}
+                sb.Append("\\"cpu\\":{\\"Name\\":\\"").Append(EscapeJson(cpuName)).Append("\\",\\"NumberOfCores\\":").Append(cores)
+                  .Append(",\\"NumberOfLogicalProcessors\\":").Append(logical).Append(",\\"MaxClockSpeed\\":").Append(maxClk).Append("},");
+
+                // GPUs
+                sb.Append("\\"gpu\\":[");
+                bool first = true;
+                try
+                {
+                    using (ManagementObjectSearcher s = new ManagementObjectSearcher("SELECT Name, AdapterRAM, DriverVersion FROM Win32_VideoController"))
+                    foreach (ManagementObject o in s.Get())
+                    {
+                        if (!first) sb.Append(",");
+                        first = false;
+                        long vram = o["AdapterRAM"] != null ? Convert.ToInt64(o["AdapterRAM"]) : 0;
+                        sb.Append("{\\"Name\\":\\"").Append(EscapeJson(Convert.ToString(o["Name"])))
+                          .Append("\\",\\"AdapterRAM\\":").Append(vram)
+                          .Append(",\\"DriverVersion\\":\\"").Append(EscapeJson(Convert.ToString(o["DriverVersion"]))).Append("\\"}");
+                    }
+                } catch {}
+                sb.Append("],");
+
+                // Physical RAM DIMMs
+                sb.Append("\\"ram\\":[");
+                first = true;
+                try
+                {
+                    using (ManagementObjectSearcher s = new ManagementObjectSearcher("SELECT DeviceLocator, BankLabel, Manufacturer, PartNumber, Capacity, Speed, SMBIOSMemoryType, SerialNumber FROM Win32_PhysicalMemory"))
+                    foreach (ManagementObject o in s.Get())
+                    {
+                        if (!first) sb.Append(",");
+                        first = false;
+                        long cap = o["Capacity"] != null ? Convert.ToInt64(o["Capacity"]) : 0;
+                        int spd = o["Speed"] != null ? Convert.ToInt32(o["Speed"]) : 0;
+                        int mtype = o["SMBIOSMemoryType"] != null ? Convert.ToInt32(o["SMBIOSMemoryType"]) : 0;
+                        sb.Append("{\\"DeviceLocator\\":\\"").Append(EscapeJson(Convert.ToString(o["DeviceLocator"])))
+                          .Append("\\",\\"BankLabel\\":\\"").Append(EscapeJson(Convert.ToString(o["BankLabel"])))
+                          .Append("\\",\\"Manufacturer\\":\\"").Append(EscapeJson(Convert.ToString(o["Manufacturer"])))
+                          .Append("\\",\\"PartNumber\\":\\"").Append(EscapeJson(Convert.ToString(o["PartNumber"])))
+                          .Append("\\",\\"Capacity\\":").Append(cap)
+                          .Append(",\\"Speed\\":").Append(spd)
+                          .Append(",\\"SMBIOSMemoryType\\":").Append(mtype)
+                          .Append(",\\"SerialNumber\\":\\"").Append(EscapeJson(Convert.ToString(o["SerialNumber"]))).Append("\\"}");
+                    }
+                } catch {}
+                sb.Append("],");
+
+                // Physical Disks
+                sb.Append("\\"disks\\":[");
+                first = true;
+                try
+                {
+                    using (ManagementObjectSearcher s = new ManagementObjectSearcher("SELECT Model, InterfaceType, MediaType, Size, Status, SerialNumber FROM Win32_DiskDrive"))
+                    foreach (ManagementObject o in s.Get())
+                    {
+                        if (!first) sb.Append(",");
+                        first = false;
+                        long sz = o["Size"] != null ? Convert.ToInt64(o["Size"]) : 0;
+                        sb.Append("{\\"Model\\":\\"").Append(EscapeJson(Convert.ToString(o["Model"])))
+                          .Append("\\",\\"InterfaceType\\":\\"").Append(EscapeJson(Convert.ToString(o["InterfaceType"])))
+                          .Append("\\",\\"MediaType\\":\\"").Append(EscapeJson(Convert.ToString(o["MediaType"])))
+                          .Append("\\",\\"Size\\":").Append(sz)
+                          .Append(",\\"Status\\":\\"").Append(EscapeJson(Convert.ToString(o["Status"])))
+                          .Append("\\",\\"SerialNumber\\":\\"").Append(EscapeJson(Convert.ToString(o["SerialNumber"]))).Append("\\"}");
+                    }
+                } catch {}
+                sb.Append("],");
+
+                // Monitors EDID
+                sb.Append("\\"monitors\\":[");
+                first = true;
+                try
+                {
+                    using (ManagementObjectSearcher s = new ManagementObjectSearcher("root\\\\WMI", "SELECT ManufacturerName, UserFriendlyName, SerialNumberID FROM WmiMonitorID"))
+                    foreach (ManagementObject o in s.Get())
+                    {
+                        if (!first) sb.Append(",");
+                        first = false;
+                        sb.Append("{\\"m\\":\\"").Append(EscapeJson(DecodeWmiAscii(o["ManufacturerName"])))
+                          .Append("\\",\\"n\\":\\"").Append(EscapeJson(DecodeWmiAscii(o["UserFriendlyName"])))
+                          .Append("\\",\\"s\\":\\"").Append(EscapeJson(DecodeWmiAscii(o["SerialNumberID"]))).Append("\\"}");
+                    }
+                } catch {}
+                sb.Append("],");
+
+                // Physical Network Adapters
+                sb.Append("\\"net\\":[");
+                first = true;
+                foreach (NetworkInterface ni in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (ni.NetworkInterfaceType == NetworkInterfaceType.Loopback || ni.NetworkInterfaceType == NetworkInterfaceType.Tunnel) continue;
+                    if (!first) sb.Append(",");
+                    first = false;
+                    sb.Append("\\"").Append(EscapeJson(ni.Description + " (" + ni.Name + ")")).Append("\\"");
+                }
+                sb.Append("]}");
+
+                cachedFullHwJson = sb.ToString();
+                return Encoding.UTF8.GetBytes(cachedFullHwJson);
+            }
+            catch
+            {
+                return Encoding.UTF8.GetBytes("{\\"os\\":\\"Windows\\",\\"ram\\":[],\\"disks\\":[]}");
+            }
+        }
+
+        private static byte[] QueryLogicalDrivesJson()
+        {
+            try
+            {
+                StringBuilder sb = new StringBuilder();
+                sb.Append("{\\"drives\\":[");
+                bool first = true;
+                foreach (DriveInfo di in DriveInfo.GetDrives())
+                {
+                    if (!di.IsReady) continue;
+                    if (di.DriveType != DriveType.Fixed && di.DriveType != DriveType.Removable && di.DriveType != DriveType.Network) continue;
+                    if (!first) sb.Append(",");
+                    first = false;
+                    double totalGB = Math.Round(di.TotalSize / 1073741824.0, 1);
+                    double freeGB = Math.Round(di.AvailableFreeSpace / 1073741824.0, 1);
+                    string letter = di.Name.TrimEnd('\\\\');
+                    string label = string.IsNullOrEmpty(di.VolumeLabel) ? "Dysk lokalny" : di.VolumeLabel;
+                    sb.Append("{\\"letter\\":\\"").Append(EscapeJson(letter))
+                      .Append("\\",\\"volumeLabel\\":\\"").Append(EscapeJson(label))
+                      .Append("\\",\\"fileSystem\\":\\"").Append(EscapeJson(di.DriveFormat))
+                      .Append("\\",\\"driveType\\":\\"").Append(EscapeJson(di.DriveType.ToString()))
+                      .Append("\\",\\"totalGB\\":").Append(totalGB.ToString(CultureInfo.InvariantCulture))
+                      .Append(",\\"freeGB\\":").Append(freeGB.ToString(CultureInfo.InvariantCulture))
+                      .Append(",\\"isReady\\":true,\\"status\\":\\"OK\\"}");
+                }
+                sb.Append("]}");
+                return Encoding.UTF8.GetBytes(sb.ToString());
+            }
+            catch
+            {
+                return Encoding.UTF8.GetBytes("{\\"drives\\":[]}");
+            }
+        }
+
+        private static byte[] RunNativeDriveBenchmark(string driveLetter, int sizeMB)
+        {
+            string letter = string.IsNullOrWhiteSpace(driveLetter) ? "C" : driveLetter.Substring(0, 1).ToUpperInvariant();
+            int clampedMB = Math.Max(16, Math.Min(256, sizeMB));
+            string benchDir = Path.Combine(letter + ":\\\\", ".SystemPulseBenchTmp");
+            string seqFile = Path.Combine(benchDir, "seq_test.bin");
+            try
+            {
+                Directory.CreateDirectory(benchDir);
+                byte[] chunk = new byte[4 * 1024 * 1024];
+                for (int i = 0; i < chunk.Length; i += 32) chunk[i] = (byte)((i * 19 + 7) & 0xff);
+                int chunks = Math.Max(4, clampedMB / 4);
+                double totalMB = chunks * 4.0;
+
+                Stopwatch sw = Stopwatch.StartNew();
+                using (FileStream fs = new FileStream(seqFile, FileMode.Create, FileAccess.Write, FileShare.None, 1024 * 1024, FileOptions.WriteThrough))
+                {
+                    for (int c = 0; c < chunks; c++) fs.Write(chunk, 0, chunk.Length);
+                    fs.Flush(true);
+                }
+                sw.Stop();
+                double seqWriteMBs = Math.Round(totalMB / Math.Max(0.005, sw.Elapsed.TotalSeconds), 1);
+
+                sw.Restart();
+                byte[] readBuf = new byte[4 * 1024 * 1024];
+                bool crcOk = true;
+                using (FileStream fs = new FileStream(seqFile, FileMode.Open, FileAccess.Read, FileShare.None, 1024 * 1024, FileOptions.SequentialScan))
+                {
+                    int readBytes = fs.Read(readBuf, 0, readBuf.Length);
+                    if (readBytes >= 32 && readBuf[0] != chunk[0]) crcOk = false;
+                    while (fs.Read(readBuf, 0, readBuf.Length) > 0) {}
+                }
+                sw.Stop();
+                double seqReadMBs = Math.Round(totalMB / Math.Max(0.005, sw.Elapsed.TotalSeconds), 1);
+                File.Delete(seqFile);
+
+                // 4K Random I/O & Latency
+                byte[] b4k = new byte[4096];
+                for (int i = 0; i < b4k.Length; i++) b4k[i] = (byte)(i & 0xff);
+                int ops = 96;
+                List<double> lats = new List<double>();
+                sw.Restart();
+                for (int i = 0; i < ops; i++)
+                {
+                    string f = Path.Combine(benchDir, "r4k_" + i + ".bin");
+                    Stopwatch opSw = Stopwatch.StartNew();
+                    File.WriteAllBytes(f, b4k);
+                    opSw.Stop();
+                    lats.Add(opSw.Elapsed.TotalMilliseconds);
+                }
+                sw.Stop();
+                double r4wSec = Math.Max(0.004, sw.Elapsed.TotalSeconds);
+                double r4wMBs = Math.Round((ops * 4.0 / 1024.0) / r4wSec, 2);
+
+                sw.Restart();
+                for (int i = 0; i < ops; i++)
+                {
+                    string f = Path.Combine(benchDir, "r4k_" + ((i * 17) % ops) + ".bin");
+                    Stopwatch opSw = Stopwatch.StartNew();
+                    File.ReadAllBytes(f);
+                    opSw.Stop();
+                    lats.Add(opSw.Elapsed.TotalMilliseconds);
+                }
+                sw.Stop();
+                double r4rSec = Math.Max(0.004, sw.Elapsed.TotalSeconds);
+                double r4rMBs = Math.Round((ops * 4.0 / 1024.0) / r4rSec, 2);
+                int r4Iops = (int)Math.Round((ops * 2.0) / (r4wSec + r4rSec));
+
+                try { Directory.Delete(benchDir, true); } catch {}
+
+                lats.Sort();
+                double minL = lats.Count > 0 ? Math.Round(lats[0], 3) : 0.08;
+                double sumL = 0;
+                foreach (double v in lats) sumL += v;
+                double avgL = Math.Round(sumL / Math.Max(1, lats.Count), 3);
+                double p95L = lats.Count > 0 ? Math.Round(lats[(int)(lats.Count * 0.95)], 3) : avgL;
+
+                string json = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "{{\\"drive\\":\\"{0}:\\",\\"seqWriteMBs\\":{1},\\"seqReadMBs\\":{2},\\"rand4kWriteMBs\\":{3},\\"rand4kReadMBs\\":{4},\\"rand4kIops\\":{5},\\"accessTimeMinMs\\":{6},\\"accessTimeAvgMs\\":{7},\\"accessTimeP95Ms\\":{8},\\"crcVerified\\":{9}}}",
+                    letter, seqWriteMBs, seqReadMBs, r4wMBs, r4rMBs, r4Iops, minL, avgL, p95L, crcOk ? "true" : "false"
+                );
+                return Encoding.UTF8.GetBytes(json);
+            }
+            catch (Exception ex)
+            {
+                try { if (Directory.Exists(benchDir)) Directory.Delete(benchDir, true); } catch {}
+                return Encoding.UTF8.GetBytes("{\\"error\\":\\"" + EscapeJson(ex.Message) + "\\"}");
+            }
         }
 
         private static byte[] QueryLocalNetworkAdaptersJson()
@@ -529,7 +859,7 @@ namespace SystemPulsePro
                       .Append("\\"description\\":\\"").Append(EscapeJson(ni.Description)).Append("\\",")
                       .Append("\\"type\\":\\"").Append(EscapeJson(kind)).Append("\\",")
                       .Append("\\"status\\":\\"").Append(ni.OperationalStatus == OperationalStatus.Up ? "Up" : "Disconnected").Append("\\",")
-                      .Append("\\"linkSpeedMbps\\":").Append(speedMbps.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append(",")
+                      .Append("\\"linkSpeedMbps\\":").Append(speedMbps.ToString(CultureInfo.InvariantCulture)).Append(",")
                       .Append("\\"macAddress\\":\\"").Append(EscapeJson(mac)).Append("\\"")
                       .Append("}");
                 }
@@ -546,41 +876,58 @@ namespace SystemPulsePro
         {
             try
             {
-                string psScript =
-                    "$s=Get-CimInstance -Namespace root\\\\WMI -ClassName BatteryStaticData -EA SilentlyContinue | Select-Object -First 1; " +
-                    "$f=Get-CimInstance -Namespace root\\\\WMI -ClassName BatteryFullChargedCapacity -EA SilentlyContinue | Select-Object -First 1; " +
-                    "$c=Get-CimInstance -Namespace root\\\\WMI -ClassName BatteryCycleCount -EA SilentlyContinue | Select-Object -First 1; " +
-                    "$st=Get-CimInstance -Namespace root\\\\WMI -ClassName BatteryStatus -EA SilentlyContinue | Select-Object -First 1; " +
-                    "$wb=Get-CimInstance Win32_Battery -EA SilentlyContinue | Select-Object -First 1; " +
-                    "$obj=[pscustomobject]@{" +
-                    "design=$s.DesignedCapacity; full=$f.FullChargedCapacity; cycles=$c.CycleCount; " +
-                    "volt=$st.Voltage; rem=$st.RemainingCapacity; crate=$st.ChargeRate; drate=$st.DischargeRate; " +
-                    "ac=$st.PowerOnline; name=$wb.Name; chem=$wb.Chemistry; pct=$wb.EstimatedChargeRemaining; " +
-                    "mfr=$s.ManufactureName; ser=$s.SerialNumber" +
-                    "}; $obj | ConvertTo-Json -Compress";
-                ProcessStartInfo psi = new ProcessStartInfo("powershell.exe", "-NoProfile -Command \\"" + psScript + "\\"");
-                psi.RedirectStandardOutput = true;
-                psi.UseShellExecute = false;
-                psi.CreateNoWindow = true;
-                using (Process p = Process.Start(psi))
+                long design = 0, full = 0, cycles = 0, volt = 0, rem = 0, crate = 0, drate = 0;
+                int pct = 0;
+                bool ac = true;
+                string name = "", mfr = "";
+                try
                 {
-                    string output = p.StandardOutput.ReadToEnd().Trim();
-                    p.WaitForExit(3200);
-                    if (!string.IsNullOrEmpty(output) && output.StartsWith("{"))
+                    using (ManagementObjectSearcher s = new ManagementObjectSearcher("root\\\\WMI", "SELECT DesignedCapacity, ManufactureName FROM BatteryStaticData"))
+                    foreach (ManagementObject o in s.Get()) { design = Convert.ToInt64(o["DesignedCapacity"]); mfr = Convert.ToString(o["ManufactureName"]); break; }
+                } catch {}
+                try
+                {
+                    using (ManagementObjectSearcher s = new ManagementObjectSearcher("root\\\\WMI", "SELECT FullChargedCapacity FROM BatteryFullChargedCapacity"))
+                    foreach (ManagementObject o in s.Get()) { full = Convert.ToInt64(o["FullChargedCapacity"]); break; }
+                } catch {}
+                try
+                {
+                    using (ManagementObjectSearcher s = new ManagementObjectSearcher("root\\\\WMI", "SELECT CycleCount FROM BatteryCycleCount"))
+                    foreach (ManagementObject o in s.Get()) { cycles = Convert.ToInt64(o["CycleCount"]); break; }
+                } catch {}
+                try
+                {
+                    using (ManagementObjectSearcher s = new ManagementObjectSearcher("root\\\\WMI", "SELECT Voltage, RemainingCapacity, ChargeRate, DischargeRate, PowerOnline FROM BatteryStatus"))
+                    foreach (ManagementObject o in s.Get())
                     {
-                        return Encoding.UTF8.GetBytes(output);
+                        volt = Convert.ToInt64(o["Voltage"]);
+                        rem = Convert.ToInt64(o["RemainingCapacity"]);
+                        crate = Convert.ToInt64(o["ChargeRate"]);
+                        drate = Convert.ToInt64(o["DischargeRate"]);
+                        ac = Convert.ToBoolean(o["PowerOnline"]);
+                        break;
                     }
-                }
+                } catch {}
+                try
+                {
+                    using (ManagementObjectSearcher s = new ManagementObjectSearcher("SELECT Name, EstimatedChargeRemaining FROM Win32_Battery"))
+                    foreach (ManagementObject o in s.Get()) { name = Convert.ToString(o["Name"]); pct = Convert.ToInt32(o["EstimatedChargeRemaining"]); break; }
+                } catch {}
+                string json = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "{{\\"design\\":{0},\\"full\\":{1},\\"cycles\\":{2},\\"volt\\":{3},\\"rem\\":{4},\\"crate\\":{5},\\"drate\\":{6},\\"ac\\":{7},\\"name\\":\\"{8}\\",\\"mfr\\":\\"{9}\\",\\"pct\\":{10}}}",
+                    design, full, cycles, volt, rem, crate, drate, ac ? "true" : "false", EscapeJson(name), EscapeJson(mfr), pct
+                );
+                return Encoding.UTF8.GetBytes(json);
             }
             catch
             {
+                return Encoding.UTF8.GetBytes("{}");
             }
-            return Encoding.UTF8.GetBytes("{}");
         }
 
         private static byte[] QueryLocalSensorsJson()
         {
-            // 1. Proxy LibreHardwareMonitor (:8085) directly via local loopback with CORS headers (eliminates browser HTTPS/CORS blocks)
             try
             {
                 HttpWebRequest req = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:8085/data.json");
@@ -595,35 +942,21 @@ namespace SystemPulsePro
                     if (arr.Length > 20) return arr;
                 }
             }
-            catch
-            {
-            }
-
-            // 2. Fallback to nvidia-smi CLI if present on Windows
-            try
-            {
-                ProcessStartInfo psi = new ProcessStartInfo("nvidia-smi", "--query-gpu=name,temperature.gpu --format=csv,noheader");
-                psi.RedirectStandardOutput = true;
-                psi.UseShellExecute = false;
-                psi.CreateNoWindow = true;
-                using (Process p = Process.Start(psi))
-                {
-                    string nvOut = p.StandardOutput.ReadToEnd().Trim();
-                    p.WaitForExit(900);
-                    if (!string.IsNullOrEmpty(nvOut) && nvOut.Contains(","))
-                    {
-                        string[] parts = nvOut.Split(',');
-                        string gpuTemp = parts[parts.Length - 1].Trim();
-                        string json = "{\\"sensors\\":[{\\"group\\":\\"gpu\\",\\"label\\":\\"" + parts[0].Trim().Replace("\\"", "") + "\\",\\"tempC\\":" + gpuTemp + "}]}";
-                        return Encoding.UTF8.GetBytes(json);
-                    }
-                }
-            }
-            catch
-            {
-            }
-
+            catch {}
             return Encoding.UTF8.GetBytes("{\\"sensors\\":[]}");
+        }
+
+        private static string GetQueryParam(string query, string key)
+        {
+            if (string.IsNullOrEmpty(query)) return "";
+            string[] parts = query.TrimStart('?').Split('&');
+            foreach (string part in parts)
+            {
+                int eq = part.IndexOf('=');
+                if (eq > 0 && part.Substring(0, eq).Equals(key, StringComparison.OrdinalIgnoreCase))
+                    return Uri.UnescapeDataString(part.Substring(eq + 1));
+            }
+            return "";
         }
 
         private static int FindFreePort()
@@ -665,10 +998,7 @@ namespace SystemPulsePro
         {
             string baseDir = AppDomain.CurrentDomain.BaseDirectory;
             string appDir = Path.Combine(baseDir, "app");
-            if (!Directory.Exists(appDir))
-            {
-                appDir = baseDir;
-            }
+            if (!Directory.Exists(appDir)) appDir = baseDir;
 
             int port = FindFreePort();
             TcpListener server = new TcpListener(IPAddress.Loopback, port);
@@ -696,9 +1026,11 @@ namespace SystemPulsePro
                                     string requestLine = lineEnd >= 0 ? reqText.Substring(0, lineEnd) : reqText;
                                     string[] tokens = requestLine.Split(' ');
                                     string method = tokens.Length > 0 ? tokens[0].ToUpperInvariant() : "GET";
-                                    string rawPath = tokens.Length > 1 ? tokens[1] : "/";
-                                    int qIdx = rawPath.IndexOf('?');
-                                    if (qIdx >= 0) rawPath = rawPath.Substring(0, qIdx);
+                                    string fullTarget = tokens.Length > 1 ? tokens[1] : "/";
+                                    string rawPath = fullTarget;
+                                    string rawQuery = "";
+                                    int qIdx = fullTarget.IndexOf('?');
+                                    if (qIdx >= 0) { rawPath = fullTarget.Substring(0, qIdx); rawQuery = fullTarget.Substring(qIdx + 1); }
 
                                     if (method == "OPTIONS")
                                     {
@@ -711,7 +1043,25 @@ namespace SystemPulsePro
 
                                     byte[] body;
                                     string mime;
-                                    if (rawPath.Equals("/api/edid", StringComparison.OrdinalIgnoreCase))
+                                    if (rawPath.Equals("/api/hardware/full", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        body = QueryFullHardwareInventoryJson();
+                                        mime = "application/json; charset=utf-8";
+                                    }
+                                    else if (rawPath.Equals("/api/disks/list", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        body = QueryLogicalDrivesJson();
+                                        mime = "application/json; charset=utf-8";
+                                    }
+                                    else if (rawPath.Equals("/api/disks/bench", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        string drv = GetQueryParam(rawQuery, "drive");
+                                        int sz = 64;
+                                        int.TryParse(GetQueryParam(rawQuery, "sizeMB"), out sz);
+                                        body = RunNativeDriveBenchmark(drv, sz > 0 ? sz : 64);
+                                        mime = "application/json; charset=utf-8";
+                                    }
+                                    else if (rawPath.Equals("/api/edid", StringComparison.OrdinalIgnoreCase))
                                     {
                                         body = Encoding.UTF8.GetBytes(QueryLocalMonitorEdidJson());
                                         mime = "application/json; charset=utf-8";
@@ -746,44 +1096,29 @@ namespace SystemPulsePro
                                         rawPath = Uri.UnescapeDataString(rawPath.TrimStart('/'));
                                         if (string.IsNullOrEmpty(rawPath)) rawPath = "index.html";
                                         string fullPath = Path.GetFullPath(Path.Combine(appDir, rawPath.Replace('/', Path.DirectorySeparatorChar)));
-                                        if (!File.Exists(fullPath))
-                                        {
-                                            fullPath = Path.Combine(appDir, "index.html");
-                                        }
+                                        if (!File.Exists(fullPath)) fullPath = Path.Combine(appDir, "index.html");
                                         body = File.Exists(fullPath) ? File.ReadAllBytes(fullPath) : Encoding.UTF8.GetBytes("<h1>SystemPulse Pro Offline</h1>");
                                         mime = GetMimeType(Path.GetExtension(fullPath));
                                     }
 
-                                    string header = "HTTP/1.1 200 OK\\r\\n" +
-                                                    "Content-Type: " + mime + "\\r\\n" +
-                                                    "Content-Length: " + body.Length + "\\r\\n" +
-                                                    "Cache-Control: no-store, no-cache\\r\\n" +
-                                                    "Access-Control-Allow-Origin: *\\r\\n" +
-                                                    "Connection: close\\r\\n\\r\\n";
+                                    string header = "HTTP/1.1 200 OK\\r\\nContent-Type: " + mime + "\\r\\nContent-Length: " + body.Length + "\\r\\nCache-Control: no-store, no-cache\\r\\nAccess-Control-Allow-Origin: *\\r\\nConnection: close\\r\\n\\r\\n";
                                     byte[] headerBytes = Encoding.ASCII.GetBytes(header);
                                     stream.Write(headerBytes, 0, headerBytes.Length);
-                                    if (method != "HEAD" && body.Length > 0)
-                                    {
-                                        stream.Write(body, 0, body.Length);
-                                    }
+                                    if (method != "HEAD" && body.Length > 0) stream.Write(body, 0, body.Length);
                                     stream.Flush();
                                 }
                             }
-                            catch
-                            {
-                            }
+                            catch {}
                         });
                     }
-                    catch
-                    {
-                    }
+                    catch {}
                 }
             });
             serverThread.IsBackground = true;
             serverThread.Start();
 
             string url = "http://127.0.0.1:" + port + "/index.html";
-            string profileDir = Path.Combine(Path.GetTempPath(), "SystemPulsePro_DesktopProfile_v4");
+            string profileDir = Path.Combine(Path.GetTempPath(), "SystemPulsePro_DesktopProfile_v5");
             string gpuFlags = "--app=\\"" + url + "\\" --user-data-dir=\\"" + profileDir + "\\" --start-maximized --enable-gpu-rasterization --ignore-gpu-blocklist --disable-frame-rate-limit --disable-gpu-vsync --no-first-run --no-default-browser-check";
 
             string[] candidates = new string[]
@@ -806,10 +1141,7 @@ namespace SystemPulsePro
                 }
             }
 
-            if (browserProc != null)
-            {
-                browserProc.WaitForExit();
-            }
+            if (browserProc != null) browserProc.WaitForExit();
             else
             {
                 Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
@@ -837,9 +1169,9 @@ namespace SystemPulsePro
 </head>
 <body>
   <div class="card">
-    <span class="badge">STANDALONE OFFLINE WIN64 EDITION • ODBLOKOWANY FPS GPU</span>
+    <span class="badge">STANDALONE OFFLINE WIN64 EDITION • AUTO-DETEKCJA WMI &amp; 40 GIER 3D MAX</span>
     <h1>SystemPulse Pro — Aplikacja Lokalna</h1>
-    <p>Uruchamianie lokalnego pakietu <strong>SystemPulse Pro</strong> (40 scen GPU 3D, 28 światów i wyścigów Gra 3D MAX, 42 testy matrycy + EDID, telemetria Baterii WMI &amp; Zasilacza ATX PSU z D3.js, Speed Test 10 Gbps z analizą kabla LAN/Wi-Fi oraz 32 serwerami) z lokalnego folderu <code>./app/index.html</code>.</p>
+    <p>Uruchamianie lokalnego pakietu <strong>SystemPulse Pro</strong> (40 gier i benchmarków 3D, 12 automatycznych skanerów podzespołów, wybór i test dowolnego dysku C:/D:/G:/USB, wykresy D3.js oraz telemetria Zasilacza ATX PSU) z lokalnego folderu <code>./app/index.html</code>.</p>
     <a class="btn" href="./app/index.html">Otwórz SystemPulse Pro (Offline)</a>
   </div>
 </body>
@@ -847,29 +1179,32 @@ namespace SystemPulsePro
 
   const readmeTxt = [
     '========================================================================',
-    '  SYSTEMPULSE PRO v4.0 - WERSJA PORTABLE I INSTALATOR WINDOWS',
-    '  100% LOKALNA APLIKACJA OFFLINE (BEZ ANTYWIRUSOWYCH FALSE-POSITIVE!)',
+    '  SYSTEMPULSE PRO v5.0 - SAMODZIELNA APLIKACJA DESKTOPOWA WIN64 (.EXE)',
+    '  100% AUTO-DETEKCJA SPRZETU (CZYSTE WMI .NET, ZERO POWERSHELL.EXE!)',
     '========================================================================',
     '',
-    'ZAWARTOSC PACZKI ZIP (CZYSTE SKRYPTY BEZ KOMPILACJI W LOCIE):',
-    '  1. SystemPulse-Pro-Portable.bat         -> Natychmiastowy launcher Portable.',
-    '                                             Uruchamia lokalna aplikacje w oknie',
-    '                                             Edge/Chrome z odblokowanym FPS GPU.',
-    '  2. Instalator-SystemPulse-Pro-Setup.cmd -> Kopiuje aplikacje do folderu',
-    '                                             %LOCALAPPDATA%\\Programs\\SystemPulsePro',
-    '                                             i tworzy czysty skrot na Pulpicie.',
-    '  3. SystemPulse-Portal.html              -> Bezposrednie uruchomienie w przegladarce.',
-    '  4. app\\index.html + portable-bundle.js  -> Pelny kod silnika 3D WebGL, D3.js,',
-    '                                             scen GPU 3D i Gier/Wyscigow dzialajacy',
-    '                                             w 100% lokalnie (offline).',
+    'JAK URUCHOMIC NA PC / LAPTOPIE (BEZ PRZEGLADARKI I BEZ BLOKAD ANTYWIRUSA):',
+    '  OPCJA A (NATYCHMIASTOWA - 1 KLIK):',
+    '    Uruchom "SystemPulse-Pro-Portable.bat" -> otwiera dedykowane okno',
+    '    aplikacji offline bez paska adresu z odblokowanym FPS GPU.',
     '',
-    `LOKALNY ADRES SERWERA DESKTOPOWEGO (OPCJA): ${localServerUrl}`,
+    '  OPCJA B (NATYWNY PLIK SystemPulse-Pro.exe Z PELNYM AUTO-SKANEM WMI):',
+    '    W katalogu paczki znajduje sie czysty projekt .NET "SystemPulsePro.csproj".',
+    '    Otworz Terminal w tym folderze i wpisz oficjalna komende Microsoft .NET:',
+    '      dotnet publish SystemPulsePro.csproj -c Release -r win-x64 -o .',
+    '    Powstanie natywny plik "SystemPulse-Pro.exe", ktory AUTOMATYCZNIE wykrywa:',
+    '      - Wszystkie partycje i dyski (C:\\, D:\\, G:\\, NVMe, SSD, USB) + testy I/O',
+    '      - Dokladny CPU, plyte glowna, BIOS, kazda kosc RAM DIMM (MHz/DDR5)',
+    '      - Model matrycy EDID, predkosc kabla LAN/Wi-Fi PHY, baterie WMI i czujniki!',
+    '',
+    `LOKALNY ADRES MOSTKA DESKTOPOWEGO: ${localServerUrl}`,
     '========================================================================',
   ].join('\r\n');
 
   const zipBytes = buildZipArchive([
     { name: 'SystemPulse-Pro-Portable/Instalator-SystemPulse-Pro-Setup.cmd', content: installerSetupCmd },
     { name: 'SystemPulse-Pro-Portable/SystemPulse-Pro-Portable.bat', content: batLauncher },
+    { name: 'SystemPulse-Pro-Portable/SystemPulsePro.csproj', content: csprojContent },
     { name: 'SystemPulse-Pro-Portable/SystemPulseLauncher.cs', content: csharpSource },
     { name: 'SystemPulse-Pro-Portable/SystemPulseSetupGui.cs', content: csharpGuiInstallerSource },
     { name: 'SystemPulse-Pro-Portable/SystemPulse-Portal.html', content: portalHtml },

@@ -1073,4 +1073,346 @@ export function renderPsuEfficiencyTrend1hChart(
     });
 }
 
+export interface RailFullHistorySample {
+  timestamp: number;
+  timeLabel: string;
+  voltageV: number;
+  powerW: number;
+}
+
+/**
+ * Renders a horizontally scrollable, high-resolution D3.js timeline chart showing up to
+ * 5 minutes (300s) of voltage telemetry for a specific PSU rail inside the Full History modal.
+ */
+export function renderRailFullHistoryD3ModalChart(
+  container: HTMLElement,
+  railName: '+12V' | '+5V' | '+3.3V',
+  samples: RailFullHistorySample[],
+  thresholdPct: number,
+  nominalV: number,
+  zoomFactor: number = 2,
+  emptyMessage?: string
+): void {
+  const prevScrollEl = container.querySelector<HTMLElement>('.psu-full-history-scroll');
+  const prevScrollLeft = prevScrollEl ? prevScrollEl.scrollLeft : null;
+  const wasNearRight =
+    prevScrollEl != null
+      ? prevScrollEl.scrollWidth - (prevScrollEl.scrollLeft + prevScrollEl.clientWidth) < 42
+      : true;
+
+  const root = d3.select(container);
+  root.selectAll('*').remove();
+
+  if (!samples || samples.length === 0) {
+    root
+      .append('div')
+      .style('padding', '48px 16px')
+      .style('text-align', 'center')
+      .style('color', 'var(--text-muted)')
+      .style('font-size', '13px')
+      .text(emptyMessage || `Brak próbek telemetrii dla szyny ${railName}.`);
+    return;
+  }
+
+  const ordered = [...samples].sort((a, b) => a.timestamp - b.timestamp);
+  const upperBound = nominalV * (1 + thresholdPct / 100);
+  const lowerBound = nominalV * (1 - thresholdPct / 100);
+  const vals = ordered.map((d) => d.voltageV);
+  const minV = Math.min(...vals);
+  const maxV = Math.max(...vals);
+  const padSpan = nominalV * Math.max(thresholdPct / 100, 0.025) * 0.45;
+  const yMin = Math.min(minV, lowerBound) - padSpan;
+  const yMax = Math.max(maxV, upperBound) + padSpan;
+
+  const railColor = railName === '+12V' ? '#38bdf8' : railName === '+5V' ? '#10b981' : '#f59e0b';
+  const clampedZoom = Math.max(1, Math.min(4, zoomFactor));
+  const basePxPerSample = 9 * clampedZoom;
+  const chartWidth = Math.min(7200, Math.max(960, Math.round(ordered.length * basePxPerSample + 140)));
+  const chartHeight = 310;
+  const margin = { top: 26, right: 32, bottom: 42, left: 66 };
+  const plotW = chartWidth - margin.left - margin.right;
+  const plotH = chartHeight - margin.top - margin.bottom;
+
+  const scrollWrap = root
+    .append('div')
+    .attr('class', 'psu-full-history-scroll');
+
+  const stage = scrollWrap
+    .append('div')
+    .style('position', 'relative')
+    .style('width', `${chartWidth}px`)
+    .style('min-height', `${chartHeight}px`);
+
+  const svg = stage
+    .append('svg')
+    .attr('width', chartWidth)
+    .attr('height', chartHeight)
+    .attr('viewBox', `0 0 ${chartWidth} ${chartHeight}`)
+    .style('display', 'block');
+
+  const defs = svg.append('defs');
+  const gradId = `psu-full-grad-${railName.replace(/[^0-9a-z]/gi, '')}`;
+  const areaGrad = defs
+    .append('linearGradient')
+    .attr('id', gradId)
+    .attr('x1', '0%')
+    .attr('y1', '0%')
+    .attr('x2', '0%')
+    .attr('y2', '100%');
+  areaGrad.append('stop').attr('offset', '0%').attr('stop-color', railColor).attr('stop-opacity', 0.34);
+  areaGrad.append('stop').attr('offset', '100%').attr('stop-color', railColor).attr('stop-opacity', 0.02);
+
+  const g = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`);
+
+  const tMin = ordered[0].timestamp;
+  const tMax = Math.max(tMin + 1000, ordered[ordered.length - 1].timestamp);
+  const xScale = d3.scaleTime().domain([new Date(tMin), new Date(tMax)]).range([0, plotW]);
+  const yScale = d3.scaleLinear().domain([yMin, yMax]).range([plotH, 0]);
+
+  // Horizontal voltage gridlines
+  g.append('g')
+    .selectAll('line')
+    .data(yScale.ticks(7))
+    .enter()
+    .append('line')
+    .attr('x1', 0)
+    .attr('x2', plotW)
+    .attr('y1', (d) => yScale(d))
+    .attr('y2', (d) => yScale(d))
+    .attr('stroke', 'rgba(148, 163, 184, 0.14)')
+    .attr('stroke-dasharray', '3,3');
+
+  // Vertical timeline gridlines
+  const xTicksCount = Math.max(8, Math.min(36, Math.round(plotW / 95)));
+  g.append('g')
+    .selectAll('line')
+    .data(xScale.ticks(xTicksCount))
+    .enter()
+    .append('line')
+    .attr('x1', (d) => xScale(d))
+    .attr('x2', (d) => xScale(d))
+    .attr('y1', 0)
+    .attr('y2', plotH)
+    .attr('stroke', 'rgba(148, 163, 184, 0.1)');
+
+  // Shaded safe tolerance band (±thresholdPct%)
+  const bandTop = Math.max(0, yScale(upperBound));
+  const bandBottom = Math.min(plotH, yScale(lowerBound));
+  g.append('rect')
+    .attr('x', 0)
+    .attr('y', bandTop)
+    .attr('width', plotW)
+    .attr('height', Math.max(1, bandBottom - bandTop))
+    .attr('fill', 'rgba(16, 185, 129, 0.11)');
+
+  // Upper and lower threshold boundary lines
+  for (const boundVal of [upperBound, lowerBound]) {
+    const by = yScale(boundVal);
+    if (by >= 0 && by <= plotH) {
+      g.append('line')
+        .attr('x1', 0)
+        .attr('x2', plotW)
+        .attr('y1', by)
+        .attr('y2', by)
+        .attr('stroke', 'rgba(244, 63, 94, 0.72)')
+        .attr('stroke-width', 1.3)
+        .attr('stroke-dasharray', '5,4');
+      g.append('text')
+        .attr('x', plotW - 6)
+        .attr('y', by - 4)
+        .attr('text-anchor', 'end')
+        .attr('fill', '#fda4af')
+        .style('font-size', '10px')
+        .style('font-family', 'var(--font-mono)')
+        .text(`${boundVal === upperBound ? '+' : '-'}${thresholdPct}% (${boundVal.toFixed(2)}V)`);
+    }
+  }
+
+  // Nominal reference line
+  const nomY = yScale(nominalV);
+  g.append('line')
+    .attr('x1', 0)
+    .attr('x2', plotW)
+    .attr('y1', nomY)
+    .attr('y2', nomY)
+    .attr('stroke', 'rgba(148, 163, 184, 0.55)')
+    .attr('stroke-width', 1.1)
+    .attr('stroke-dasharray', '4,3');
+
+  // Area & high-res voltage curve
+  const areaGen = d3
+    .area<RailFullHistorySample>()
+    .x((d) => xScale(new Date(d.timestamp)))
+    .y0(plotH)
+    .y1((d) => yScale(d.voltageV))
+    .curve(d3.curveMonotoneX);
+
+  const lineGen = d3
+    .line<RailFullHistorySample>()
+    .x((d) => xScale(new Date(d.timestamp)))
+    .y((d) => yScale(d.voltageV))
+    .curve(d3.curveMonotoneX);
+
+  g.append('path')
+    .datum(ordered)
+    .attr('fill', `url(#${gradId})`)
+    .attr('d', areaGen);
+
+  g.append('path')
+    .datum(ordered)
+    .attr('fill', 'none')
+    .attr('stroke', railColor)
+    .attr('stroke-width', 2.4)
+    .attr('d', lineGen);
+
+  // Highlight out-of-threshold excursions
+  const excursions = ordered.filter(
+    (d) => (Math.abs(d.voltageV - nominalV) / nominalV) * 100 > thresholdPct
+  );
+  if (excursions.length > 0) {
+    const excLayer = g.append('g').attr('class', 'psu-full-excursions');
+    excursions.forEach((pt) => {
+      const px = xScale(new Date(pt.timestamp));
+      const py = yScale(pt.voltageV);
+      excLayer
+        .append('line')
+        .attr('x1', px)
+        .attr('x2', px)
+        .attr('y1', 0)
+        .attr('y2', plotH)
+        .attr('stroke', 'rgba(244, 63, 94, 0.24)')
+        .attr('stroke-width', 1);
+      excLayer
+        .append('circle')
+        .attr('cx', px)
+        .attr('cy', py)
+        .attr('r', 4.2)
+        .attr('fill', '#f43f5e')
+        .attr('stroke', '#ffffff')
+        .attr('stroke-width', 1.2);
+    });
+  }
+
+  // Latest live point marker
+  const latestPt = ordered[ordered.length - 1];
+  g.append('circle')
+    .attr('cx', xScale(new Date(latestPt.timestamp)))
+    .attr('cy', yScale(latestPt.voltageV))
+    .attr('r', 5)
+    .attr('fill', '#38bdf8')
+    .attr('stroke', '#ffffff')
+    .attr('stroke-width', 1.5);
+
+  // Axes
+  const timeFmt = d3.timeFormat('%H:%M:%S');
+  const xAxis = d3
+    .axisBottom(xScale)
+    .ticks(xTicksCount)
+    .tickFormat((d) => timeFmt(d as Date));
+  const yAxis = d3
+    .axisLeft(yScale)
+    .ticks(7)
+    .tickFormat((d) => `${Number(d).toFixed(2)}V`);
+
+  g.append('g')
+    .attr('transform', `translate(0,${plotH})`)
+    .attr('color', 'rgba(148, 163, 184, 0.65)')
+    .call(xAxis)
+    .selectAll('text')
+    .style('font-size', '10.5px')
+    .style('font-family', 'var(--font-mono)');
+
+  g.append('g')
+    .attr('color', 'rgba(148, 163, 184, 0.65)')
+    .call(yAxis)
+    .selectAll('text')
+    .style('font-size', '10.5px')
+    .style('font-family', 'var(--font-mono)');
+
+  // Interactive hover crosshair + detailed readout
+  const crosshair = g
+    .append('line')
+    .attr('y1', 0)
+    .attr('y2', plotH)
+    .attr('stroke', 'rgba(226, 232, 240, 0.55)')
+    .attr('stroke-dasharray', '3,3')
+    .style('display', 'none');
+
+  const hoverDot = g
+    .append('circle')
+    .attr('r', 5.5)
+    .attr('fill', '#ffffff')
+    .attr('stroke', railColor)
+    .attr('stroke-width', 2)
+    .style('display', 'none');
+
+  const tooltip = stage
+    .append('div')
+    .attr('class', 'psu-full-history-hover-tooltip')
+    .style('display', 'none');
+
+  const bisect = d3.bisector<RailFullHistorySample, number>((d) => d.timestamp).center;
+
+  g.append('rect')
+    .attr('width', plotW)
+    .attr('height', plotH)
+    .style('fill', 'none')
+    .style('pointer-events', 'all')
+    .style('cursor', 'crosshair')
+    .on('mousemove', (event) => {
+      const [mx] = d3.pointer(event);
+      const hoveredTs = xScale.invert(mx).getTime();
+      const idx = Math.max(0, Math.min(ordered.length - 1, bisect(ordered, hoveredTs)));
+      const pt = ordered[idx];
+      const px = xScale(new Date(pt.timestamp));
+      const py = yScale(pt.voltageV);
+      const devPct = ((pt.voltageV - nominalV) / nominalV) * 100;
+      const absDevPct = Math.abs(devPct);
+      const isOut = absDevPct > thresholdPct;
+      const ageSec = Math.max(0, Math.round((tMax - pt.timestamp) / 1000));
+
+      crosshair.style('display', 'block').attr('x1', px).attr('x2', px);
+      hoverDot
+        .style('display', 'block')
+        .attr('cx', px)
+        .attr('cy', py)
+        .attr('stroke', isOut ? '#f43f5e' : railColor);
+
+      const leftPos = Math.min(chartWidth - 228, Math.max(12, margin.left + px + 14));
+      const topPos = Math.max(10, Math.min(chartHeight - 118, margin.top + py - 40));
+      tooltip
+        .style('display', 'block')
+        .style('left', `${leftPos}px`)
+        .style('top', `${topPos}px`)
+        .html(`
+          <div style="font-weight:700;color:${isOut ? '#fda4af' : '#bae6fd'};margin-bottom:4px;">
+            ${railName} · ${pt.timeLabel} (-${ageSec}s)
+          </div>
+          <div>Napięcie: <strong>${pt.voltageV.toFixed(3)} V</strong></div>
+          <div style="color:${isOut ? '#fb7185' : '#34d399'};">
+            Odchyłka: <strong>${devPct >= 0 ? '+' : ''}${devPct.toFixed(2)}%</strong> (${isOut ? 'PRZEKROCZENIE' : 'W NORMIE'})
+          </div>
+          <div style="color:#94a3b8;font-size:11px;margin-top:2px;">
+            Obciążenie systemu: <strong>${pt.powerW.toFixed(1)} W</strong>
+          </div>
+        `);
+    })
+    .on('mouseleave', () => {
+      crosshair.style('display', 'none');
+      hoverDot.style('display', 'none');
+      tooltip.style('display', 'none');
+    });
+
+  // Auto-scroll to latest (right edge) on first render, or preserve user's scroll offset during live updates
+  const scrollNode = scrollWrap.node();
+  if (scrollNode) {
+    if (prevScrollLeft === null || wasNearRight) {
+      scrollNode.scrollLeft = Math.max(0, scrollNode.scrollWidth - scrollNode.clientWidth);
+    } else {
+      scrollNode.scrollLeft = prevScrollLeft;
+    }
+  }
+}
+
+
 

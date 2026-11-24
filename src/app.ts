@@ -1,10 +1,14 @@
 import {
   ActiveModule,
   BatteryHealthState,
+  ComponentScanCard,
   CpuStressMode,
   CpuTestResult,
   DiagnosticLogEntry,
+  DiskDriveTarget,
   DiskTestResult,
+  FanHeatmapSectionTab,
+  FanPwmMonitorState,
   FanTestState,
   GameAiProfile,
   GameBenchMetrics,
@@ -33,7 +37,11 @@ import {
 import { getSystemSpecs } from './services/systemInfo.service';
 import { cpuTestService } from './services/cpuTest.service';
 import { ramTestService } from './services/ramTest.service';
-import { diskTestService } from './services/diskTest.service';
+import {
+  DISK_SCAN_CMD_COMMAND,
+  DISK_SCAN_POWERSHELL_CMD,
+  diskTestService,
+} from './services/diskTest.service';
 import { GPU_SCENE_CATALOG, gpuStressEngine } from './services/gpuStress.service';
 import { BATTERY_PRESETS, batteryHealthService } from './services/batteryHealth.service';
 import { PSU_STRESS_PROFILES, psuCalculatorService } from './services/psuCalculator.service';
@@ -42,6 +50,7 @@ import {
   renderPsuEfficiencyCurveChart,
   renderPsuEfficiencyTrend1hChart,
   renderPsuPowerVsEfficiencyBarChart,
+  renderRailFullHistoryD3ModalChart,
 } from './ui/pcPsuChart';
 import { downloadPortableExeZip } from './services/portableExeBuilder.service';
 import { soundNotificationService, NotificationEventType, SoundPreset } from './services/soundNotification.service';
@@ -107,6 +116,29 @@ import {
   mountFanCurveEditor,
   renderFanCurveEditorPanelHtml,
 } from './ui/fanCurveEditor';
+import {
+  renderFanAcousticHeatmapD3,
+  renderFanAcousticHeatmapMetaHtml,
+  renderFanAcousticHeatmapPanelHtml,
+  renderFanBearingHistoryChartD3,
+  renderFanBearingHistorySummaryHtml,
+  renderFanFftHarmonicsStripHtml,
+  renderFanFftSpectrumD3,
+  renderFanPwmMonitorInnerHtml,
+  renderFanPwmMonitorPanelHtml,
+  renderFanResonanceZonesHtml,
+  renderPredictiveBearingAlertModalHtml,
+} from './ui/fanDiagnosticsVisuals';
+import { animateMetricValueElements } from './ui/metricAnimation';
+import { isLowBatteryHealth, renderLowBatteryHealthAlertHtml } from './ui/batteryLowHealthAlert';
+import { isPsuCapacityOver95, renderPsuCapacityAlertBannerHtml } from './ui/psuCapacityAlert';
+import { PsuRail5sCoord, renderRail5sSparklinePreviewHtml } from './ui/psuRailSparklinePreview';
+import { computePowerDrawTrend1m, renderPsuPowerDrawTrendHtml } from './ui/psuPowerDrawTrend';
+import {
+  PsuRailTransientHighlightTracker,
+  TRANSIENT_RAIL_HIGHLIGHT_DURATION_MS,
+  TransientHighlightRail,
+} from './ui/psuRailTransientHighlight';
 import { renderStressHistoryPanelHtml } from './ui/stressHistoryPanel';
 import { WorkspaceErrorBoundary } from './ui/workspaceErrorBoundary';
 import {
@@ -116,12 +148,21 @@ import {
 import { downloadFullDiagnosticDataJson } from './services/fullDataExport.service';
 import { downloadResultsCsv } from './services/resultsCsvExport.service';
 import {
+  buildAllPsuRailsRawJson,
   exportBatteryPowerCyclesToCsv,
   exportBatteryPowerCyclesToXlsx,
   exportPsuRailHistoryToCsv,
+  exportPsuRailHistoryToJson,
+  exportSinglePsuRail5mHistoryToCsv,
   formatCycleDateTime,
 } from './services/batteryExport.service';
 import { computeCpuFrequencyStats, renderCpuFrequencyD3Chart } from './ui/cpuFrequencyChart';
+import {
+  renderDiskIopsLatencyD3Chart,
+  renderDiskThroughputD3Chart,
+  renderHardwareHealthD3Chart,
+  renderRamBandwidthD3Chart,
+} from './ui/componentCharts';
 import {
   SCHEDULER_CATALOG,
   createScheduledItem,
@@ -270,6 +311,12 @@ export class SystemPulseApp {
   private hwScannerTab: 'overview' | 'deep_analysis' = 'overview';
   private deepRamValidating = false;
   private deepDiskValidating = false;
+  private diskDrives: DiskDriveTarget[] = diskTestService.getAvailableDrives();
+  private diskDriveNotice = '';
+  private componentScans: ComponentScanCard[] = [];
+  private componentScanBusy = false;
+  private gameSfxEnabled = true;
+  private metricAnimPrevValues = new Map<string, number>();
 
   // Stress Test Scheduler state
   private schedulerQueue: ScheduledTestItem[] = getDefaultSchedulerQueue();
@@ -290,7 +337,7 @@ export class SystemPulseApp {
   private displaySlideshowTimer: number | null = null;
 
   // Game Bench category & Network LAN/IXP UI state
-  private gameCategoryFilter: 'ALL' | 'RACING' | 'SOCCER' | 'FLIGHT' | 'SCIFI' = 'ALL';
+  private gameCategoryFilter: 'ALL' | 'COMBAT' | 'RACING' | 'SOCCER' | 'FLIGHT' | 'SCIFI' = 'ALL';
   private netServerScanBusy = false;
   private lanProbeBusy = false;
   private netAdapterPasteText = '';
@@ -298,6 +345,37 @@ export class SystemPulseApp {
 
   private theme: ThemeMode = 'dark';
   private logCount = 0;
+  private psuTooltipCopiedRail: '+12V' | '+5V' | '+3.3V' | null = null;
+  private psuTooltipCopiedTimer: number | null = null;
+  private psuTooltipJsonCopiedRail: '+12V' | '+5V' | '+3.3V' | null = null;
+  private psuTooltipJsonCopiedTimer: number | null = null;
+  private psuSparklineOpenRails = new Set<'+12V' | '+5V' | '+3.3V'>();
+  private psuSparklinePointsMap = new Map<
+    '+12V' | '+5V' | '+3.3V',
+    Array<{
+      x: number;
+      y: number;
+      xRatio: number;
+      voltageV: number;
+      timestamp: number;
+      timeLabel: string;
+      deviationPct: number;
+      out: boolean;
+    }>
+  >();
+  private psuSparklineHoverRatio = new Map<'+12V' | '+5V' | '+3.3V', number>();
+  private psuRail5sCoordsMap = new Map<'+12V' | '+5V' | '+3.3V', PsuRail5sCoord[]>();
+  private psuTransientTracker = new PsuRailTransientHighlightTracker();
+  private psuTransientTimers = new Map<TransientHighlightRail, number>();
+  private psuFullHistoryModalRail: '+12V' | '+5V' | '+3.3V' | null = null;
+  private psuFullHistoryModalZoom = 2;
+  private psuFullHistoryModalWindowMin: 1 | 5 | 15 = 5;
+  private psuFullHistoryModalTempThresholdPct: number | null = null;
+  private psuFullHistoryModalKeyHandler: ((ev: KeyboardEvent) => void) | null = null;
+  private fanHeatmapTab: FanHeatmapSectionTab = 'resonance';
+  private predictiveBearingAlertFocusedChannelId: string | null = null;
+  private predictiveBearingAlertDismissed = false;
+  private predictiveBearingAlertKeyHandler: ((ev: KeyboardEvent) => void) | null = null;
 
   // Peripherals runtime state & cleanup
   private pressedKeys = new Set<string>();
@@ -589,11 +667,28 @@ export class SystemPulseApp {
     this.specs = specs;
     this.batteryState = battery;
     this.logCount = logs.length;
+    diskTestService.subscribeDrives((drives) => {
+      this.diskDrives = drives;
+      if (this.activeModule === 'disk') {
+        const host = this.root.querySelector<HTMLElement>('#sp-main-scroll');
+        if (host) this.renderDiskView(host);
+      }
+    });
+
+    await hardwareScannerService.autoProbeFullLocalBridge(false);
     this.hardwareScan = await hardwareScannerService.scanAll(
       specs.estimatedRefreshRate,
       specs.gpuRenderer,
       specs
     );
+    if (this.hardwareScan?.deepInventory?.disks?.length || this.hardwareScan?.deepInventory?.logicalDisks?.length) {
+      diskTestService.registerHardwareInventoryDrives(
+        this.hardwareScan.deepInventory.disks || [],
+        this.hardwareScan.deepInventory.logicalDisks || []
+      );
+    }
+    this.diskDrives = await diskTestService.refreshAvailableDrives();
+    this.componentScans = await this.runAuto12ComponentScan();
 
     if (saved) {
       this.ramSizeMB = saved.ramSizeMB || 256;
@@ -668,6 +763,28 @@ export class SystemPulseApp {
 
     this.updateAutosaveFooter();
     this.renderWorkspace();
+  }
+
+  private async runAuto12ComponentScan(): Promise<ComponentScanCard[]> {
+    const cards = await hardwareScannerService.scanAll12Components({
+      specs: this.specs,
+      scan: this.hardwareScan,
+      ramState: this.ramState,
+      diskState: this.diskState,
+      gpuState: this.gpuState,
+      batteryState: this.batteryState,
+      networkState: this.networkState,
+      drives: this.diskDrives,
+      liveSensorsCount:
+        this.thermalState?.rows.reduce(
+          (acc, row) => acc + row.zones.filter((z) => z.tempC !== null).length,
+          0
+        ) || 0,
+      liveCpuTempC: thermalMonitorService.getLiveCpuTempC(),
+      liveGpuTempC: thermalMonitorService.getLiveGpuTempC(),
+    });
+    this.componentScans = cards;
+    return cards;
   }
 
   private emitDiagnosticChanged(source: string, immediate = true): void {
@@ -779,6 +896,8 @@ export class SystemPulseApp {
     gpuStressEngine.stop();
     gameBenchService.stop();
     fanTestService.stop();
+    fanTestService.stopPwmFrequencyMonitor();
+    fanTestService.stopLiveAcousticHeatmapCapture();
     this.activeStressSession = null;
     await persistenceService.clearAll();
     this.cpuState = cpuTestService.createInitialState();
@@ -1112,6 +1231,7 @@ export class SystemPulseApp {
         `Tryb: ${this.gpuState.fpsMode}, Preset: ${this.gpuState.preset}, 1% Low: ${this.gpuState.low1PctFps} FPS, Stabilność: ${this.gpuState.stabilityPct}%`
       );
 
+      await this.runAuto12ComponentScan();
       this.lastSuiteTimestamp = Date.now();
       this.fullSuiteStep = 'Kompleksowa diagnostyka od A do Z zakończona i zapisana w IndexedDB.';
       const scores = this.getSuiteScores();
@@ -1467,7 +1587,7 @@ export class SystemPulseApp {
               <button type="button" class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:11px;" data-open-mod="cpu">Testuj CPU</button>
             </div>
             <div class="metric-row">
-              <span class="metric-value">${this.cpuState.multiCoreScore > 0 ? this.cpuState.multiCoreScore.toLocaleString('pl-PL') : '—'}</span>
+              <span class="metric-value" data-metric-key="dash-cpu-metric" data-metric-target="${this.cpuState.multiCoreScore}">${this.cpuState.multiCoreScore > 0 ? this.cpuState.multiCoreScore.toLocaleString('pl-PL') : '—'}</span>
               <span class="metric-unit">pkt MC</span>
             </div>
             <span class="metric-foot">${s ? `${s.cpuCores} wątków · ${this.cpuState.avxMatrixGflops ? `AVX ${this.cpuState.avxMatrixGflops} GFLOPS · ` : ''}${this.cpuState.grade}` : 'Wykrywanie...'}</span>
@@ -1479,7 +1599,7 @@ export class SystemPulseApp {
               <button type="button" class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:11px;" data-open-mod="ram">Testuj RAM</button>
             </div>
             <div class="metric-row">
-              <span class="metric-value">${this.ramState.bandwidthReadMBs > 0 ? this.ramState.bandwidthReadMBs.toLocaleString('pl-PL') : '—'}</span>
+              <span class="metric-value" data-metric-key="dash-ram-metric" data-metric-target="${this.ramState.bandwidthReadMBs}">${this.ramState.bandwidthReadMBs > 0 ? this.ramState.bandwidthReadMBs.toLocaleString('pl-PL') : '—'}</span>
               <span class="metric-unit">MB/s</span>
             </div>
             <span class="metric-foot">Błędy: ${this.ramState.errorsFound} · ${this.ramState.cacheL1L2MBs ? `L1/L2: ${this.ramState.cacheL1L2MBs} MB/s · ` : ''}Stan: ${this.ramState.healthGrade}</span>
@@ -1491,7 +1611,7 @@ export class SystemPulseApp {
               <button type="button" class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:11px;" data-open-mod="disk">Testuj Dysk</button>
             </div>
             <div class="metric-row">
-              <span class="metric-value">${this.diskState.seqReadMBs > 0 ? this.diskState.seqReadMBs.toLocaleString('pl-PL') : '—'}</span>
+              <span class="metric-value" data-metric-key="dash-disk-metric" data-metric-target="${this.diskState.seqReadMBs}" data-metric-decimals="1">${this.diskState.seqReadMBs > 0 ? this.diskState.seqReadMBs.toLocaleString('pl-PL') : '—'}</span>
               <span class="metric-unit">MB/s</span>
             </div>
             <span class="metric-foot">SMART: ${this.diskState.smartStatus} · ${this.diskState.qd32Iops ? `QD32: ${this.diskState.qd32Iops} IOPS` : this.diskState.accessTimeAvgMs > 0 ? `${this.diskState.accessTimeAvgMs} ms` : 'Nie testowano'}</span>
@@ -1503,7 +1623,7 @@ export class SystemPulseApp {
               <button type="button" class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:11px;" data-open-mod="gpu">Testuj GPU</button>
             </div>
             <div class="metric-row">
-              <span class="metric-value">${this.gpuState.avgFps > 0 ? this.gpuState.avgFps.toLocaleString('pl-PL') : '—'}</span>
+              <span class="metric-value" data-metric-key="dash-gpu-metric" data-metric-target="${this.gpuState.avgFps}">${this.gpuState.avgFps > 0 ? this.gpuState.avgFps.toLocaleString('pl-PL') : '—'}</span>
               <span class="metric-unit">FPS (${this.gpuState.fpsMode === 'uncapped' ? 'bez limitu' : 'VSync'})</span>
             </div>
             <span class="metric-foot">${this.gpuState.avgFps > 0 ? `Max: ${this.gpuState.maxFps} FPS · Stabilność: ${this.gpuState.stabilityPct}%` : `${GPU_SCENE_CATALOG.length} scen WebGL 3D · tryb bez limitu FPS`}</span>
@@ -1520,9 +1640,30 @@ export class SystemPulseApp {
 
         <div class="grid-split-wide">
           <div class="panel stack-md">
-            <div class="panel-header" style="margin-bottom:0;">
-              <h2 class="panel-title">Specyfikacja wykrytego sprzętu (PC i Laptop)</h2>
-              <span class="panel-caption">${s ? `${esc(s.os)} · ${esc(s.browser)}` : 'Skanowanie...'}</span>
+            <div class="panel-header" style="margin-bottom:0;flex-wrap:wrap;gap:10px;">
+              <div>
+                <h2 class="panel-title">Specyfikacja wykrytego sprzętu (PC i Laptop)</h2>
+                <span class="panel-caption">${s ? `${esc(s.os)} · ${esc(s.browser)}` : 'Skanowanie...'}</span>
+              </div>
+              <div class="row-wrap" style="gap:14px;align-items:center;">
+                <div style="text-align:right;">
+                  <div class="metric-label" style="font-size:11px;">Wykryte części</div>
+                  <div class="metric-row" style="justify-content:flex-end;">
+                    <span id="dash-hw-devices-val" class="metric-value" style="font-size:20px;" data-metric-key="dash-hw-devices" data-metric-target="${this.hardwareScan ? this.hardwareScan.devices.length : 0}">${this.hardwareScan ? this.hardwareScan.devices.length : '—'}</span>
+                  </div>
+                </div>
+                <div style="text-align:right;">
+                  <div class="metric-label" style="font-size:11px;">Indeks skanu</div>
+                  <div class="metric-row" style="justify-content:flex-end;">
+                    <span id="dash-hw-avg-score-val" class="metric-value status-cyan" style="font-size:20px;" data-metric-key="dash-hw-avg-score" data-metric-target="${this.componentScans.length > 0 ? Math.round(this.componentScans.reduce((acc, c) => acc + c.score, 0) / this.componentScans.length) : 0}">${this.componentScans.length > 0 ? Math.round(this.componentScans.reduce((acc, c) => acc + c.score, 0) / this.componentScans.length) : '—'}</span>
+                    <span class="metric-unit">/100</span>
+                  </div>
+                </div>
+                <button id="dash-rescan-hw-btn" type="button" class="btn btn-secondary btn-sm" title="Odśwież skan sprzętu i płynnie zaktualizuj metryki">
+                  ${iconSvg('refresh', 13)}
+                  <span>Odśwież skan</span>
+                </button>
+              </div>
             </div>
             <div class="kv-list">
               <div class="kv-row">
@@ -1547,24 +1688,25 @@ export class SystemPulseApp {
               </div>
               <div class="kv-row">
                 <span class="kv-key">Wykryty model matrycy / monitora</span>
-                <span class="kv-val">${this.hardwareScan ? esc(this.hardwareScan.panel.label) : s ? `${s.screenResolution} @ ${s.estimatedRefreshRate} Hz` : '—'}</span>
+                <span id="dash-hw-panel-model" class="kv-val">${this.hardwareScan ? esc(this.hardwareScan.panel.label) : s ? `${s.screenResolution} @ ${s.estimatedRefreshRate} Hz` : '—'}</span>
               </div>
               <div class="kv-row">
                 <span class="kv-key">Parametry ekranu (Gamut / HDR / Hz)</span>
-                <span class="kv-val">${this.hardwareScan ? `${this.hardwareScan.panel.nativeResolution} · ${this.hardwareScan.panel.colorGamut} · ${this.hardwareScan.panel.hdrSupported ? 'HDR' : 'SDR'} · ${this.hardwareScan.panel.refreshRateHz} Hz` : s ? `${s.screenResolution} · ${s.colorDepth}-bit · ~${s.estimatedRefreshRate} Hz` : '—'}</span>
+                <span id="dash-hw-panel-params" class="kv-val">${this.hardwareScan ? `${this.hardwareScan.panel.nativeResolution} · ${this.hardwareScan.panel.colorGamut} · ${this.hardwareScan.panel.hdrSupported ? 'HDR' : 'SDR'} · ${this.hardwareScan.panel.refreshRateHz} Hz` : s ? `${s.screenResolution} · ${s.colorDepth}-bit · ~${s.estimatedRefreshRate} Hz` : '—'}</span>
               </div>
               <div class="kv-row">
                 <span class="kv-key">Pula przestrzeni dyskowej przeglądarki</span>
-                <span class="kv-val">${s && s.storageQuotaGB ? `${s.storageQuotaGB} GB (użyto ${s.storageUsageMB ?? 0} MB)` : 'Dostępna'}</span>
+                <span id="dash-hw-storage-pool" class="kv-val">${s && s.storageQuotaGB ? `${s.storageQuotaGB} GB (użyto ${s.storageUsageMB ?? 0} MB)` : 'Dostępna'}</span>
               </div>
               <div class="kv-row">
                 <span class="kv-key">Sieć i opóźnienie</span>
-                <span class="kv-val">${s ? `${s.online ? 'Online' : 'Offline'} · ${s.connectionType}${typeof s.rtt === 'number' ? ` · RTT ${s.rtt} ms` : ''}` : '—'}</span>
+                <span id="dash-hw-net-status" class="kv-val">${s ? `${s.online ? 'Online' : 'Offline'} · ${s.connectionType}${typeof s.rtt === 'number' ? ` · RTT ${s.rtt} ms` : ''}` : '—'}</span>
               </div>
               <div class="kv-row">
                 <span class="kv-key">Stan baterii laptopa</span>
-                <span id="dash-battery-val" class="kv-val">${this.batteryState.levelPct}% · Zdrowie ${this.batteryState.healthPct}% (Zużycie ${this.batteryState.wearLevelPct}%)</span>
+                <span id="dash-battery-val" class="kv-val ${isLowBatteryHealth(this.batteryState.healthPct) ? 'status-warn' : ''}">${this.batteryState.levelPct}% · Zdrowie ${this.batteryState.healthPct}% (Zużycie ${this.batteryState.wearLevelPct}%)</span>
               </div>
+              <div id="dash-battery-low-health-alert">${renderLowBatteryHealthAlertHtml(this.batteryState, true)}</div>
             </div>
           </div>
 
@@ -1587,7 +1729,7 @@ export class SystemPulseApp {
               <div class="row-wrap" style="justify-content:center;gap:14px;margin-top:6px;">
                 <span class="grade-letter">${scores.overall > 0 ? scores.grade : '—'}</span>
                 <div style="text-align:left;">
-                  <div class="font-mono" style="font-size:22px;font-weight:700;">${scores.overall > 0 ? `${scores.overall} / 100` : 'Brak pomiaru'}</div>
+                  <span class="metric-value" style="font-size:22px;" data-metric-key="dash-overall-score" data-metric-target="${scores.overall}" data-metric-suffix=" / 100">${scores.overall > 0 ? `${scores.overall} / 100` : 'Brak pomiaru'}</span>
                   <div style="font-size:12px;color:var(--text-muted);">
                     ${scores.overall > 0 ? 'Na podstawie wykonanych testów podzespołów' : 'Kliknij „Pełny test”, aby wyliczyć ocenę'}
                   </div>
@@ -1839,6 +1981,25 @@ export class SystemPulseApp {
         if (mod) this.setModule(mod);
       });
     });
+
+    host.querySelector('#dash-rescan-hw-btn')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget as HTMLButtonElement;
+      if (btn.disabled) return;
+      btn.disabled = true;
+      const label = btn.querySelector('span');
+      const prevLabel = label?.textContent || 'Odśwież skan';
+      if (label) label.textContent = 'Skanowanie...';
+      try {
+        await this.rescanDashboardHardware();
+      } finally {
+        if (btn.isConnected) {
+          btn.disabled = false;
+          if (label) label.textContent = prevLabel;
+        }
+      }
+    });
+
+    animateMetricValueElements(host, this.metricAnimPrevValues);
   }
 
   private renderQuickModuleCard(
@@ -1863,10 +2024,106 @@ export class SystemPulseApp {
     `;
   }
 
+  private async rescanDashboardHardware(): Promise<void> {
+    const specs = await getSystemSpecs();
+    this.specs = specs;
+    await hardwareScannerService.autoProbeFullLocalBridge(true);
+    this.hardwareScan = await hardwareScannerService.scanAll(
+      specs.estimatedRefreshRate,
+      specs.gpuRenderer,
+      specs
+    );
+    if (
+      this.hardwareScan?.deepInventory?.disks?.length ||
+      this.hardwareScan?.deepInventory?.logicalDisks?.length
+    ) {
+      diskTestService.registerHardwareInventoryDrives(
+        this.hardwareScan.deepInventory.disks || [],
+        this.hardwareScan.deepInventory.logicalDisks || []
+      );
+    }
+    this.diskDrives = await diskTestService.refreshAvailableDrives(true);
+    await this.runAuto12ComponentScan();
+    this.patchDashboardHardwareScanMetrics();
+  }
+
+  private patchDashboardHardwareScanMetrics(): void {
+    const host = this.root.querySelector<HTMLElement>('#sp-main-scroll');
+    if (!host) return;
+    const s = this.specs;
+
+    const hwDevicesEl = host.querySelector<HTMLElement>('#dash-hw-devices-val');
+    if (hwDevicesEl) {
+      const deviceCount = this.hardwareScan ? this.hardwareScan.devices.length : 0;
+      hwDevicesEl.dataset.metricTarget = String(deviceCount);
+      if (!this.metricAnimPrevValues.has('dash-hw-devices')) {
+        hwDevicesEl.textContent = this.hardwareScan ? String(deviceCount) : '—';
+      }
+    }
+
+    const hwAvgScoreEl = host.querySelector<HTMLElement>('#dash-hw-avg-score-val');
+    if (hwAvgScoreEl) {
+      const avgScore =
+        this.componentScans.length > 0
+          ? Math.round(
+              this.componentScans.reduce((acc, c) => acc + c.score, 0) / this.componentScans.length
+            )
+          : 0;
+      hwAvgScoreEl.dataset.metricTarget = String(avgScore);
+      if (!this.metricAnimPrevValues.has('dash-hw-avg-score')) {
+        hwAvgScoreEl.textContent = this.componentScans.length > 0 ? String(avgScore) : '—';
+      }
+    }
+
+    const overallEl = host.querySelector<HTMLElement>('.metric-value[data-metric-key="dash-overall-score"]');
+    if (overallEl) {
+      const scores = this.getSuiteScores();
+      overallEl.dataset.metricTarget = String(scores.overall);
+    }
+
+    const panelModelEl = host.querySelector<HTMLElement>('#dash-hw-panel-model');
+    if (panelModelEl) {
+      panelModelEl.textContent = this.hardwareScan
+        ? this.hardwareScan.panel.label
+        : s
+          ? `${s.screenResolution} @ ${s.estimatedRefreshRate} Hz`
+          : '—';
+    }
+
+    const panelParamsEl = host.querySelector<HTMLElement>('#dash-hw-panel-params');
+    if (panelParamsEl) {
+      panelParamsEl.textContent = this.hardwareScan
+        ? `${this.hardwareScan.panel.nativeResolution} · ${this.hardwareScan.panel.colorGamut} · ${this.hardwareScan.panel.hdrSupported ? 'HDR' : 'SDR'} · ${this.hardwareScan.panel.refreshRateHz} Hz`
+        : s
+          ? `${s.screenResolution} · ${s.colorDepth}-bit · ~${s.estimatedRefreshRate} Hz`
+          : '—';
+    }
+
+    const storagePoolEl = host.querySelector<HTMLElement>('#dash-hw-storage-pool');
+    if (storagePoolEl) {
+      storagePoolEl.textContent =
+        s && s.storageQuotaGB ? `${s.storageQuotaGB} GB (użyto ${s.storageUsageMB ?? 0} MB)` : 'Dostępna';
+    }
+
+    const netStatusEl = host.querySelector<HTMLElement>('#dash-hw-net-status');
+    if (netStatusEl) {
+      netStatusEl.textContent = s
+        ? `${s.online ? 'Online' : 'Offline'} · ${s.connectionType}${typeof s.rtt === 'number' ? ` · RTT ${s.rtt} ms` : ''}`
+        : '—';
+    }
+
+    animateMetricValueElements(host, this.metricAnimPrevValues);
+  }
+
   private patchDashboardBatterySummary(): void {
     const el = this.root.querySelector('#dash-battery-val');
     if (el) {
+      el.className = `kv-val ${isLowBatteryHealth(this.batteryState.healthPct) ? 'status-warn' : ''}`;
       el.textContent = `${this.batteryState.levelPct}% · Zdrowie ${this.batteryState.healthPct}% (Zużycie ${this.batteryState.wearLevelPct}%)`;
+    }
+    const alertSlot = this.root.querySelector('#dash-battery-low-health-alert');
+    if (alertSlot) {
+      alertSlot.innerHTML = renderLowBatteryHealthAlertHtml(this.batteryState, true);
     }
   }
 
@@ -2803,7 +3060,8 @@ export class SystemPulseApp {
   /* =========================================================================
      1C. GRA 3D MAX — HYPERION ULTRA BENCHMARK DEMO & 3D RACING CIRCUITS
      ========================================================================= */
-  private getGameCategory(item: (typeof GAME_CATALOG)[number]): 'RACING' | 'SOCCER' | 'FLIGHT' | 'SCIFI' {
+  private getGameCategory(item: (typeof GAME_CATALOG)[number]): 'COMBAT' | 'RACING' | 'SOCCER' | 'FLIGHT' | 'SCIFI' {
+    if (gameBenchService.isCombatScene(item.layoutMode)) return 'COMBAT';
     if (gameBenchService.isSoccerScene(item.layoutMode)) return 'SOCCER';
     if (gameBenchService.isFlightScene(item.layoutMode)) return 'FLIGHT';
     if (gameBenchService.isRacingScene(item.layoutMode)) return 'RACING';
@@ -2813,14 +3071,18 @@ export class SystemPulseApp {
   private renderGameBenchView(host: HTMLElement): void {
     const g = this.gameState;
     const activeGame = gameBenchService.getGameCatalogItem();
+    const combatGames = GAME_CATALOG.filter((item) => gameBenchService.isCombatScene(item.layoutMode));
     const racingGames = GAME_CATALOG.filter((item) => gameBenchService.isRacingScene(item.layoutMode));
     const soccerGames = GAME_CATALOG.filter((item) => gameBenchService.isSoccerScene(item.layoutMode));
-    const flightGames = GAME_CATALOG.filter((item) => gameBenchService.isFlightScene(item.layoutMode));
+    const flightGames = GAME_CATALOG.filter(
+      (item) => gameBenchService.isFlightScene(item.layoutMode) && !gameBenchService.isCombatScene(item.layoutMode)
+    );
     const filteredCatalog = GAME_CATALOG.filter(
       (item) => this.gameCategoryFilter === 'ALL' || this.getGameCategory(item) === this.gameCategoryFilter
     );
 
     const activeCat = this.getGameCategory(activeGame);
+    const isCombatOrFlight = activeCat === 'COMBAT' || activeCat === 'FLIGHT' || Boolean(g.isCombatMode);
     const activeAiProfile = g.aiProfile || 'ai_auto';
     const activeFpsCap = g.fpsCap ?? 0;
     const activeAniso = g.anisotropy ?? 16;
@@ -2835,9 +3097,9 @@ export class SystemPulseApp {
       <div class="stack-lg">
         <div class="section-header">
           <div>
-            <h1 class="section-title">Katalog Gier 3D MAX (${GAME_CATALOG.length} Światów: Wyścigi, Piłka Nożna 3D, Lotnictwo i Sci-Fi)</h1>
+            <h1 class="section-title">Katalog Gier 3D AAA MAX (${GAME_CATALOG.length} Światów: Kampanie Bojowe 5-Etapowe, Wyścigi 5 Okr., Piłka 3D &amp; Lotnictwo)</h1>
             <p class="section-subtitle">
-              Płynna grafika 3D z AI Auto-Tunerem i Dynamic Resolution (zero przycięć): Wyścigi (Bugatti 450, Snow Rally WRC, Formula GP, Tokyo Drift, Dakar), grywalny <strong>Stadion Piłki Nożnej 3D</strong> (WASD + Spacja strzał), Myśliwce &amp; Śmigłowce (F-22, SR-71, Apache) oraz areny Sci-Fi.
+              Realistyczna grafika PBR HDR + GLSL Ocean + 5-etapowe kampanie bojowe z Bossami (Etap 3 i 5), efektami SFX i pełnym sterowaniem: <strong>Czołg M1A2 Abrams</strong>, <strong>Mech Titan</strong>, <strong>F/A-18 Naval Strike</strong>, <strong>Okręt Podwodny</strong>, <strong>MotoGP Superbike</strong>, <strong>Starfighter Trench</strong>, Wyścigi 5 Okrążeń oraz Stadion Piłki Nożnej 3D.
             </p>
           </div>
           <div class="meta-line">
@@ -2850,23 +3112,32 @@ export class SystemPulseApp {
         <div class="panel stack-sm" style="padding:14px;border:1.5px solid rgba(245, 158, 11, 0.38);background:linear-gradient(135deg, rgba(245, 158, 11, 0.09), rgba(6, 182, 212, 0.07));">
           <div class="row-between" style="flex-wrap:wrap;gap:8px;">
             <div>
-              <strong style="font-size:13.5px;color:var(--accent-amber);">🎮 Szybki Wybór Gier Grywalnych: Wyścigi 3D, Piłka Nożna 3D &amp; Lotnictwo</strong>
-              <div style="font-size:12px;color:var(--text-secondary);">Wyścigi: A/D + Shift (Nitro) · Piłka Nożna: WASD + Spacja/Klik (Strzał) · Samoloty/Helikopter: A/D + W/S + Shift</div>
+              <strong style="font-size:13.5px;color:var(--accent-amber);">⚔️ Szybki Start — Nowe Kampanie AAA &amp; Gry Grywalne (5 Etapów / 5 Okrążeń)</strong>
+              <div style="font-size:12px;color:var(--text-secondary);">Walka/Lotnictwo: WASD + Spacja/Klik (Ogień) + Shift (Boost) + R (Restart) · Wyścigi: A/D + Shift (Nitro) · Piłka: WASD + Spacja</div>
             </div>
             <div class="row-wrap" style="gap:6px;">
+              ${combatGames
+                .map(
+                  (cb) => `
+                  <button type="button" data-game-scene="${cb.id}" class="btn ${cb.id === activeGame.id ? 'btn-danger' : 'btn-secondary'} btn-sm">
+                    ⚔️ ${esc(cb.shortTitle)}
+                  </button>`
+                )
+                .join('')}
+              ${racingGames
+                .slice(0, 4)
+                .map(
+                  (rc) => `
+                  <button type="button" data-game-scene="${rc.id}" class="btn ${rc.id === activeGame.id ? 'btn-amber' : 'btn-secondary'} btn-sm">
+                    🏎️ ${esc(rc.shortTitle)}
+                  </button>`
+                )
+                .join('')}
               ${soccerGames
                 .map(
                   (sc) => `
                   <button type="button" data-game-scene="${sc.id}" class="btn ${sc.id === activeGame.id ? 'btn-primary' : 'btn-secondary'} btn-sm">
                     ⚽ ${esc(sc.shortTitle)}
-                  </button>`
-                )
-                .join('')}
-              ${racingGames
-                .map(
-                  (rc) => `
-                  <button type="button" data-game-scene="${rc.id}" class="btn ${rc.id === activeGame.id ? 'btn-amber' : 'btn-secondary'} btn-sm">
-                    🏎️ ${esc(rc.shortTitle)}
                   </button>`
                 )
                 .join('')}
@@ -2888,6 +3159,7 @@ export class SystemPulseApp {
               <span style="font-size:13px;font-weight:700;">Katalog Gier 3D MAX (${filteredCatalog.length} / ${GAME_CATALOG.length}):</span>
               <div class="segmented" role="group" aria-label="Filtr gatunku gier 3D">
                 <button type="button" class="segmented-btn ${this.gameCategoryFilter === 'ALL' ? 'active' : ''}" data-game-cat="ALL">Wszystkie (${GAME_CATALOG.length})</button>
+                <button type="button" class="segmented-btn ${this.gameCategoryFilter === 'COMBAT' ? 'active' : ''}" data-game-cat="COMBAT">⚔️ Walka (${combatGames.length})</button>
                 <button type="button" class="segmented-btn ${this.gameCategoryFilter === 'RACING' ? 'active' : ''}" data-game-cat="RACING">Wyścigi (${racingGames.length})</button>
                 <button type="button" class="segmented-btn ${this.gameCategoryFilter === 'SOCCER' ? 'active' : ''}" data-game-cat="SOCCER">Piłka Nożna (${soccerGames.length})</button>
                 <button type="button" class="segmented-btn ${this.gameCategoryFilter === 'FLIGHT' ? 'active' : ''}" data-game-cat="FLIGHT">Lotnictwo (${flightGames.length})</button>
@@ -2901,23 +3173,36 @@ export class SystemPulseApp {
               .map((item) => {
                 const isAct = item.id === activeGame.id;
                 const cat = this.getGameCategory(item);
-                const icon = cat === 'SOCCER' ? '⚽ ' : cat === 'FLIGHT' ? '✈️ ' : cat === 'RACING' ? '🏎️ ' : '';
+                const icon =
+                  cat === 'COMBAT'
+                    ? '⚔️ '
+                    : cat === 'SOCCER'
+                      ? '⚽ '
+                      : cat === 'FLIGHT'
+                        ? '✈️ '
+                        : cat === 'RACING'
+                          ? '🏎️ '
+                          : '';
                 const accentBorder = isAct
                   ? 'var(--accent-cyan)'
-                  : cat === 'SOCCER'
-                    ? 'rgba(16, 185, 129, 0.38)'
-                    : cat === 'FLIGHT'
-                      ? 'rgba(56, 189, 248, 0.35)'
-                      : cat === 'RACING'
-                        ? 'rgba(245, 158, 11, 0.35)'
-                        : 'rgba(255,255,255,0.08)';
+                  : cat === 'COMBAT'
+                    ? 'rgba(244, 63, 94, 0.42)'
+                    : cat === 'SOCCER'
+                      ? 'rgba(16, 185, 129, 0.38)'
+                      : cat === 'FLIGHT'
+                        ? 'rgba(56, 189, 248, 0.35)'
+                        : cat === 'RACING'
+                          ? 'rgba(245, 158, 11, 0.35)'
+                          : 'rgba(255,255,255,0.08)';
                 const accentBg = isAct
                   ? 'rgba(6, 182, 212, 0.14)'
-                  : cat === 'SOCCER'
-                    ? 'rgba(16, 185, 129, 0.07)'
-                    : cat === 'RACING'
-                      ? 'rgba(245, 158, 11, 0.06)'
-                      : 'var(--bg-inset)';
+                  : cat === 'COMBAT'
+                    ? 'rgba(244, 63, 94, 0.08)'
+                    : cat === 'SOCCER'
+                      ? 'rgba(16, 185, 129, 0.07)'
+                      : cat === 'RACING'
+                        ? 'rgba(245, 158, 11, 0.06)'
+                        : 'var(--bg-inset)';
                 return `
                   <button
                     type="button"
@@ -2926,7 +3211,7 @@ export class SystemPulseApp {
                     style="text-align:left;padding:10px 12px;cursor:pointer;transition:all 150ms ease;border:1.5px solid ${accentBorder};background:${accentBg};border-radius:10px;"
                   >
                     <div class="row-between" style="width:100%;gap:6px;">
-                      <span style="font-size:12.5px;font-weight:700;color:${isAct ? 'var(--accent-cyan)' : cat === 'SOCCER' ? 'var(--status-ok)' : cat === 'RACING' ? 'var(--accent-amber)' : 'var(--text-primary)'};">${icon}${esc(item.shortTitle)}</span>
+                      <span style="font-size:12.5px;font-weight:700;color:${isAct ? 'var(--accent-cyan)' : cat === 'COMBAT' ? '#fb7185' : cat === 'SOCCER' ? 'var(--status-ok)' : cat === 'RACING' ? 'var(--accent-amber)' : 'var(--text-primary)'};">${icon}${esc(item.shortTitle)}</span>
                       <span class="font-mono" style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(255,255,255,0.07);color:var(--text-secondary);">${esc(item.badge)}</span>
                     </div>
                     <span style="font-size:11px;color:var(--text-muted);line-height:1.35;">${esc(item.genre)}</span>
@@ -2937,7 +3222,7 @@ export class SystemPulseApp {
           </div>
         </div>
 
-        <div class="gpu-viewport-wrap" style="height:520px;">
+        <div id="game-viewport-shell" class="gpu-viewport-wrap" style="height:600px;">
           <div id="game-canvas-mount" class="gpu-viewport-mount"></div>
 
           <div class="gpu-hud-top">
@@ -2949,6 +3234,14 @@ export class SystemPulseApp {
             </div>
           </div>
 
+          <div class="game-hud-overlay" aria-hidden="true">
+            <div id="game-hud-crosshair" class="game-crosshair ${g.targetLocked ? 'locked' : ''}" style="display:${isCombatOrFlight ? 'block' : 'none'};">
+              <span class="game-crosshair-dot"></span>
+            </div>
+            <div id="game-hud-banner" class="game-hud-banner ${g.gameBannerText ? 'visible' : ''}">${esc(g.gameBannerText || '')}</div>
+            <div id="game-hud-mission" class="game-hud-mission">${esc(g.gameMissionText || '')}</div>
+          </div>
+
           <div class="gpu-hud-bottom">
             <div class="segmented" role="group" aria-label="Limit FPS gry">
               <button type="button" class="segmented-btn ${g.fpsMode === 'vsync' ? 'active' : ''}" data-game-fps="vsync">VSync (Płynny)</button>
@@ -2957,12 +3250,17 @@ export class SystemPulseApp {
 
             <button id="game-bloom-btn" type="button" class="btn btn-secondary btn-sm">Bloom: ${g.bloomEnabled ? 'WŁ.' : 'WYŁ.'}</button>
             <button id="game-shadows-btn" type="button" class="btn btn-secondary btn-sm">Cienie 4K: ${g.shadowsEnabled ? 'WŁ.' : 'WYŁ.'}</button>
+            <button id="game-sfx-btn" type="button" class="btn ${this.gameSfxEnabled ? 'btn-primary' : 'btn-secondary'} btn-sm">🔊 SFX: ${this.gameSfxEnabled ? 'WŁ.' : 'WYŁ.'}</button>
+            <button id="game-restart-btn" type="button" class="btn btn-secondary btn-sm" title="Restart misji / wyścigu (klawisz R)">↻ Restart (R)</button>
+            <button id="game-fullscreen-btn" type="button" class="btn btn-secondary btn-sm" title="Pełny ekran 3D">⛶ Pełny Ekran</button>
             ${
               activeCat === 'SOCCER'
                 ? `<button id="game-soccer-kick-btn" type="button" class="btn btn-amber btn-sm">⚽ Strzał na bramkę (Spacja)</button>`
-                : `<button id="game-mode-btn" type="button" class="btn ${g.interactiveMode ? 'btn-amber' : 'btn-secondary'} btn-sm">
-                     ${g.interactiveMode ? 'Tryb: Gracz (WASD+Mysz)' : 'Tryb: Kamera Benchmark'}
-                   </button>`
+                : isCombatOrFlight
+                  ? `<button id="game-fire-btn" type="button" class="btn btn-danger btn-sm">🔥 Ogień / Rakieta (Spacja)</button>`
+                  : `<button id="game-mode-btn" type="button" class="btn ${g.interactiveMode ? 'btn-amber' : 'btn-secondary'} btn-sm">
+                       ${g.interactiveMode ? 'Tryb: Gracz (WASD+Mysz)' : 'Tryb: Kamera Benchmark'}
+                     </button>`
             }
             <button id="game-toggle-btn" type="button" class="btn ${g.running ? 'btn-danger' : 'btn-primary'} btn-sm">
               ${iconSvg(g.running ? 'stop' : 'play', 14)}
@@ -3098,7 +3396,7 @@ export class SystemPulseApp {
         <div class="panel stack-md">
           <div class="panel-header" style="margin-bottom:0;">
             <h2 class="panel-title" id="game-chart-title">Wykres FPS i czasu klatki (Frame-Time ms) — ${esc(activeGame.title)}</h2>
-            <span class="panel-caption">Wyścigi: A/D + Shift Nitro · Piłka 3D: WASD + Spacja/Klik Strzał · Lotnictwo: A/D + W/S + Shift</span>
+            <span class="panel-caption">Walka/Lotnictwo: WASD + Spacja/Klik Ogień + Shift Boost + R Restart · Wyścigi: A/D + Shift Nitro · Piłka 3D: WASD + Spacja</span>
           </div>
           <div id="game-live-chart">
             ${this.renderGameChartHtml(g)}
@@ -3260,6 +3558,34 @@ export class SystemPulseApp {
       (e.currentTarget as HTMLButtonElement).textContent = `Cienie 4K: ${next ? 'WŁ.' : 'WYŁ.'}`;
     });
 
+    host.querySelector('#game-sfx-btn')?.addEventListener('click', (e) => {
+      this.gameSfxEnabled = !this.gameSfxEnabled;
+      gameBenchService.setSfxEnabled(this.gameSfxEnabled);
+      (e.currentTarget as HTMLButtonElement).textContent = `🔊 SFX: ${this.gameSfxEnabled ? 'WŁ.' : 'WYŁ.'}`;
+    });
+
+    host.querySelector('#game-restart-btn')?.addEventListener('click', () => {
+      gameBenchService.restartGameMission();
+      this.gameState = gameBenchService.getMetrics();
+      this.patchGameLive();
+    });
+
+    host.querySelector('#game-fullscreen-btn')?.addEventListener('click', () => {
+      const shell = host.querySelector<HTMLElement>('#game-viewport-shell');
+      if (!shell) return;
+      if (document.fullscreenElement) {
+        void document.exitFullscreen?.();
+      } else {
+        void shell.requestFullscreen?.();
+      }
+    });
+
+    host.querySelector('#game-fire-btn')?.addEventListener('click', () => {
+      gameBenchService.firePlayerWeapon();
+      this.gameState = gameBenchService.getMetrics();
+      this.patchGameLive();
+    });
+
     host.querySelector('#game-soccer-kick-btn')?.addEventListener('click', () => {
       gameBenchService.kickSoccerBall();
       this.gameState = gameBenchService.getMetrics();
@@ -3303,40 +3629,52 @@ export class SystemPulseApp {
   private renderGameHudStripInner(
     g: GameBenchMetrics,
     shortTitle: string,
-    cat: 'RACING' | 'SOCCER' | 'FLIGHT' | 'SCIFI'
+    cat: 'COMBAT' | 'RACING' | 'SOCCER' | 'FLIGHT' | 'SCIFI'
   ): string {
     const modeSpecific =
       cat === 'SOCCER' || g.isSoccerMode
         ? `<span>Mecz: <strong class="status-ok">${g.soccerScoreHome ?? 0} : ${g.soccerScoreAway ?? 0}</strong></span>
            <span>Piłka: <strong class="status-cyan">${g.soccerBallSpeedKmh ?? 0} km/h</strong></span>
            <span>Czas: <strong>${g.soccerMatchSec ?? 0}s</strong></span>`
-        : cat === 'FLIGHT' || g.isFlightMode
-          ? `<span>Prędkość: <strong class="status-ok">${g.raceSpeedKmh || 0} km/h</strong></span>
-             <span>Dopalacz: <strong class="status-cyan">${g.raceNitroPct ?? 100}%</strong></span>`
+        : cat === 'COMBAT' || cat === 'FLIGHT' || g.isCombatMode || g.isFlightMode
+          ? `<span>Etap: <strong class="status-amber">${g.gameStage ?? 1}/${g.gameMaxStage ?? 5}</strong></span>
+             <span>Wynik: <strong class="status-ok">${(g.gameScore ?? 0).toLocaleString('pl-PL')}</strong></span>
+             <span>Combo: <strong class="status-cyan">x${g.gameCombo ?? 1}</strong></span>
+             <span>Pancerz: <strong class="${(g.gameHealthPct ?? 100) <= 30 ? 'status-err' : 'status-ok'}">${g.gameHealthPct ?? 100}%</strong></span>
+             <span>Boost: <strong class="status-cyan">${g.raceNitroPct ?? 100}%</strong></span>`
           : g.isRacingMode
             ? `<span>Prędkość: <strong class="status-ok">${g.raceSpeedKmh || 0} km/h</strong></span>
-               <span>Okrążenie: <strong>#${g.raceLap || 1}</strong></span>
+               <span>Okr.: <strong>${g.raceLap || 1}/${g.raceTotalLaps || 5}</strong></span>
+               <span>Poz.: <strong class="status-amber">P${g.racePosition || 1}/7</strong></span>
                <span>Nitro: <strong class="status-cyan">${g.raceNitroPct ?? 100}%</strong></span>`
             : `<span>Trójkąty: <strong>${g.triangles.toLocaleString('pl-PL')}</strong></span>
                <span>Jednostki/Cząst.: <strong>${g.droneCount.toLocaleString('pl-PL')} / ${g.particleCount.toLocaleString('pl-PL')}</strong></span>`;
+    const perfPart =
+      !g.running && g.fps === 0
+        ? `<span>Tryb: <strong class="status-cyan">PODGLĄD 3D</strong></span>`
+        : `<span>FPS: <strong class="status-cyan">${g.fps}</strong></span>
+           <span>1% Low: <strong>${g.low1PctFps}</strong></span>
+           <span>Frame: <strong>${g.frameTimeMs} ms</strong></span>`;
     return `
       <span>Gra: <strong class="status-cyan">${esc(shortTitle)}</strong></span>
-      <span>FPS: <strong class="status-cyan">${g.fps}</strong></span>
-      <span>1% / 0.1% Low: <strong>${g.low1PctFps} / ${g.low01PctFps}</strong></span>
-      <span>Frame: <strong>${g.frameTimeMs} ms</strong></span>
+      ${perfPart}
       ${modeSpecific}
     `;
   }
 
-  private renderGameHudVerdictInner(g: GameBenchMetrics, cat: 'RACING' | 'SOCCER' | 'FLIGHT' | 'SCIFI'): string {
+  private renderGameHudVerdictInner(
+    g: GameBenchMetrics,
+    cat: 'COMBAT' | 'RACING' | 'SOCCER' | 'FLIGHT' | 'SCIFI'
+  ): string {
     if (cat === 'SOCCER' || g.isSoccerMode) {
       return `<span>PIŁKA NOŻNA 3D · WASD / Strzałki (Bieg) + Spacja / Klik (Strzał)</span>`;
     }
-    if (cat === 'FLIGHT' || g.isFlightMode) {
-      return `<span>LOTNICTWO 3D · A/D (Przechył) + W/S (Pułap) + Shift (Dopalacz)</span>`;
+    if (cat === 'COMBAT' || cat === 'FLIGHT' || g.isCombatMode || g.isFlightMode) {
+      const lockBadge = g.targetLocked ? `<strong class="status-err">● NAMIERZONY</strong> · ` : '';
+      return `<span>${lockBadge}Zniszczone: <strong>${g.gameTargetsDestroyed ?? 0}</strong> · Trafienia: <strong>${g.targetsHit}</strong> · WASD + Spacja (Ogień) + Shift (Boost)</span>`;
     }
     if (g.isRacingMode) {
-      return `<span>WYŚCIG 3D · Sterowanie: A/D (Lewo/Prawo) + Shift (Nitro Boost)</span>`;
+      return `<span>WYŚCIG 5 OKR. · Wynik: <strong>${(g.gameScore ?? 0).toLocaleString('pl-PL')}</strong> · Bramki: <strong>${g.gameGatesPassed ?? 0}</strong> · A/D + Shift (Nitro)</span>`;
     }
     if (g.interactiveMode) {
       return `<span>GRACZ WASD · Strzały: ${g.shotsFired} · Trafienia: ${g.targetsHit}</span>`;
@@ -3346,6 +3684,7 @@ export class SystemPulseApp {
 
   private renderGameMetricsHtml(g: GameBenchMetrics): string {
     const hasRealTemp = g.realGpuTempC !== null;
+    const isCombat = Boolean(g.isCombatMode || gameBenchService.isCombatScene());
     const isFlight = gameBenchService.isFlightScene();
     const isSoccer = Boolean(g.isSoccerMode || gameBenchService.isSoccerScene());
     return `
@@ -3371,10 +3710,10 @@ export class SystemPulseApp {
         <span class="metric-label">${
           isSoccer
             ? 'Mecz Piłki Nożnej 3D (LIVE)'
-            : isFlight
-              ? 'Telemetria Lotu 3D'
+            : isCombat || isFlight
+              ? `Kampania Bojowa (Etap ${g.gameStage ?? 1}/${g.gameMaxStage ?? 5})`
               : g.isRacingMode
-                ? 'Telemetria Wyścigu 3D (Bolid)'
+                ? 'Telemetria Wyścigu 3D (5 Okrążeń)'
                 : hasRealTemp
                   ? 'Czujnik GPU (LIVE °C)'
                   : 'Obciążenie Raymarch GPU'
@@ -3383,10 +3722,10 @@ export class SystemPulseApp {
           ${
             isSoccer
               ? `<span class="metric-value status-ok">${g.soccerScoreHome ?? 0} : ${g.soccerScoreAway ?? 0}</span><span class="metric-unit">piłka ${g.soccerBallSpeedKmh ?? 0} km/h</span>`
-              : isFlight
-                ? `<span class="metric-value status-cyan">${g.raceSpeedKmh || 0}</span><span class="metric-unit">km/h · Dopalacz ${g.raceNitroPct ?? 100}%</span>`
+              : isCombat || isFlight
+                ? `<span class="metric-value status-cyan">${(g.gameScore ?? 0).toLocaleString('pl-PL')}</span><span class="metric-unit">pkt · Combo x${g.gameCombo ?? 1}</span>`
                 : g.isRacingMode
-                  ? `<span class="metric-value status-ok">${g.raceSpeedKmh || 0}</span><span class="metric-unit">km/h · Okr. #${g.raceLap || 1}</span>`
+                  ? `<span class="metric-value status-ok">${g.raceSpeedKmh || 0}</span><span class="metric-unit">km/h · P${g.racePosition || 1}/7 · Okr. ${g.raceLap || 1}/${g.raceTotalLaps || 5}</span>`
                   : hasRealTemp
                     ? `<span class="metric-value ${g.realGpuTempC! >= 82 ? 'status-err' : g.realGpuTempC! >= 70 ? 'status-warn' : 'status-ok'}">${g.realGpuTempC!.toFixed(1)}</span><span class="metric-unit">°C</span>`
                     : `<span class="metric-value status-cyan">${g.raymarchSteps}</span><span class="metric-unit">kroków/px · SSAA ${Math.round(g.renderScale * 100)}%</span>`
@@ -3395,10 +3734,10 @@ export class SystemPulseApp {
         <span class="metric-foot">${
           isSoccer
             ? `Czas meczu: ${g.soccerMatchSec ?? 0}s · WASD + Spacja (Strzał)`
-            : isFlight
-              ? `Steruj: A/D (Beczka) + W/S (Wysokość) + Shift (Dopalacz)`
+            : isCombat || isFlight
+              ? `Pancerz: ${g.gameHealthPct ?? 100}% · Zniszczone: ${g.gameTargetsDestroyed ?? 0} · Bramki: ${g.gameGatesPassed ?? 0}`
               : g.isRacingMode
-                ? `Nitro Boost: ${g.raceNitroPct ?? 100}% · Steruj klawiszami A/D + Shift`
+                ? `Bramki: ${g.gameGatesPassed ?? 0} · Nitro: ${g.raceNitroPct ?? 100}% · Wynik: ${(g.gameScore ?? 0).toLocaleString('pl-PL')}`
                 : hasRealTemp
                   ? `Szczyt czujnika: ${g.peakTempC.toFixed(1)} °C`
                   : 'Brak czujnika °C (podłącz LHM :8085 na Dashboardzie)'
@@ -3446,6 +3785,21 @@ export class SystemPulseApp {
     const verd = this.root.querySelector('#game-hud-verdict');
     if (verd) {
       verd.innerHTML = this.renderGameHudVerdictInner(g, activeCat);
+    }
+    const crosshair = this.root.querySelector<HTMLElement>('#game-hud-crosshair');
+    if (crosshair) {
+      const showCrosshair = activeCat === 'COMBAT' || activeCat === 'FLIGHT' || Boolean(g.isCombatMode);
+      crosshair.style.display = showCrosshair ? 'block' : 'none';
+      crosshair.classList.toggle('locked', Boolean(g.targetLocked));
+    }
+    const banner = this.root.querySelector<HTMLElement>('#game-hud-banner');
+    if (banner) {
+      banner.textContent = g.gameBannerText || '';
+      banner.classList.toggle('visible', Boolean(g.gameBannerText));
+    }
+    const missionEl = this.root.querySelector<HTMLElement>('#game-hud-mission');
+    if (missionEl) {
+      missionEl.textContent = g.gameMissionText || '';
     }
     const btn = this.root.querySelector<HTMLButtonElement>('#game-toggle-btn');
     if (btn) {
@@ -3993,8 +4347,24 @@ export class SystemPulseApp {
             </div>
           </div>
         </div>
+
+        <div class="panel stack-md">
+          <div class="panel-header" style="margin-bottom:0;">
+            <div>
+              <h2 class="panel-title">Wykres D3.js Hierarchii Pamięci (Cache L1/L2, L3, Odczyt/Zapis DRAM, DMA, STREAM)</h2>
+              <span class="panel-caption">Porównanie rzeczywistej przepustowości (MB/s) wszystkich poziomów pamięci komputera</span>
+            </div>
+            <span class="font-mono status-cyan" style="font-size:12px;">Opóźnienie losowe: ${r.latencyNs > 0 ? `${r.latencyNs} ns` : '—'}</span>
+          </div>
+          <div id="ram-d3-bandwidth" class="d3-chart-box"></div>
+        </div>
       </div>
     `;
+
+    const ramChartEl = host.querySelector<HTMLElement>('#ram-d3-bandwidth');
+    if (ramChartEl) {
+      renderRamBandwidthD3Chart(ramChartEl, r);
+    }
 
     host.querySelectorAll<HTMLButtonElement>('[data-ram-size]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -4037,6 +4407,8 @@ export class SystemPulseApp {
   private renderDiskView(host: HTMLElement): void {
     const d = this.diskState;
     const busy = d.status === 'running';
+    const drives = this.diskDrives.length > 0 ? this.diskDrives : diskTestService.getAvailableDrives();
+    const selectedDrive = diskTestService.getSelectedDrive();
     const smartCls =
       d.smartStatus === 'ZDROWY' ? 'status-ok' : d.smartStatus === 'UWAGA' ? 'status-warn' : 'status-err';
 
@@ -4044,9 +4416,9 @@ export class SystemPulseApp {
       <div class="stack-lg">
         <div class="section-header">
           <div>
-            <h1 class="section-title">Wydajność dysku (SSD / NVMe / HDD — 6 etapów: QD64, DirectStorage, Termika &amp; SMART)</h1>
+            <h1 class="section-title">Wydajność dysku (Wybór Partycji / Dysku · 6 etapów: QD64, DirectStorage, Termika &amp; SMART)</h1>
             <p class="section-subtitle">
-              Pomiar odczytu/zapisu sekwencyjnego i losowego 4K, kolejek QD32 &amp; QD64, trybu mieszanego 70/30 R/W, DirectStorage 128K Burst, krzywej bufora SLC, ciągłego zapisu termicznego, transakcji DB Commit / Metadanych oraz sum CRC32 i SMART.
+              Wybierz dokładny dysk lub partycję (C:\\, D:\\, G:\\, NVMe, USB) do przeskanowania i przetestowania. Pomiar odczytu/zapisu sekwencyjnego i 4K, kolejek QD32 &amp; QD64, DirectStorage 128K, retencji SLC oraz wykresy D3.js.
             </p>
           </div>
           <div class="row-wrap" style="gap:8px;align-items:center;">
@@ -4063,8 +4435,94 @@ export class SystemPulseApp {
             </div>
             <button id="disk-run-btn" type="button" class="btn btn-primary" ${busy ? 'disabled' : ''}>
               ${iconSvg('play', 14)}
-              <span>${busy ? 'Testowanie (6 etapów)...' : `Testuj dysk (${d.payloadSizeMB || diskTestService.getPayloadSizeMB()} MB)`}</span>
+              <span>${busy ? 'Testowanie (6 etapów)...' : `Testuj wybrany dysk (${d.payloadSizeMB || diskTestService.getPayloadSizeMB()} MB)`}</span>
             </button>
+          </div>
+        </div>
+
+        <div class="panel stack-md">
+          <div class="row-between" style="flex-wrap:wrap;gap:8px;">
+            <div>
+              <h2 class="panel-title">💾 Wybierz Dysk / Partycję do Skanowania i Testu (${drives.length} wykrytych)</h2>
+              <span class="panel-caption">
+                Aktywny cel: <strong class="status-cyan">${esc(selectedDrive.label)}</strong> · ${diskTestService.isNativeBridgeConnected() ? 'Mostek .EXE aktywny (bezpośredni odczyt wszystkich liter dysków Windows)' : 'Wskaż partycję lub użyj 1-Klik Skan PowerShell poniżej, aby natychmiast wczytać wszystkie dyski C:, D:, G:, NVMe i USB'}
+              </span>
+            </div>
+            <div class="row-wrap" style="gap:8px;">
+              <button id="disk-pick-drive-btn" type="button" class="btn btn-amber btn-sm" ${busy ? 'disabled' : ''}>
+                📂 Wybierz folder / dysk (FS API)
+              </button>
+              <button id="disk-ps-copy-btn" type="button" class="btn btn-primary btn-sm" ${busy ? 'disabled' : ''} title="Kopiuje komendę PowerShell wykrywającą wszystkie dyski fizyczne i litery partycji C:/D:/G:/USB">
+                ⚡ Skan Partycji (PowerShell 1-Klik)
+              </button>
+              <button id="disk-cmd-copy-btn" type="button" class="btn btn-secondary btn-sm" ${busy ? 'disabled' : ''} title="Kopiuje alternatywną komendę CMD dla Windows">
+                ⌘ Skan CMD
+              </button>
+              <button id="disk-refresh-drives-btn" type="button" class="btn btn-secondary btn-sm" ${busy ? 'disabled' : ''}>
+                🔄 Odśwież listę dysków
+              </button>
+            </div>
+          </div>
+
+          <div class="row-wrap" style="gap:8px;align-items:center;padding:8px 10px;border-radius:var(--radius-sm);background:var(--bg-inset);border:1px solid var(--border-subtle);">
+            <input
+              id="disk-scan-paste-input"
+              type="text"
+              class="field-input font-mono"
+              style="flex:1;min-width:260px;font-size:11.5px;padding:6px 10px;"
+              placeholder="Wklej wynik z PowerShell/CMD (Ctrl+V) lub litery partycji np. C:\ D:\ G:\ ..."
+            />
+            <button id="disk-scan-clipboard-btn" type="button" class="btn btn-secondary btn-sm" ${busy ? 'disabled' : ''}>
+              📋 Wczytaj ze schowka
+            </button>
+            <button id="disk-scan-import-btn" type="button" class="btn btn-primary btn-sm" ${busy ? 'disabled' : ''}>
+              ➕ Dodaj dyski / partycje
+            </button>
+          </div>
+
+          ${
+            this.diskDriveNotice
+              ? `<div style="padding:8px 12px;border:1px solid var(--accent-cyan);border-radius:var(--radius-sm);font-size:12px;background:var(--bg-inset);">
+                  <strong class="status-cyan">Nośnik:</strong> ${esc(this.diskDriveNotice)}
+                </div>`
+              : ''
+          }
+
+          <div class="drive-selector-grid">
+            ${drives
+              .map((drv) => {
+                const isSelected = drv.id === selectedDrive.id;
+                const badgeText =
+                  drv.kind === 'native_exe'
+                    ? 'NATYWNY .EXE'
+                    : drv.kind === 'fs_picker'
+                      ? 'WYBRANY DYSK FS'
+                      : drv.kind === 'smbios'
+                        ? drv.id.startsWith('smbios_vol_')
+                          ? 'PARTYCJA SYSTEMU'
+                          : 'DYSK FIZYCZNY'
+                        : 'SYSTEM OPFS';
+                const capText =
+                  drv.totalGB && drv.totalGB > 0
+                    ? `${drv.totalGB} GB${drv.freeGB !== undefined ? ` · Wolne: ${drv.freeGB} GB` : ''}`
+                    : drv.mediaType;
+                return `
+                  <button
+                    type="button"
+                    class="drive-card ${isSelected ? 'selected' : ''}"
+                    data-select-drive="${esc(drv.id)}"
+                    ${busy ? 'disabled' : ''}
+                  >
+                    <div class="row-between" style="width:100%;gap:6px;">
+                      <strong class="drive-card-title">${isSelected ? '● ' : ''}${esc(drv.label)}</strong>
+                      <span class="drive-card-badge">${badgeText}</span>
+                    </div>
+                    <div class="drive-card-meta font-mono">${esc(drv.path)} · ${esc(drv.fileSystem || drv.interfaceType)}</div>
+                    <div class="drive-card-foot">${esc(capText || drv.interfaceType)} · SMART: <strong class="status-ok">${esc(drv.smartStatus || 'OK')}</strong></div>
+                  </button>
+                `;
+              })
+              .join('')}
           </div>
         </div>
 
@@ -4116,6 +4574,24 @@ export class SystemPulseApp {
           </div>
         </div>
 
+        <div class="grid-2" style="gap:14px;">
+          <div class="panel stack-md">
+            <div class="panel-header" style="margin-bottom:0;">
+              <h2 class="panel-title">Wykres D3.js: Przepustowość Dysku (MB/s)</h2>
+              <span class="panel-caption">${esc(d.targetDriveLabel || selectedDrive.label)}</span>
+            </div>
+            <div id="disk-d3-throughput" class="d3-chart-box"></div>
+          </div>
+
+          <div class="panel stack-md">
+            <div class="panel-header" style="margin-bottom:0;">
+              <h2 class="panel-title">Wykres D3.js: Skalowanie IOPS (4K / QD32 / QD64 / DB)</h2>
+              <span class="panel-caption">Śr. opóźnienie: ${d.accessTimeAvgMs > 0 ? `${d.accessTimeAvgMs} ms` : '—'}</span>
+            </div>
+            <div id="disk-d3-iops" class="d3-chart-box"></div>
+          </div>
+        </div>
+
         <div class="panel stack-md">
           <div class="panel-header" style="margin-bottom:0;">
             <h2 class="panel-title">Raport diagnostyczny SMART i kondycji nośnika</h2>
@@ -4162,12 +4638,114 @@ export class SystemPulseApp {
             </div>`
               : `
             <div style="padding:20px 0;color:var(--text-muted);font-size:13px;">
-              Kliknij „Uruchom test dysku i SMART”, aby wykonać pełny zapis/odczyt sekwencyjny, test losowy 4K, pomiar opóźnień kontrolera oraz weryfikację sum kontrolnych CRC32. Pliki testowe są automatycznie usuwane po zakończeniu badania.
+              Wybierz dysk powyżej i kliknij „Testuj wybrany dysk”, aby wykonać pełny zapis/odczyt sekwencyjny, test losowy 4K, kolejki QD32/QD64, DirectStorage oraz weryfikację sum CRC32 i SMART. Pliki testowe są automatycznie usuwane.
             </div>`
           }
         </div>
       </div>
     `;
+
+    const tpChartEl = host.querySelector<HTMLElement>('#disk-d3-throughput');
+    if (tpChartEl) renderDiskThroughputD3Chart(tpChartEl, d);
+    const iopsChartEl = host.querySelector<HTMLElement>('#disk-d3-iops');
+    if (iopsChartEl) renderDiskIopsLatencyD3Chart(iopsChartEl, d);
+
+    host.querySelectorAll<HTMLButtonElement>('[data-select-drive]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.selectDrive;
+        if (!id) return;
+        const picked = diskTestService.selectDrive(id);
+        this.diskDrives = diskTestService.getAvailableDrives();
+        this.diskState.targetDriveId = picked.id;
+        this.diskState.targetDriveLabel = picked.label;
+        this.diskDriveNotice = `Wybrano docelowy nośnik do skanowania i testu I/O: ${picked.label}`;
+        this.renderDiskView(host);
+      });
+    });
+
+    host.querySelector('#disk-pick-drive-btn')?.addEventListener('click', async () => {
+      const res = await diskTestService.pickLocalDriveFolder();
+      this.diskDrives = diskTestService.getAvailableDrives();
+      this.diskDriveNotice = res.message;
+      if (res.drive) {
+        this.diskState.targetDriveId = res.drive.id;
+        this.diskState.targetDriveLabel = res.drive.label;
+      }
+      if (this.activeModule === 'disk') this.renderDiskView(host);
+    });
+
+    host.querySelector('#disk-ps-copy-btn')?.addEventListener('click', async () => {
+      const copied = await this.copyTextToClipboard(DISK_SCAN_POWERSHELL_CMD);
+      this.diskDriveNotice = copied
+        ? 'Skopiowano skan PowerShell! Otwórz Terminal/PowerShell (Win+X → Terminal), wklej (Ctrl+V), naciśnij Enter, a potem kliknij „📋 Wczytaj ze schowka” obok.'
+        : 'Uruchom PowerShell i wklej wynik JSON w pole tekstowe obok.';
+      if (this.activeModule === 'disk') this.renderDiskView(host);
+      host.querySelector<HTMLInputElement>('#disk-scan-paste-input')?.focus();
+    });
+
+    host.querySelector('#disk-cmd-copy-btn')?.addEventListener('click', async () => {
+      const copied = await this.copyTextToClipboard(DISK_SCAN_CMD_COMMAND);
+      this.diskDriveNotice = copied
+        ? 'Skopiowano komendę CMD! Otwórz Wiersz poleceń (Win+R → cmd), wklej (Ctrl+V) i Enter, a następnie kliknij „📋 Wczytaj ze schowka”.'
+        : 'Uruchom CMD i wklej wynik w pole tekstowe obok.';
+      if (this.activeModule === 'disk') this.renderDiskView(host);
+      host.querySelector<HTMLInputElement>('#disk-scan-paste-input')?.focus();
+    });
+
+    const handleDiskScanImport = (rawText: string) => {
+      const res = diskTestService.importDiskScanText(rawText);
+      this.diskDrives = res.drives;
+      this.diskDriveNotice = res.message;
+      if (res.ok) {
+        const sel = diskTestService.getSelectedDrive();
+        this.diskState.targetDriveId = sel.id;
+        this.diskState.targetDriveLabel = sel.label;
+        void this.recordLog(
+          'DISK',
+          'OK',
+          'Wykryto partycje i dyski fizyczne',
+          `${res.drives.length} nośników`,
+          sel.path,
+          res.message
+        );
+      }
+      if (this.activeModule === 'disk') this.renderDiskView(host);
+    };
+
+    host.querySelector('#disk-scan-import-btn')?.addEventListener('click', () => {
+      const input = host.querySelector<HTMLInputElement>('#disk-scan-paste-input');
+      handleDiskScanImport(input?.value || '');
+    });
+
+    host.querySelector('#disk-scan-paste-input')?.addEventListener('paste', (ev) => {
+      const pasted = (ev as ClipboardEvent).clipboardData?.getData('text') || '';
+      if (pasted.trim()) {
+        window.setTimeout(() => handleDiskScanImport(pasted), 20);
+      }
+    });
+
+    host.querySelector('#disk-scan-clipboard-btn')?.addEventListener('click', async () => {
+      try {
+        if (!navigator.clipboard?.readText) {
+          this.diskDriveNotice = 'Przeglądarka blokuje automatyczny odczyt schowka — kliknij pole tekstowe obok i wklej ręcznie (Ctrl+V).';
+          if (this.activeModule === 'disk') this.renderDiskView(host);
+          return;
+        }
+        const text = await navigator.clipboard.readText();
+        handleDiskScanImport(text);
+      } catch {
+        this.diskDriveNotice = 'Wklej wynik (Ctrl+V) bezpośrednio do pola tekstowego obok i kliknij „Dodaj dyski / partycje”.';
+        if (this.activeModule === 'disk') this.renderDiskView(host);
+        host.querySelector<HTMLInputElement>('#disk-scan-paste-input')?.focus();
+      }
+    });
+
+    host.querySelector('#disk-refresh-drives-btn')?.addEventListener('click', async () => {
+      await hardwareScannerService.autoProbeFullLocalBridge(true);
+      this.diskDrives = await diskTestService.refreshAvailableDrives(true);
+      this.diskDriveNotice = `Odświeżono listę wykrytych dysków i partycji (${this.diskDrives.length} pozycji).`;
+      if (this.activeModule === 'disk') this.renderDiskView(host);
+    });
 
     host.querySelectorAll<HTMLButtonElement>('[data-disk-size]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -4180,17 +4758,18 @@ export class SystemPulseApp {
 
     host.querySelector('#disk-run-btn')?.addEventListener('click', async () => {
       try {
+        const chosenId = diskTestService.getSelectedDriveId();
         this.diskState = await diskTestService.runTest((res) => {
           this.diskState = res;
           if (this.activeModule === 'disk') this.renderDiskView(host);
-        });
+        }, undefined, chosenId);
         await this.recordLog(
           'DISK',
           this.diskState.smartStatus === 'ZDROWY' ? 'OK' : 'WARN',
-          'Test dysku i SMART',
+          `Test dysku: ${this.diskState.targetDriveLabel || chosenId}`,
           this.diskState.backend,
           `${this.diskState.seqReadMBs}/${this.diskState.seqWriteMBs} MB/s`,
-          `4K: ${this.diskState.rand4kIops} IOPS, Dostęp: ${this.diskState.accessTimeAvgMs} ms, SMART: ${this.diskState.smartStatus}`
+          `4K: ${this.diskState.rand4kIops} IOPS, QD64: ${this.diskState.qd64Iops || 0} IOPS, Dostęp: ${this.diskState.accessTimeAvgMs} ms, SMART: ${this.diskState.smartStatus}`
         );
         this.emitDiagnosticChanged('test-complete', true);
       } catch {
@@ -5074,6 +5653,8 @@ export class SystemPulseApp {
           ${this.renderBatteryKpisHtml(b, condCls)}
         </div>
 
+        <div id="bat-low-health-alert-slot">${renderLowBatteryHealthAlertHtml(b, false)}</div>
+
         ${this.renderPcPsuPanelHtml(b)}
 
         <div class="grid-split">
@@ -5439,7 +6020,8 @@ export class SystemPulseApp {
     });
 
     host.querySelector('#psu-export-csv-btn')?.addEventListener('click', () => {
-      const res = exportPsuRailHistoryToCsv(b.railHistory);
+      const latest = batteryHealthService.getState();
+      const res = exportPsuRailHistoryToCsv(latest.railHistory);
       void this.recordLog(
         'BATTERY',
         'OK',
@@ -5447,6 +6029,323 @@ export class SystemPulseApp {
         `${res.count} próbek`,
         'Pobrano plik',
         `Wyeksportowano do pliku CSV dane wahań szyn zasilacza (+12V, +5V, +3.3V) z ostatnich 60 sekund (${res.filename}).`
+      );
+    });
+
+    host.querySelector('#psu-export-json-btn')?.addEventListener('click', () => {
+      const latest = batteryHealthService.getState();
+      const rules = psuCalculatorService.getAlertRules();
+      const calc = psuCalculatorService.calculate(
+        latest.currentLoadPct,
+        gpuStressEngine.isRunning() ? 90 : 25,
+        this.specs?.cpuCores || 8,
+        latest.psu.tempC
+      );
+      const res = exportPsuRailHistoryToJson(latest.railHistory, {
+        psuMeta: {
+          rating80Plus: latest.psu.rating80Plus,
+          capacityW: calc.psuCapacityW,
+          tempC: latest.psu.tempC,
+          efficiencyPct: calc.efficiencyPct,
+          currentLoadPct: calc.loadPercentageOfPsu,
+          rippleMv: latest.psu.rippleMv,
+          status: latest.psu.status,
+        },
+        thresholds: {
+          rail12VThresholdPct: rules.rail12VThresholdPct,
+          rail5VThresholdPct: rules.rail5VThresholdPct,
+          rail3P3VThresholdPct: rules.rail3P3VThresholdPct,
+          globalDeviationPct: psuCalculatorService.getRailDeviationPct(),
+        },
+        alertEvents: latest.railAlertEvents || [],
+      });
+      void this.recordLog(
+        'BATTERY',
+        'OK',
+        'Eksport historii napięć szyn PSU (JSON Log)',
+        `${res.count} próbek`,
+        'Pobrano JSON',
+        `Wyeksportowano ustrukturyzowany log JSON historii wahań napięć (+12V, +5V, +3.3V), statystyk i alertów do analizy zewnętrznej (${res.filename}).`
+      );
+    });
+
+    const copyAllRailsBtn = host.querySelector<HTMLButtonElement>('#psu-copy-all-rails-btn');
+    copyAllRailsBtn?.addEventListener('click', async () => {
+      const latest = batteryHealthService.getState();
+      const rules = psuCalculatorService.getAlertRules();
+      const { jsonContent } = buildAllPsuRailsRawJson(latest.railHistory, {
+        currentRails: {
+          rail12V: latest.psu.rail12V,
+          rail5V: latest.psu.rail5V,
+          rail3P3V: latest.psu.rail3P3V,
+          powerW: latest.psu.estimatedWattage || latest.currentPowerDrawW || 0,
+        },
+        thresholds: {
+          rail12VThresholdPct: rules.rail12VThresholdPct,
+          rail5VThresholdPct: rules.rail5VThresholdPct,
+          rail3P3VThresholdPct: rules.rail3P3VThresholdPct,
+        },
+        windowSeconds: 60,
+      });
+      const copied = await this.copyTextToClipboard(jsonContent);
+      if (!copied) return;
+
+      copyAllRailsBtn.classList.add('is-copied');
+      copyAllRailsBtn.textContent = '✓ Copied All Rail Data';
+      window.setTimeout(() => {
+        copyAllRailsBtn.classList.remove('is-copied');
+        copyAllRailsBtn.textContent = '{} Copy All Rail Data';
+      }, 2200);
+
+      void this.recordLog(
+        'BATTERY',
+        'OK',
+        'Skopiowano surowe dane wszystkich szyn PSU',
+        '+12V / +5V / +3.3V',
+        'Schowek (JSON)',
+        'Skompilowano surowe pomiary napięć szyn +12V, +5V oraz +3.3V do pojedynczego obiektu JSON i skopiowano do schowka.'
+      );
+    });
+
+    const psuRailGridHost = host.querySelector<HTMLElement>('#psu-rail-kpi-grid');
+    psuRailGridHost?.addEventListener('click', async (ev) => {
+      const target = ev.target as HTMLElement | null;
+      if (!target) return;
+
+      // 1. Copy formatted raw rail voltage JSON to clipboard
+      const jsonBtn = target.closest<HTMLButtonElement>('.psu-rail-alert-tooltip-json-btn');
+      if (jsonBtn) {
+        ev.stopPropagation();
+        const rail = (jsonBtn.dataset.rail as '+12V' | '+5V' | '+3.3V' | undefined) || '+12V';
+        const latest = batteryHealthService.getState();
+        const rules = psuCalculatorService.getAlertRules();
+        const thresholdPct =
+          rail === '+12V'
+            ? rules.rail12VThresholdPct
+            : rail === '+5V'
+              ? rules.rail5VThresholdPct
+              : rules.rail3P3VThresholdPct;
+        const jsonPayload = this.buildRailRawVoltageJson(latest, rail, thresholdPct);
+        const copied = await this.copyTextToClipboard(jsonPayload);
+        if (!copied) return;
+
+        this.psuTooltipJsonCopiedRail = rail;
+        jsonBtn.classList.add('is-copied');
+        jsonBtn.textContent = '✓ Copied JSON';
+
+        if (this.psuTooltipJsonCopiedTimer !== null) {
+          window.clearTimeout(this.psuTooltipJsonCopiedTimer);
+        }
+        this.psuTooltipJsonCopiedTimer = window.setTimeout(() => {
+          this.psuTooltipJsonCopiedRail = null;
+          this.psuTooltipJsonCopiedTimer = null;
+          const activeBtn = this.root.querySelector<HTMLButtonElement>(
+            `#psu-rail-kpi-grid .psu-rail-alert-tooltip-json-btn[data-rail="${rail}"]`
+          );
+          if (activeBtn) {
+            activeBtn.classList.remove('is-copied');
+            activeBtn.textContent = '{} Copy Raw JSON';
+          }
+        }, 2200);
+
+        void this.recordLog(
+          'BATTERY',
+          'OK',
+          `Skopiowano surowe dane JSON szyny ${rail}`,
+          'Schowek (JSON)',
+          'Skopiowano',
+          `Skopiowano sformatowany ciąg JSON z surowymi pomiarami napięcia szyny ${rail} (ostatnie 60s) do analizy zewnętrznej.`
+        );
+        return;
+      }
+
+      // 2. Toggle 60-second sparkline overlay inside the alert panel
+      const historyBtn = target.closest<HTMLButtonElement>('.psu-rail-alert-tooltip-history-btn');
+      const closeSparkBtn = target.closest<HTMLButtonElement>('.psu-rail-sparkline-close-btn');
+      if (historyBtn || closeSparkBtn) {
+        ev.stopPropagation();
+        const rail = ((historyBtn || closeSparkBtn)?.dataset.rail as '+12V' | '+5V' | '+3.3V' | undefined) || '+12V';
+        const shouldOpen = closeSparkBtn ? false : !this.psuSparklineOpenRails.has(rail);
+        if (shouldOpen) {
+          this.psuSparklineOpenRails.add(rail);
+        } else {
+          this.psuSparklineOpenRails.delete(rail);
+          this.psuSparklineHoverRatio.delete(rail);
+        }
+
+        const cardEl = (historyBtn || closeSparkBtn)?.closest<HTMLElement>('.psu-rail-metric-card');
+        if (cardEl) {
+          cardEl.querySelector('.psu-rail-alert-sparkline-overlay')?.remove();
+          if (shouldOpen) {
+            const latest = batteryHealthService.getState();
+            const rules = psuCalculatorService.getAlertRules();
+            const thresholdPct =
+              rail === '+12V'
+                ? rules.rail12VThresholdPct
+                : rail === '+5V'
+                  ? rules.rail5VThresholdPct
+                  : rules.rail3P3VThresholdPct;
+            const tpl = document.createElement('template');
+            tpl.innerHTML = this.renderRailAlertSparklineOverlayHtml(latest, rail, thresholdPct).trim();
+            if (tpl.content.firstElementChild) {
+              cardEl.appendChild(tpl.content.firstElementChild);
+            }
+          }
+          const btnInCard = cardEl.querySelector<HTMLButtonElement>('.psu-rail-alert-tooltip-history-btn');
+          if (btnInCard) {
+            btnInCard.classList.toggle('is-active', shouldOpen);
+            btnInCard.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+            btnInCard.textContent = shouldOpen ? '📈 Hide Rail History' : '📈 View Rail History';
+          }
+        }
+        return;
+      }
+
+      // 2b. Open 5-minute high-resolution D3.js Full History modal
+      const fullHistoryBtn = target.closest<HTMLButtonElement>('.psu-rail-alert-tooltip-full-history-btn');
+      if (fullHistoryBtn) {
+        ev.stopPropagation();
+        const rail = (fullHistoryBtn.dataset.rail as '+12V' | '+5V' | '+3.3V' | undefined) || '+12V';
+        this.openPsuRailFullHistoryModal(rail);
+        return;
+      }
+
+      // 3. Click explanation text to copy troubleshooting steps
+      const copyBtn = target.closest<HTMLButtonElement>('.psu-rail-alert-tooltip-copy');
+      if (!copyBtn) return;
+      ev.stopPropagation();
+
+      const rail = (copyBtn.dataset.rail as '+12V' | '+5V' | '+3.3V' | undefined) || '+12V';
+      const stepsText = this.buildRailTroubleshootingClipboardText(rail);
+      const copied = await this.copyTextToClipboard(stepsText);
+      if (!copied) return;
+
+      this.psuTooltipCopiedRail = rail;
+      copyBtn.classList.add('is-copied');
+      const hintEl = copyBtn.querySelector<HTMLElement>('.psu-rail-alert-tooltip-copy-hint');
+      if (hintEl) {
+        hintEl.textContent = '✓ Skopiowano kroki sprawdzania połączeń do schowka';
+      }
+
+      if (this.psuTooltipCopiedTimer !== null) {
+        window.clearTimeout(this.psuTooltipCopiedTimer);
+      }
+      this.psuTooltipCopiedTimer = window.setTimeout(() => {
+        this.psuTooltipCopiedRail = null;
+        this.psuTooltipCopiedTimer = null;
+        const activeBtn = this.root.querySelector<HTMLButtonElement>(
+          `#psu-rail-kpi-grid .psu-rail-alert-tooltip-copy[data-rail="${rail}"]`
+        );
+        if (activeBtn) {
+          activeBtn.classList.remove('is-copied');
+          const activeHint = activeBtn.querySelector<HTMLElement>('.psu-rail-alert-tooltip-copy-hint');
+          if (activeHint) {
+            activeHint.textContent = '📋 Kliknij tekst, aby skopiować kroki sprawdzania połączeń';
+          }
+        }
+      }, 2200);
+
+      void this.recordLog(
+        'BATTERY',
+        'OK',
+        `Skopiowano kroki diagnostyki szyny ${rail}`,
+        'Schowek',
+        'Skopiowano',
+        `Skopiowano do schowka listę kroków weryfikacji połączeń dla niestabilności szyny ${rail}.`
+      );
+    });
+
+    psuRailGridHost?.addEventListener('mousemove', (ev) => {
+      const target = ev.target as HTMLElement | null;
+      const plot5sEl = target?.closest<HTMLElement>('.psu-rail-5s-sparkline-plot');
+      if (plot5sEl) {
+        const previewEl = plot5sEl.closest<HTMLElement>('.psu-rail-tooltip-5s-preview');
+        const rail = previewEl?.dataset.rail as '+12V' | '+5V' | '+3.3V' | undefined;
+        if (!previewEl || !rail) return;
+        const rect = plot5sEl.getBoundingClientRect();
+        if (rect.width <= 0) return;
+        const ratio = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+        this.applyRail5sSparklineHoverTooltip(previewEl, rail, ratio);
+        return;
+      }
+
+      const plotEl = target?.closest<HTMLElement>('.psu-rail-sparkline-plot');
+      if (!plotEl) return;
+      const overlayEl = plotEl.closest<HTMLElement>('.psu-rail-alert-sparkline-overlay');
+      const rail = overlayEl?.dataset.rail as '+12V' | '+5V' | '+3.3V' | undefined;
+      if (!overlayEl || !rail) return;
+      const rect = plotEl.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      const ratio = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+      this.psuSparklineHoverRatio.set(rail, ratio);
+      this.applySparklineHoverTooltip(overlayEl, rail, ratio);
+    });
+
+    psuRailGridHost?.addEventListener('mouseover', (ev) => {
+      const target = ev.target as HTMLElement | null;
+      const infoBtn = target?.closest<HTMLButtonElement>('.psu-rail-info-btn');
+      const valueHover = target?.closest<HTMLElement>('.psu-rail-value-hover-target');
+      if (!infoBtn && !valueHover) return;
+      const cardEl = (infoBtn || valueHover)?.closest<HTMLElement>('.psu-rail-metric-card');
+      if (!cardEl) return;
+      psuRailGridHost.querySelectorAll<HTMLElement>('.psu-rail-metric-card.is-info-tooltip-open, .psu-rail-metric-card.is-value-tooltip-open').forEach((other) => {
+        if (other !== cardEl) {
+          other.classList.remove('is-info-tooltip-open', 'is-value-tooltip-open');
+        }
+      });
+      if (infoBtn) cardEl.classList.add('is-info-tooltip-open');
+      if (valueHover) cardEl.classList.add('is-value-tooltip-open');
+    });
+
+    psuRailGridHost?.addEventListener('mouseout', (ev) => {
+      const target = ev.target as HTMLElement | null;
+      const related = ev.relatedTarget as Node | null;
+
+      const cardEl = target?.closest<HTMLElement>('.psu-rail-metric-card');
+      if (cardEl && (!related || !cardEl.contains(related))) {
+        cardEl.classList.remove('is-info-tooltip-open', 'is-value-tooltip-open');
+      }
+
+      const plot5sEl = target?.closest<HTMLElement>('.psu-rail-5s-sparkline-plot');
+      if (plot5sEl && (!related || !plot5sEl.contains(related))) {
+        const previewEl = plot5sEl.closest<HTMLElement>('.psu-rail-tooltip-5s-preview');
+        if (previewEl) this.clearRail5sSparklineHoverTooltip(previewEl);
+      }
+
+      const plotEl = target?.closest<HTMLElement>('.psu-rail-sparkline-plot');
+      if (!plotEl) return;
+      if (related && plotEl.contains(related)) return;
+      const overlayEl = plotEl.closest<HTMLElement>('.psu-rail-alert-sparkline-overlay');
+      const rail = overlayEl?.dataset.rail as '+12V' | '+5V' | '+3.3V' | undefined;
+      if (!overlayEl || !rail) return;
+      this.psuSparklineHoverRatio.delete(rail);
+      this.clearSparklineHoverTooltip(overlayEl);
+    });
+
+    psuRailGridHost?.addEventListener('input', (ev) => {
+      const target = ev.target as HTMLElement | null;
+      const thresholdInput = target?.closest<HTMLInputElement>('#psu-power-alert-threshold-input');
+      if (!thresholdInput) return;
+      const val = Number(thresholdInput.value);
+      if (!Number.isFinite(val) || val < 1 || val > 100) return;
+      psuCalculatorService.setPowerAlertThresholdPct(val);
+      this.patchPsuPowerDrawCardAlert(batteryHealthService.getState());
+    });
+
+    psuRailGridHost?.addEventListener('change', (ev) => {
+      const target = ev.target as HTMLElement | null;
+      const thresholdInput = target?.closest<HTMLInputElement>('#psu-power-alert-threshold-input');
+      if (!thresholdInput) return;
+      const saved = psuCalculatorService.setPowerAlertThresholdPct(Number(thresholdInput.value));
+      thresholdInput.value = String(saved);
+      this.patchPsuPowerDrawCardAlert(batteryHealthService.getState());
+      void this.recordLog(
+        'BATTERY',
+        'INFO',
+        'Zmiana progu alertu poboru mocy PSU',
+        `${saved}% PSU`,
+        'Zapisano próg',
+        `Ręcznie ustawiono próg wyzwolenia alertu poboru mocy zasilacza na ${saved}% pojemności PSU.`
       );
     });
 
@@ -5677,32 +6576,35 @@ export class SystemPulseApp {
       batteryHealthService.deletePowerCycle(cycleId);
       this.emitDiagnosticChanged('battery-update', false);
     });
+
+    animateMetricValueElements(host, this.metricAnimPrevValues);
   }
 
   private renderBatteryKpisHtml(b: BatteryHealthState, condCls: string): string {
+    const lowHealth = isLowBatteryHealth(b.healthPct);
     return `
       <div class="metric-card">
         <span class="metric-label">Poziom naładowania</span>
         <div class="metric-row">
-          <span class="metric-value">${b.levelPct}</span>
+          <span class="metric-value" data-metric-key="bat-level-pct" data-metric-target="${b.levelPct}">${b.levelPct}</span>
           <span class="metric-unit">%</span>
         </div>
         <span class="metric-foot">${b.charging ? '● Zasilacz podłączony' : '● Rozładowywanie'} · ${b.voltageV} V</span>
       </div>
 
-      <div class="metric-card">
+      <div class="metric-card ${lowHealth ? 'metric-card-alert' : ''}">
         <span class="metric-label">Zdrowie ogniw (Health)</span>
         <div class="metric-row">
-          <span class="metric-value ${condCls}">${b.healthPct}</span>
+          <span class="metric-value ${condCls}" data-metric-key="bat-health-pct" data-metric-target="${b.healthPct}">${b.healthPct}</span>
           <span class="metric-unit">%</span>
         </div>
-        <span class="metric-foot">Kondycja: <strong class="${condCls}">${b.condition}</strong></span>
+        <span class="metric-foot">Kondycja: <strong class="${condCls}">${b.condition}</strong>${lowHealth ? ' · Poniżej 75%' : ''}</span>
       </div>
 
       <div class="metric-card">
         <span class="metric-label">Stopień zużycia (Wear Level)</span>
         <div class="metric-row">
-          <span class="metric-value ${b.wearLevelPct > 25 ? 'status-warn' : ''}">${b.wearLevelPct}</span>
+          <span class="metric-value ${b.wearLevelPct > 25 ? 'status-warn' : ''}" data-metric-key="bat-wear-pct" data-metric-target="${b.wearLevelPct}">${b.wearLevelPct}</span>
           <span class="metric-unit">%</span>
         </div>
         <span class="metric-foot">Szac. cykle ładowania: ~${b.estimatedCycles}</span>
@@ -5711,7 +6613,7 @@ export class SystemPulseApp {
       <div class="metric-card">
         <span class="metric-label">Bieżący pobór mocy</span>
         <div class="metric-row">
-          <span class="metric-value">${b.currentPowerDrawW}</span>
+          <span class="metric-value" data-metric-key="bat-power-w" data-metric-target="${b.currentPowerDrawW}" data-metric-decimals="1">${b.currentPowerDrawW}</span>
           <span class="metric-unit">W</span>
         </div>
         <span class="metric-foot">${(b.fullChargeCapacityMWh / 1000).toFixed(1)} / ${(b.designCapacityMWh / 1000).toFixed(1)} Wh</span>
@@ -5893,7 +6795,15 @@ export class SystemPulseApp {
           : 'status-err';
 
     const kpi = this.root.querySelector('#bat-kpi-grid');
-    if (kpi) kpi.innerHTML = this.renderBatteryKpisHtml(b, condCls);
+    if (kpi) {
+      kpi.innerHTML = this.renderBatteryKpisHtml(b, condCls);
+      animateMetricValueElements(kpi, this.metricAnimPrevValues);
+    }
+
+    const lowHealthSlot = this.root.querySelector('#bat-low-health-alert-slot');
+    if (lowHealthSlot) {
+      lowHealthSlot.innerHTML = renderLowBatteryHealthAlertHtml(b, false);
+    }
 
     const loadTag = this.root.querySelector('#bat-load-tag');
     if (loadTag) loadTag.textContent = `Bieżące obciążenie: ${b.currentLoadPct}% (${b.currentPowerDrawW} W)`;
@@ -5918,7 +6828,105 @@ export class SystemPulseApp {
 
     const psuRailGridEl = this.root.querySelector<HTMLElement>('#psu-rail-kpi-grid');
     if (psuRailGridEl) {
-      psuRailGridEl.innerHTML = this.renderPcPsuRailCardsHtml(b);
+      const isInteractingWithTooltip = Boolean(
+        psuRailGridEl.querySelector(
+          '.psu-rail-metric-card.is-info-tooltip-open, .psu-rail-metric-card.is-value-tooltip-open, .psu-rail-deviation-alert:hover, .psu-rail-metric-card:focus-within, .psu-rail-value-hover-target:hover, .psu-rail-info-btn:hover, .psu-rail-alert-tooltip:hover'
+        )
+      );
+      if (!isInteractingWithTooltip) {
+        psuRailGridEl.innerHTML = this.renderPcPsuRailCardsHtml(b);
+        animateMetricValueElements(psuRailGridEl, this.metricAnimPrevValues);
+      } else {
+        this.syncPsuTransientHighlights(b);
+        this.patchPsuPowerDrawCardAlert(b);
+        const rulesForPreview = psuCalculatorService.getAlertRules();
+        // Keep 5s sparkline preview & 60s moving-average trend indicators live inside any open tooltip
+        (['+12V', '+5V', '+3.3V'] as const).forEach((rail) => {
+          const currentV =
+            rail === '+12V' ? b.psu.rail12V : rail === '+5V' ? b.psu.rail5V : b.psu.rail3P3V;
+
+          const valTargetEl = psuRailGridEl.querySelector<HTMLElement>(
+            `.psu-rail-value-hover-target[data-rail="${rail}"]`
+          );
+          const isHl = this.psuTransientTracker.isHighlighted(rail);
+          if (valTargetEl) {
+            valTargetEl.textContent = currentV.toFixed(2);
+            valTargetEl.classList.toggle('is-transient-spike-highlight', isHl);
+          }
+          const badgeEl = psuRailGridEl.querySelector<HTMLElement>(
+            `.psu-rail-transient-badge[data-rail="${rail}"]`
+          );
+          if (badgeEl) {
+            badgeEl.hidden = !isHl;
+          }
+
+          const existing5s = psuRailGridEl.querySelector<HTMLElement>(
+            `.psu-rail-tooltip-5s-preview[data-rail="${rail}"]`
+          );
+          if (existing5s) {
+            const thresholdPct =
+              rail === '+12V'
+                ? rulesForPreview.rail12VThresholdPct
+                : rail === '+5V'
+                  ? rulesForPreview.rail5VThresholdPct
+                  : rulesForPreview.rail3P3VThresholdPct;
+            const preview = renderRail5sSparklinePreviewHtml(
+              b.railHistory || [],
+              rail,
+              currentV,
+              thresholdPct,
+              batteryHealthService.getRailHistoryResetAt(rail)
+            );
+            this.psuRail5sCoordsMap.set(rail, preview.coords);
+            const tpl5s = document.createElement('template');
+            tpl5s.innerHTML = preview.html.trim();
+            const next5s = tpl5s.content.firstElementChild as HTMLElement | null;
+            if (next5s) existing5s.replaceWith(next5s);
+          }
+
+          const existingTrend = psuRailGridEl.querySelector<HTMLElement>(
+            `.psu-rail-alert-tooltip-trend[data-rail="${rail}"]`
+          );
+          if (!existingTrend) return;
+          const tpl = document.createElement('template');
+          tpl.innerHTML = this.renderRailMovingAverageTrendHtml(b, rail, currentV).trim();
+          const nextTrend = tpl.content.firstElementChild as HTMLElement | null;
+          if (nextTrend) {
+            existingTrend.replaceWith(nextTrend);
+          }
+        });
+
+        if (this.psuSparklineOpenRails.size > 0) {
+          // Keep open sparklines live even while hovering the tooltip
+          const rules = psuCalculatorService.getAlertRules();
+          this.psuSparklineOpenRails.forEach((rail) => {
+            const existingOverlay = psuRailGridEl.querySelector<HTMLElement>(
+              `.psu-rail-alert-sparkline-overlay[data-rail="${rail}"]`
+            );
+            if (!existingOverlay) return;
+            const thresholdPct =
+              rail === '+12V'
+                ? rules.rail12VThresholdPct
+                : rail === '+5V'
+                  ? rules.rail5VThresholdPct
+                  : rules.rail3P3VThresholdPct;
+            const tpl = document.createElement('template');
+            tpl.innerHTML = this.renderRailAlertSparklineOverlayHtml(b, rail, thresholdPct).trim();
+            const newOverlay = tpl.content.firstElementChild as HTMLElement | null;
+            if (newOverlay) {
+              existingOverlay.replaceWith(newOverlay);
+              const savedRatio = this.psuSparklineHoverRatio.get(rail);
+              if (typeof savedRatio === 'number') {
+                this.applySparklineHoverTooltip(newOverlay, rail, savedRatio);
+              }
+            }
+          });
+        }
+      }
+    }
+
+    if (this.psuFullHistoryModalRail) {
+      this.updatePsuRailFullHistoryModal(b);
     }
 
     const psuChartEl = this.root.querySelector<HTMLElement>('#pc-psu-rail-chart');
@@ -5934,7 +6942,15 @@ export class SystemPulseApp {
       );
     }
 
-    const psuCalc = psuCalculatorService.calculate(b.currentLoadPct, gpuStressEngine.isRunning() ? 90 : 25);
+    const psuCalc = psuCalculatorService.calculate(
+      b.currentLoadPct,
+      gpuStressEngine.isRunning() ? 90 : 25,
+      this.specs?.cpuCores || 8,
+      b.psu.tempC
+    );
+    psuCalculatorService.recordPowerDrawSample(psuCalc.totalSystemPowerW);
+    this.patchPsuMainGaugeAndTrend(b, psuCalc);
+
     const efficiencyChartEl = this.root.querySelector<HTMLElement>('#pc-psu-efficiency-chart');
     if (efficiencyChartEl) {
       renderPsuEfficiencyCurveChart(efficiencyChartEl, psuCalc.loadPercentageOfPsu, psuCalc.efficiencyPct, psuCalc.psuCapacityW);
@@ -6344,6 +7360,49 @@ export class SystemPulseApp {
           </div>
         </div>
 
+        <!-- 0A. AUTOMATYCZNY SKANER 12 PODZESPOŁÓW + WYKRES D3.JS -->
+        <div class="panel stack-md" style="border:1px solid rgba(6, 182, 212, 0.34);">
+          <div class="row-between" style="flex-wrap:wrap;gap:10px;">
+            <div>
+              <h2 class="panel-title">⚡ Automatyczne Wykrywanie + 12 Dedykowanych Skanerów Podzespołów (Auto-Detect Live)</h2>
+              <span class="panel-caption">
+                Tryb detekcji: <strong class="${hardwareScannerService.isNativeBridgeActive() ? 'status-ok' : 'status-cyan'}">${hardwareScannerService.isNativeBridgeActive() ? '● NATYWNY MOSTEK .EXE (Pełne WMI + DriveInfo)' : '● AUTO WEB API (Wykryto automatycznie bez klikania)'}</strong> · ${this.componentScans.length || 12}/12 podzespołów zmapowanych
+              </span>
+            </div>
+            <button id="hw-scan-all-12-btn" type="button" class="btn btn-primary btn-sm" ${this.componentScanBusy ? 'disabled' : ''}>
+              ${this.componentScanBusy ? 'Skanowanie 12 podzespołów...' : '⚡ Skanuj Wszystkie 12 Podzespołów'}
+            </button>
+          </div>
+
+          <div id="hw-12-health-chart" class="d3-chart-box"></div>
+
+          <div class="hw-12-grid">
+            ${this.componentScans
+              .map((card) => {
+                const statusCls =
+                  card.status === 'OK' ? 'status-ok' : card.status === 'UWAGA' ? 'status-warn' : 'status-cyan';
+                return `
+                  <div class="hw-12-card">
+                    <div class="row-between" style="gap:6px;">
+                      <span class="hw-12-cat font-mono">${esc(card.category)}</span>
+                      <span class="font-mono ${statusCls}" style="font-size:11px;font-weight:700;">${card.score}/100 · ${esc(card.source)}</span>
+                    </div>
+                    <div class="hw-12-title">${esc(card.title)}</div>
+                    <div class="hw-12-headline">${esc(card.headline)}</div>
+                    <div class="hw-12-details">${esc(card.summary)}</div>
+                    <div class="row-between" style="margin-top:auto;padding-top:6px;">
+                      <span class="font-mono" style="font-size:10px;color:var(--text-muted);">${new Date(card.scannedAt).toLocaleTimeString('pl-PL')}</span>
+                      <button type="button" class="btn btn-secondary btn-sm" style="padding:3px 9px;font-size:11px;" data-hw-scan-one="${esc(card.id)}" ${this.componentScanBusy ? 'disabled' : ''}>
+                        Skanuj
+                      </button>
+                    </div>
+                  </div>
+                `;
+              })
+              .join('')}
+          </div>
+        </div>
+
         <!-- 0. SKANER WSZYSTKICH PODZESPOŁÓW I URZĄDZEŃ -->
         <div class="panel stack-md">
           <div class="panel-header" style="margin-bottom:0;">
@@ -6548,8 +7607,18 @@ export class SystemPulseApp {
           </div>
         </div>
 
+        <!-- 1A. MONITOR PWM FREQUENCY (CZĘSTOTLIWOŚĆ SYGNAŁU PWM) -->
+        ${renderFanPwmMonitorPanelHtml(fanTestService.getPwmMonitorState())}
+
         <!-- 1B. INTERAKTYWNY EDYTOR KRZYWEJ WENTYLATORÓW -->
         ${renderFanCurveEditorPanelHtml(fanTestService.getFanCurve())}
+
+        <!-- 1C. MAPA CIEPLNA REZONANSU AKUSTYCZNEGO & BEARING HEALTH HISTORY -->
+        ${renderFanAcousticHeatmapPanelHtml(
+          fanTestService.getAcousticHeatmapState(),
+          fanTestService.getPwmMonitorState(),
+          this.fanHeatmapTab
+        )}
 
         <!-- 2. MATRYCA KLAWIATURY I NKRO -->
         <div class="panel stack-md">
@@ -6834,16 +7903,68 @@ export class SystemPulseApp {
       </div>
     `;
 
+    // --- 0A. Render D3.js 12-Component Health Chart & Per-Component Scanners ---
+    const hw12ChartEl = host.querySelector<HTMLElement>('#hw-12-health-chart');
+    if (hw12ChartEl) {
+      renderHardwareHealthD3Chart(hw12ChartEl, this.componentScans);
+    }
+
     // --- 0. Hardware Scanner & SMBIOS Handlers ---
     const rescanAll = async (notice?: string) => {
       if (notice !== undefined) this.hardwareScanNotice = notice;
+      await hardwareScannerService.autoProbeFullLocalBridge(true);
       this.hardwareScan = await hardwareScannerService.scanAll(
         this.specs?.estimatedRefreshRate || 60,
         this.specs?.gpuRenderer || '',
         this.specs
       );
+      if (this.hardwareScan?.deepInventory?.disks?.length) {
+        diskTestService.registerSmbiosDrives(this.hardwareScan.deepInventory.disks);
+      }
+      this.diskDrives = await diskTestService.refreshAvailableDrives();
+      await this.runAuto12ComponentScan();
       if (this.activeModule === 'peripherals') this.renderPeripheralsView(host);
     };
+
+    host.querySelector('#hw-scan-all-12-btn')?.addEventListener('click', async () => {
+      if (this.componentScanBusy) return;
+      this.componentScanBusy = true;
+      this.renderPeripheralsView(host);
+      try {
+        await rescanAll('Przeskanowano wszystkie 12 podzespołów sprzętowych na żywo.');
+      } finally {
+        this.componentScanBusy = false;
+        if (this.activeModule === 'peripherals') this.renderPeripheralsView(host);
+      }
+    });
+
+    host.querySelectorAll<HTMLButtonElement>('[data-hw-scan-one]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        if (this.componentScanBusy) return;
+        const compId = btn.dataset.hwScanOne || '';
+        this.componentScanBusy = true;
+        try {
+          if (compId === 'display') {
+            const msg = await hardwareScannerService.requestExactScreenModel();
+            await rescanAll(msg);
+          } else if (compId === 'storage') {
+            this.diskDrives = await diskTestService.refreshAvailableDrives();
+            await rescanAll(`Odświeżono skan dysków i partycji (${this.diskDrives.length} pozycji).`);
+          } else if (compId === 'audio_codecs' || compId === 'input_media') {
+            const msg = await hardwareScannerService.unlockMediaDeviceNames();
+            await rescanAll(msg);
+          } else if (compId === 'usb_bus') {
+            const msg = await hardwareScannerService.requestUsbDevice();
+            await rescanAll(msg);
+          } else {
+            await rescanAll(`Odświeżono diagnostykę modułu: ${compId.toUpperCase()}.`);
+          }
+        } finally {
+          this.componentScanBusy = false;
+          if (this.activeModule === 'peripherals') this.renderPeripheralsView(host);
+        }
+      });
+    });
 
     host.querySelector('#hw-rescan-btn')?.addEventListener('click', () => {
       void rescanAll('Odświeżono pełną listę wykrytych podzespołów i urządzeń.');
@@ -6960,6 +8081,384 @@ export class SystemPulseApp {
       },
     });
 
+    // --- 1A. Monitor PWM Frequency Bindings ---
+    let openBearingTooltipChannelId: string | null = null;
+    let isDraggingBearingSlider = false;
+
+    const applyOpenBearingTooltipDom = () => {
+      const body = host.querySelector<HTMLElement>('#fan-pwm-monitor-live-body');
+      if (!body) return;
+      body.querySelectorAll<HTMLElement>('.fan-pwm-bearing-box').forEach((box) => {
+        const chId = box.dataset.bearingChannel || '';
+        const isOpen = openBearingTooltipChannelId !== null && chId === openBearingTooltipChannelId;
+        box.classList.toggle('is-tooltip-open', isOpen);
+        const btn = box.querySelector<HTMLButtonElement>('.fan-bearing-info-btn');
+        if (btn) btn.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+      });
+    };
+
+    const updateBearingThresholdUiInPlace = (pwmState: ReturnType<typeof fanTestService.getPwmMonitorState>) => {
+      const body = host.querySelector<HTMLElement>('#fan-pwm-monitor-live-body');
+      if (!body) return;
+      const thresh = pwmState.predictiveMaintenanceThresholdPct;
+      body.querySelectorAll<HTMLElement>('.fan-bearing-threshold-val').forEach((el) => {
+        el.textContent = `${thresh}%`;
+      });
+      body.querySelectorAll<HTMLElement>('.fan-bearing-threshold-num').forEach((el) => {
+        el.textContent = String(thresh);
+      });
+      const summaryEl = body.querySelector<HTMLElement>('[data-maint-summary]');
+      const summaryCnt = body.querySelector<HTMLElement>('[data-maint-summary-count]');
+      if (summaryEl && summaryCnt) {
+        const hasAlerts = pwmState.maintenanceAlertCount > 0;
+        summaryEl.classList.toggle('is-maint-alert', hasAlerts);
+        summaryCnt.className = `font-mono ${hasAlerts ? 'status-err' : 'status-ok'}`;
+        summaryCnt.textContent = hasAlerts
+          ? `⚠ ${pwmState.maintenanceAlertCount} Alert${pwmState.maintenanceAlertCount > 1 ? 's' : ''}`
+          : '✓ OK';
+      }
+      pwmState.channels.forEach((ch) => {
+        const box = body.querySelector<HTMLElement>(
+          `.fan-pwm-bearing-box[data-bearing-channel="${CSS.escape(ch.id)}"]`
+        );
+        if (!box) return;
+        box.classList.toggle('is-maint-alert', ch.maintenanceAlertTriggered);
+        box.dataset.maintAlert = ch.maintenanceAlertTriggered ? 'true' : 'false';
+        const score = Math.max(0, Math.min(100, Math.round(ch.bearingHealthIndex)));
+        const statusEl = box.querySelector<HTMLElement>('.fan-bearing-tooltip-status');
+        if (statusEl) {
+          statusEl.className = `fan-bearing-tooltip-status ${ch.maintenanceAlertTriggered ? 'is-alert' : 'is-ok'} font-mono`;
+          statusEl.textContent = ch.maintenanceAlertTriggered
+            ? `⚠ Predictive Maintenance Alert (${score}% < ${thresh}%)`
+            : `✓ Within Tolerance (${score}% ≥ ${thresh}%)`;
+        }
+        const sliderEl = box.querySelector<HTMLInputElement>('.fan-bearing-threshold-slider');
+        if (sliderEl && document.activeElement !== sliderEl) {
+          sliderEl.value = String(thresh);
+        }
+        let maintPill = box.querySelector<HTMLElement>('.fan-pwm-bearing-maint-pill');
+        if (ch.maintenanceAlertTriggered) {
+          if (!maintPill) {
+            maintPill = document.createElement('div');
+            maintPill.className = 'fan-pwm-bearing-maint-pill font-mono';
+            maintPill.setAttribute('role', 'alert');
+            const predEl = box.querySelector('.fan-pwm-bearing-pred');
+            if (predEl) box.insertBefore(maintPill, predEl);
+            else box.appendChild(maintPill);
+          }
+          maintPill.textContent = `⚠ Predictive Maintenance (<${thresh}%): ${score}%`;
+        } else if (maintPill) {
+          maintPill.remove();
+        }
+      });
+    };
+
+    const syncBearingHistoryUi = (pwmState = fanTestService.getPwmMonitorState()) => {
+      if (this.activeModule !== 'peripherals') return;
+      const tabBtnHist = host.querySelector<HTMLButtonElement>('#fan-tab-btn-bearing-history');
+      if (tabBtnHist) {
+        const badge = tabBtnHist.querySelector('.fan-tab-alert-pill');
+        if (pwmState.maintenanceAlertCount > 0) {
+          if (badge) {
+            badge.textContent = String(pwmState.maintenanceAlertCount);
+          } else {
+            const pill = document.createElement('span');
+            pill.className = 'fan-tab-alert-pill font-mono';
+            pill.textContent = String(pwmState.maintenanceAlertCount);
+            tabBtnHist.appendChild(pill);
+          }
+        } else if (badge) {
+          badge.remove();
+        }
+      }
+      const openAlertBtn = host.querySelector<HTMLButtonElement>('#fan-open-bearing-alert-btn');
+      if (openAlertBtn) {
+        openAlertBtn.className = `btn ${pwmState.maintenanceAlertCount > 0 ? 'btn-danger' : 'btn-secondary'} btn-sm`;
+        openAlertBtn.innerHTML = `<span>${
+          pwmState.maintenanceAlertCount > 0
+            ? `⚠ Predictive Bearing Alert (${pwmState.maintenanceAlertCount})`
+            : 'Predictive Maintenance Guide'
+        }</span>`;
+      }
+      const histSummary = host.querySelector<HTMLElement>('#fan-bearing-history-summary');
+      if (histSummary) {
+        histSummary.innerHTML = renderFanBearingHistorySummaryHtml(pwmState);
+      }
+      if (this.fanHeatmapTab === 'bearing_history') {
+        const bhChartHost = host.querySelector<HTMLElement>('#fan-bearing-history-d3');
+        if (bhChartHost) renderFanBearingHistoryChartD3(bhChartHost, pwmState);
+      }
+    };
+
+    const syncPwmMonitorUi = (pwmState = fanTestService.getPwmMonitorState()) => {
+      if (this.activeModule !== 'peripherals') return;
+      const body = host.querySelector<HTMLElement>('#fan-pwm-monitor-live-body');
+      if (body) {
+        if (isDraggingBearingSlider) {
+          updateBearingThresholdUiInPlace(pwmState);
+        } else {
+          body.innerHTML = renderFanPwmMonitorInnerHtml(pwmState);
+          applyOpenBearingTooltipDom();
+        }
+      }
+      const toggleBtn = host.querySelector<HTMLButtonElement>('#fan-pwm-monitor-toggle-btn');
+      if (toggleBtn) {
+        toggleBtn.className = `btn ${pwmState.active ? 'btn-danger' : 'btn-primary'} btn-sm`;
+        toggleBtn.setAttribute('aria-pressed', pwmState.active ? 'true' : 'false');
+        toggleBtn.innerHTML = `${iconSvg(pwmState.active ? 'stop' : 'pulse', 14)}<span>${pwmState.active ? 'Stop PWM Monitor' : 'Monitor PWM Frequency'}</span>`;
+      }
+      const driftBtn = host.querySelector<HTMLButtonElement>('#fan-pwm-drift-test-btn');
+      if (driftBtn) {
+        driftBtn.className = `btn ${pwmState.driftTestEnabled ? 'btn-amber' : 'btn-secondary'} btn-sm`;
+        driftBtn.textContent = pwmState.driftTestEnabled ? '⚡ Fault Sim: ON' : '⚡ Simulate Drift / Fault';
+      }
+      syncBearingHistoryUi(pwmState);
+
+      if (pwmState.maintenanceAlertCount === 0) {
+        this.predictiveBearingAlertDismissed = false;
+        if (document.getElementById('predictive-bearing-alert-modal')) {
+          this.updatePredictiveBearingAlertModal(pwmState);
+        }
+      } else if (!isDraggingBearingSlider) {
+        const hasAlertedLife = pwmState.channels.some(
+          (ch) =>
+            ch.predictedLifeExpectancyPct < pwmState.predictiveMaintenanceThresholdPct ||
+            ch.bearingHealthIndex < pwmState.predictiveMaintenanceThresholdPct
+        );
+        if (hasAlertedLife && !this.predictiveBearingAlertDismissed) {
+          this.openPredictiveBearingAlertModal(null, pwmState);
+        } else if (document.getElementById('predictive-bearing-alert-modal')) {
+          this.updatePredictiveBearingAlertModal(pwmState);
+        }
+      }
+    };
+    const unsubscribePwmMonitor = fanTestService.subscribePwmMonitor(syncPwmMonitorUi);
+
+    const pwmLiveBody = host.querySelector<HTMLElement>('#fan-pwm-monitor-live-body');
+    pwmLiveBody?.addEventListener('click', (ev) => {
+      const target = ev.target as HTMLElement | null;
+      const alertBtn = target?.closest<HTMLElement>('[data-open-bearing-alert]');
+      if (alertBtn) {
+        ev.stopPropagation();
+        const chId = alertBtn.dataset.openBearingAlert;
+        this.predictiveBearingAlertDismissed = false;
+        this.openPredictiveBearingAlertModal(chId && chId !== 'all' ? chId : null);
+        return;
+      }
+      const infoBtn = target?.closest<HTMLButtonElement>('.fan-bearing-info-btn');
+      if (infoBtn) {
+        ev.stopPropagation();
+        const chId = infoBtn.dataset.bearingInfo || '';
+        openBearingTooltipChannelId = openBearingTooltipChannelId === chId ? null : chId;
+        applyOpenBearingTooltipDom();
+      }
+    });
+
+    pwmLiveBody?.addEventListener('pointerdown', (ev) => {
+      const target = ev.target as HTMLElement | null;
+      const slider = target?.closest<HTMLInputElement>('.fan-bearing-threshold-slider');
+      if (slider) {
+        isDraggingBearingSlider = true;
+        openBearingTooltipChannelId = slider.dataset.bearingChannel || openBearingTooltipChannelId;
+        applyOpenBearingTooltipDom();
+      }
+    });
+
+    pwmLiveBody?.addEventListener('input', (ev) => {
+      const target = ev.target as HTMLElement | null;
+      const slider = target?.closest<HTMLInputElement>('.fan-bearing-threshold-slider');
+      if (slider) {
+        isDraggingBearingSlider = true;
+        this.predictiveBearingAlertDismissed = false;
+        const val = Number(slider.value);
+        if (Number.isFinite(val)) {
+          fanTestService.setPredictiveMaintenanceThresholdPct(val);
+        }
+      }
+    });
+
+    pwmLiveBody?.addEventListener('change', (ev) => {
+      const target = ev.target as HTMLElement | null;
+      const slider = target?.closest<HTMLInputElement>('.fan-bearing-threshold-slider');
+      if (slider) {
+        const val = Number(slider.value);
+        isDraggingBearingSlider = false;
+        this.predictiveBearingAlertDismissed = false;
+        if (Number.isFinite(val)) {
+          fanTestService.setPredictiveMaintenanceThresholdPct(val);
+        }
+        syncPwmMonitorUi(fanTestService.getPwmMonitorState());
+      }
+    });
+
+    const onBearingDocPointerUp = () => {
+      if (isDraggingBearingSlider) {
+        isDraggingBearingSlider = false;
+        syncPwmMonitorUi(fanTestService.getPwmMonitorState());
+      }
+    };
+    const onBearingDocClick = (ev: MouseEvent) => {
+      if (!openBearingTooltipChannelId) return;
+      const target = ev.target as HTMLElement | null;
+      if (target?.closest('.fan-pwm-bearing-box')) return;
+      openBearingTooltipChannelId = null;
+      applyOpenBearingTooltipDom();
+    };
+    document.addEventListener('pointerup', onBearingDocPointerUp);
+    document.addEventListener('click', onBearingDocClick);
+
+    host.querySelector<HTMLButtonElement>('#fan-pwm-monitor-toggle-btn')?.addEventListener('click', () => {
+      if (fanTestService.isPwmMonitoring()) {
+        fanTestService.stopPwmFrequencyMonitor();
+      } else {
+        fanTestService.startPwmFrequencyMonitor();
+        const latest = fanTestService.getPwmMonitorState();
+        void this.recordLog(
+          'THERMAL',
+          latest.deviationCount > 0 || latest.rpmDutyWarningCount > 0 ? 'WARN' : 'OK',
+          'Monitor częstotliwości PWM wentylatorów',
+          `Cel płyty: ${latest.programmedHz} Hz (±${latest.tolerancePct}%)`,
+          latest.deviationCount > 0 ? `${latest.deviationCount} odchyleń` : 'Zgodne',
+          `Uruchomiono pomiar sygnału PWM oraz kontrolę rozjazdu RPM/Duty (>15% / >3s) dla ${latest.channels.length} kanałów wentylatorów.`
+        );
+      }
+    });
+
+    host.querySelector<HTMLSelectElement>('#fan-pwm-target-hz-select')?.addEventListener('change', (ev) => {
+      const targetHz = Number((ev.target as HTMLSelectElement).value) || 25000;
+      fanTestService.setProgrammedPwmFrequencyHz(targetHz);
+    });
+
+    host.querySelector<HTMLSelectElement>('#fan-pwm-tolerance-select')?.addEventListener('change', (ev) => {
+      const tolPct = Number((ev.target as HTMLSelectElement).value) || 4;
+      fanTestService.setPwmTolerancePct(tolPct);
+    });
+
+    host.querySelector<HTMLButtonElement>('#fan-pwm-drift-test-btn')?.addEventListener('click', () => {
+      const current = fanTestService.getPwmMonitorState();
+      const nextEnabled = !current.driftTestEnabled;
+      if (nextEnabled) this.predictiveBearingAlertDismissed = false;
+      fanTestService.setPwmDriftTestEnabled(nextEnabled);
+      if (nextEnabled && !fanTestService.isPwmMonitoring()) {
+        fanTestService.startPwmFrequencyMonitor();
+      }
+    });
+
+    // --- 1C. RPM-vs-Microphone Noise Resonance Heatmap, FFT & Bearing Health History Bindings ---
+    const applyHeatmapTabDom = (nextTab: FanHeatmapSectionTab) => {
+      this.fanHeatmapTab = nextTab;
+      const resPanel = host.querySelector<HTMLElement>('#fan-heatmap-tab-resonance');
+      const histPanel = host.querySelector<HTMLElement>('#fan-heatmap-tab-bearing-history');
+      if (resPanel) resPanel.hidden = nextTab !== 'resonance';
+      if (histPanel) histPanel.hidden = nextTab !== 'bearing_history';
+      host.querySelectorAll<HTMLButtonElement>('[data-fan-heatmap-tab]').forEach((btn) => {
+        const match = btn.dataset.fanHeatmapTab === nextTab;
+        btn.classList.toggle('active', match);
+        btn.setAttribute('aria-selected', match ? 'true' : 'false');
+      });
+      if (nextTab === 'bearing_history') {
+        syncBearingHistoryUi(fanTestService.getPwmMonitorState());
+      } else {
+        syncAcousticHeatmapUi(fanTestService.getAcousticHeatmapState());
+      }
+    };
+
+    const heatmapPanelEl = host.querySelector<HTMLElement>('#fan-acoustic-heatmap-panel');
+    heatmapPanelEl?.addEventListener('click', (ev) => {
+      const target = ev.target as HTMLElement | null;
+      const tabBtn = target?.closest<HTMLButtonElement>('[data-fan-heatmap-tab]');
+      if (tabBtn) {
+        const nextTab: FanHeatmapSectionTab =
+          tabBtn.dataset.fanHeatmapTab === 'bearing_history' ? 'bearing_history' : 'resonance';
+        applyHeatmapTabDom(nextTab);
+        return;
+      }
+      const alertBtn = target?.closest<HTMLElement>('[data-open-bearing-alert]');
+      if (alertBtn) {
+        const chId = alertBtn.dataset.openBearingAlert;
+        this.predictiveBearingAlertDismissed = false;
+        this.openPredictiveBearingAlertModal(chId && chId !== 'all' ? chId : null);
+      }
+    });
+
+    const syncAcousticHeatmapUi = (hmState = fanTestService.getAcousticHeatmapState()) => {
+      if (this.activeModule !== 'peripherals') return;
+      const metaHost = host.querySelector<HTMLElement>('#fan-heatmap-meta-host');
+      if (metaHost) metaHost.innerHTML = renderFanAcousticHeatmapMetaHtml(hmState);
+      if (this.fanHeatmapTab === 'resonance') {
+        const d3Host = host.querySelector<HTMLElement>('#fan-acoustic-heatmap-d3');
+        if (d3Host) renderFanAcousticHeatmapD3(d3Host, hmState);
+        const fftHost = host.querySelector<HTMLElement>('#fan-acoustic-fft-d3');
+        if (fftHost) renderFanFftSpectrumD3(fftHost, hmState);
+        const harmonicsHost = host.querySelector<HTMLElement>('#fan-acoustic-harmonics-host');
+        if (harmonicsHost) harmonicsHost.innerHTML = renderFanFftHarmonicsStripHtml(hmState);
+        const zonesHost = host.querySelector<HTMLElement>('#fan-resonance-zones-host');
+        if (zonesHost) zonesHost.innerHTML = renderFanResonanceZonesHtml(hmState);
+      } else {
+        syncBearingHistoryUi(fanTestService.getPwmMonitorState());
+      }
+
+      const micBtn = host.querySelector<HTMLButtonElement>('#fan-heatmap-mic-btn');
+      if (micBtn) {
+        micBtn.className = `btn ${hmState.capturing ? 'btn-danger' : 'btn-primary'} btn-sm`;
+        micBtn.innerHTML = `${iconSvg(hmState.capturing ? 'stop' : 'volume-on', 14)}<span>${hmState.capturing ? 'Stop Live Mic Capture' : 'Start Live Mic Capture'}</span>`;
+      }
+      const sweepBtn = host.querySelector<HTMLButtonElement>('#fan-heatmap-sweep-btn');
+      if (sweepBtn) {
+        sweepBtn.disabled = hmState.sweeping;
+        sweepBtn.innerHTML = `<span>${hmState.sweeping ? 'Sweeping RPM…' : 'Resonance Sweep (500–5500 RPM)'}</span>`;
+      }
+    };
+    const unsubscribeAcousticHeatmap = fanTestService.subscribeAcousticHeatmap(syncAcousticHeatmapUi);
+    syncAcousticHeatmapUi(fanTestService.getAcousticHeatmapState());
+    if (this.fanHeatmapTab === 'bearing_history') {
+      syncBearingHistoryUi(fanTestService.getPwmMonitorState());
+    }
+
+    host.querySelector<HTMLSelectElement>('#fan-heatmap-blades-select')?.addEventListener('change', (ev) => {
+      const blades = Number((ev.target as HTMLSelectElement).value) || 7;
+      fanTestService.setAcousticBladeCount(blades);
+    });
+
+    host.querySelector<HTMLButtonElement>('#fan-heatmap-mic-btn')?.addEventListener('click', async () => {
+      const cur = fanTestService.getAcousticHeatmapState();
+      if (cur.capturing) {
+        fanTestService.stopLiveAcousticHeatmapCapture();
+      } else {
+        await fanTestService.startLiveAcousticHeatmapCapture();
+      }
+    });
+
+    host.querySelector<HTMLButtonElement>('#fan-heatmap-sweep-btn')?.addEventListener('click', async () => {
+      const res = await fanTestService.runResonanceCalibrationSweep();
+      void this.recordLog(
+        'THERMAL',
+        res.resonanceZones.length > 0 ? 'WARN' : 'OK',
+        'Skan rezonansu akustycznego i widma FFT (RPM vs Harmoniczne)',
+        `${res.sampleCount} próbek`,
+        res.resonanceZones.length > 0 ? `${res.resonanceZones.length} strefy rezonansu` : 'Brak rezonansu',
+        res.resonanceZones.length > 0
+          ? `Wykryto strefy podwyższonych drgań: ${res.resonanceZones.map((z) => `${z.rpmMin}-${z.rpmMax} RPM (+${z.excessDb} dB${z.dominantHz ? `, FFT ${z.dominantHz} Hz` : ''})`).join(', ')}.`
+          : 'Nie wykryto mechanicznych pików rezonansu w zakresie 500–5500 RPM.'
+      );
+    });
+
+    host.querySelector<HTMLButtonElement>('#fan-heatmap-clear-btn')?.addEventListener('click', () => {
+      fanTestService.clearAcousticHeatmap();
+    });
+
+    host.querySelector<HTMLButtonElement>('#fan-heatmap-export-fft-btn')?.addEventListener('click', () => {
+      const { filename, data } = fanTestService.exportFftSpectrumToJson();
+      void this.recordLog(
+        'THERMAL',
+        'INFO',
+        'Eksport widma FFT do JSON',
+        `${data.fullFrequencyBuckets.length} koszyków FFT`,
+        filename,
+        `Wyeksportowano pełne widmo częstotliwości (${data.analysisConfig.fftSize}-pt FFT, ${data.analysisConfig.binResolutionHz} Hz/bin, ${data.majorHarmonics.length} Major Harmonics).`
+      );
+    });
+
     host.querySelector<HTMLInputElement>('#fan-mic-checkbox')?.addEventListener('change', (e) => {
       this.fanMicAcoustic = (e.target as HTMLInputElement).checked;
     });
@@ -7028,7 +8527,9 @@ export class SystemPulseApp {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) {
         return;
       }
-      e.preventDefault();
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && !['F5', 'F11', 'F12', 'Escape', 'Tab'].includes(e.key)) {
+        e.preventDefault();
+      }
       this.pressedKeys.add(e.code);
       this.testedKeys.add(e.code);
       this.lastKeyCode = e.code;
@@ -7521,6 +9022,10 @@ export class SystemPulseApp {
 
     this.peripheralsCleanup = () => {
       cleanupFanCurve();
+      unsubscribePwmMonitor();
+      unsubscribeAcousticHeatmap();
+      document.removeEventListener('pointerup', onBearingDocPointerUp);
+      document.removeEventListener('click', onBearingDocClick);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       cancelAnimationFrame(gamepadRaf);
@@ -7841,10 +9346,17 @@ export class SystemPulseApp {
           <div class="grid-2" style="gap:14px;">
             <div class="stack-sm" style="background:var(--bg-inset);padding:12px;border-radius:8px;border:1px solid var(--border-hairline);">
               <strong style="font-size:12.5px;">Import rzeczywistej prędkości karty LAN/Wi-Fi z Windows PowerShell</strong>
-              <div style="font-size:11.5px;color:var(--text-secondary);">Przeglądarka ukrywa fizyczną prędkość kabla RJ-45 (np. czy wynegocjował 100 Mbps zamiast 1G/2.5G). Uruchom w PowerShell i wklej wynik poniżej:</div>
-              <div class="row-wrap" style="gap:6px;">
-                <code class="font-mono" style="font-size:10.5px;padding:6px 8px;background:var(--bg-canvas);border-radius:6px;border:1px solid var(--border-hairline);flex:1;overflow-x:auto;white-space:nowrap;">${esc(NET_ADAPTER_PS_COMMAND)}</code>
-                <button id="net-ps-copy-btn" type="button" class="btn btn-secondary btn-sm">Kopiuj</button>
+              <div style="font-size:11.5px;color:var(--text-secondary);">Przeglądarka ukrywa fizyczną prędkość kabla RJ-45 (np. czy wynegocjował 100 Mbps zamiast 1G/2.5G). Skopiuj wyłącznie czystą komendę z pola poniżej, wklej do PowerShell i skopiuj wynik z powrotem:</div>
+              <div class="ps-cmd-box">
+                <input
+                  id="net-ps-cmd-input"
+                  type="text"
+                  readonly
+                  aria-label="Czysta komenda PowerShell Get-NetAdapter"
+                  class="ps-cmd-input font-mono"
+                  value="${esc(NET_ADAPTER_PS_COMMAND)}"
+                />
+                <button id="net-ps-copy-btn" type="button" class="btn btn-primary btn-sm">📋 Kopiuj komendę</button>
               </div>
               <textarea id="net-ps-paste" class="field-input" rows="3" placeholder="Wklej wynik polecenia Get-NetAdapter z PowerShell...">${esc(this.netAdapterPasteText)}</textarea>
               <div class="row-between">
@@ -8071,11 +9583,16 @@ export class SystemPulseApp {
       }
     });
 
-    host.querySelector('#net-ps-copy-btn')?.addEventListener('click', () => {
-      void navigator.clipboard?.writeText(NET_ADAPTER_PS_COMMAND).then(() => {
-        this.netAdapterPasteNote = 'Skopiowano komendę PowerShell do schowka!';
-        this.renderNetworkView(host);
-      });
+    host.querySelector('#net-ps-cmd-input')?.addEventListener('click', (e) => {
+      (e.currentTarget as HTMLInputElement).select();
+    });
+
+    host.querySelector('#net-ps-copy-btn')?.addEventListener('click', async () => {
+      const ok = await this.copyTextToClipboard(NET_ADAPTER_PS_COMMAND);
+      this.netAdapterPasteNote = ok
+        ? 'Skopiowano czystą komendę PowerShell (bez zbędnego tekstu)!'
+        : 'Zaznacz pole komendy powyżej i naciśnij Ctrl+C.';
+      this.renderNetworkView(host);
     });
 
     host.querySelector<HTMLTextAreaElement>('#net-ps-paste')?.addEventListener('input', (e) => {
@@ -8268,11 +9785,358 @@ export class SystemPulseApp {
     `;
   }
 
+  private buildRailTroubleshootingClipboardText(railName: '+12V' | '+5V' | '+3.3V'): string {
+    if (railName === '+12V') {
+      return [
+        'PSU Rail +12V — Kroki sprawdzania połączeń (Chwilowa niestabilność szyny / Transient Rail Instability):',
+        '1. Wyłącz komputer, przełącz wyłącznik PSU na 0 i odłącz przewód sieciowy.',
+        '2. Sprawdź i mocno dociśnij złącza 24-pin ATX (płyta główna), 8-pin EPS (CPU) oraz PCIe / 12VHPWR (GPU) po obu stronach (w tym w zasilaczu modularnym).',
+        '3. Zasilaj kartę graficzną osobnymi kablami PCIe zamiast rozdzielacza (daisy-chain).',
+        '4. Obejrzyj piny i wtyczki pod kątem przebarwień, luzów lub śladów przegrzania.',
+      ].join('\n');
+    }
+    if (railName === '+5V') {
+      return [
+        'PSU Rail +5V — Kroki sprawdzania połączeń (Chwilowa niestabilność szyny / Transient Rail Instability):',
+        '1. Wyłącz komputer i odłącz przewód zasilający AC.',
+        '2. Dociśnij wtyczkę 24-pin ATX oraz przewody zasilające dyski SATA / Molex.',
+        '3. Odłącz tymczasowo zewnętrzne huby USB i akcesoria o dużym poborze prądu, aby wykluczyć przeciążenie linii +5V.',
+        '4. Zweryfikuj stan styków złączy SATA/Molex pod kątem poluzowania lub zaśniedzenia.',
+      ].join('\n');
+    }
+    return [
+      'PSU Rail +3.3V — Kroki sprawdzania połączeń (Chwilowa niestabilność szyny / Transient Rail Instability):',
+      '1. Wyłącz komputer i odłącz przewód sieciowy od zasilacza.',
+      '2. Sprawdź pewne osadzenie i zatrzask głównej wiązki 24-pin ATX (zarówno na płycie głównej, jak i od strony zasilacza modularnego).',
+      '3. Zweryfikuj poprawne osadzenie modułów pamięci RAM oraz dysków M.2 NVMe.',
+      '4. Jeśli wahania utrzymują się pod obciążeniem, przetestuj stabilność innym zasilaczem (możliwa degradacja kondensatorów PSU).',
+    ].join('\n');
+  }
+
+  private getRailNominalVoltage(railName: '+12V' | '+5V' | '+3.3V'): number {
+    return railName === '+12V' ? 12.0 : railName === '+5V' ? 5.0 : 3.3;
+  }
+
+  private getRailHistoryWindow(
+    b: BatteryHealthState,
+    railName: '+12V' | '+5V' | '+3.3V',
+    windowMs: number,
+    allowEmptyAfterReset = false
+  ): Array<{ timestamp: number; timeLabel: string; voltageV: number; powerW: number }> {
+    const history = b.railHistory || [];
+    const resetAt = batteryHealthService.getRailHistoryResetAt(railName);
+    const effectiveHistory =
+      resetAt > 0 ? history.filter((pt) => pt.timestamp >= resetAt) : history;
+    const cutoff = Math.max(Date.now() - windowMs, resetAt);
+    const recent = effectiveHistory.filter((pt) => pt.timestamp >= cutoff);
+    const source =
+      recent.length > 0
+        ? recent
+        : resetAt > 0
+          ? []
+          : effectiveHistory.slice(-Math.max(24, Math.round(windowMs / 2500)));
+    if (source.length === 0) {
+      if (allowEmptyAfterReset && resetAt > 0) {
+        return [];
+      }
+      const curV =
+        railName === '+12V' ? b.psu.rail12V : railName === '+5V' ? b.psu.rail5V : b.psu.rail3P3V;
+      return [
+        {
+          timestamp: Date.now(),
+          timeLabel: '0s',
+          voltageV: curV,
+          powerW: b.psu.estimatedWattage || b.currentPowerDrawW || 0,
+        },
+      ];
+    }
+    return source.map((pt) => ({
+      timestamp: pt.timestamp,
+      timeLabel: pt.timeLabel,
+      voltageV: railName === '+12V' ? pt.rail12V : railName === '+5V' ? pt.rail5V : pt.rail3P3V,
+      powerW: pt.powerW,
+    }));
+  }
+
+  private getRailHistoryWindow60s(
+    b: BatteryHealthState,
+    railName: '+12V' | '+5V' | '+3.3V'
+  ): Array<{ timestamp: number; timeLabel: string; voltageV: number; powerW: number }> {
+    return this.getRailHistoryWindow(b, railName, 60000);
+  }
+
+  private buildRailRawVoltageJson(
+    b: BatteryHealthState,
+    railName: '+12V' | '+5V' | '+3.3V',
+    thresholdPct: number,
+    windowSeconds: number = 60
+  ): string {
+    const nominalV = this.getRailNominalVoltage(railName);
+    const points = this.getRailHistoryWindow(b, railName, windowSeconds * 1000);
+    const currentV =
+      railName === '+12V' ? b.psu.rail12V : railName === '+5V' ? b.psu.rail5V : b.psu.rail3P3V;
+
+    let minV = Infinity;
+    let maxV = -Infinity;
+    let sumV = 0;
+    let peakDevPct = 0;
+    let outOfThresholdCount = 0;
+
+    const samples = points.map((pt) => {
+      const devPct = (Math.abs(pt.voltageV - nominalV) / nominalV) * 100;
+      const out = devPct > thresholdPct;
+      if (pt.voltageV < minV) minV = pt.voltageV;
+      if (pt.voltageV > maxV) maxV = pt.voltageV;
+      sumV += pt.voltageV;
+      if (devPct > peakDevPct) peakDevPct = devPct;
+      if (out) outOfThresholdCount += 1;
+      return {
+        timestamp: pt.timestamp,
+        isoTime: new Date(pt.timestamp).toISOString(),
+        timeLabel: pt.timeLabel,
+        voltageV: Number(pt.voltageV.toFixed(4)),
+        deviationPct: Number(devPct.toFixed(3)),
+        outOfThreshold: out,
+        powerW: pt.powerW,
+      };
+    });
+
+    const payload = {
+      rail: railName,
+      nominalV,
+      thresholdPct,
+      windowSeconds,
+      exportedAt: new Date().toISOString(),
+      currentV: Number(currentV.toFixed(4)),
+      currentDeviationPct: Number(((Math.abs(currentV - nominalV) / nominalV) * 100).toFixed(3)),
+      sampleCount: samples.length,
+      stats: {
+        minV: Number((Number.isFinite(minV) ? minV : currentV).toFixed(4)),
+        maxV: Number((Number.isFinite(maxV) ? maxV : currentV).toFixed(4)),
+        avgV: Number((samples.length > 0 ? sumV / samples.length : currentV).toFixed(4)),
+        peakDeviationPct: Number(peakDevPct.toFixed(3)),
+        outOfThresholdCount,
+      },
+      samples,
+    };
+
+    return JSON.stringify(payload, null, 2);
+  }
+
+  private renderRailAlertSparklineOverlayHtml(
+    b: BatteryHealthState,
+    railName: '+12V' | '+5V' | '+3.3V',
+    thresholdPct: number
+  ): string {
+    const nominalV = this.getRailNominalVoltage(railName);
+    const points = this.getRailHistoryWindow60s(b, railName);
+    const upperBound = nominalV * (1 + thresholdPct / 100);
+    const lowerBound = nominalV * (1 - thresholdPct / 100);
+    const vals = points.map((p) => p.voltageV);
+    const minVal = Math.min(...vals);
+    const maxVal = Math.max(...vals);
+    const curVal = vals[vals.length - 1] ?? nominalV;
+
+    const padSpan = nominalV * Math.max(thresholdPct / 100, 0.03) * 0.35;
+    const yMin = Math.min(minVal, lowerBound) - padSpan;
+    const yMax = Math.max(maxVal, upperBound) + padSpan;
+    const ySpan = Math.max(0.001, yMax - yMin);
+
+    const W = 220;
+    const H = 52;
+    const padX = 4;
+    const padY = 5;
+    const innerW = W - padX * 2;
+    const innerH = H - padY * 2;
+
+    const toY = (v: number): number => padY + ((yMax - v) / ySpan) * innerH;
+    const toX = (idx: number): number =>
+      points.length <= 1 ? W - padX : padX + (idx / (points.length - 1)) * innerW;
+
+    const coords = points.map((pt, idx) => {
+      const devPct = nominalV > 0 ? (Math.abs(pt.voltageV - nominalV) / nominalV) * 100 : 0;
+      const x = toX(idx);
+      const y = toY(pt.voltageV);
+      return {
+        x,
+        y,
+        xRatio: points.length <= 1 ? 1 : idx / (points.length - 1),
+        voltageV: pt.voltageV,
+        timestamp: pt.timestamp,
+        timeLabel: pt.timeLabel,
+        deviationPct: devPct,
+        out: devPct > thresholdPct,
+      };
+    });
+
+    this.psuSparklinePointsMap.set(railName, coords);
+
+    const linePts = coords.map((c) => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(' ');
+    const areaPts =
+      coords.length > 0
+        ? `${coords[0].x.toFixed(1)},${(H - padY).toFixed(1)} ${linePts} ${coords[coords.length - 1].x.toFixed(1)},${(H - padY).toFixed(1)}`
+        : '';
+
+    const bandTopY = toY(upperBound);
+    const bandBotY = toY(lowerBound);
+    const nomY = toY(nominalV);
+    const lastCoord = coords[coords.length - 1];
+    const alertDots = coords
+      .filter((c) => c.out)
+      .slice(-14)
+      .map(
+        (c) =>
+          `<circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="2.2" fill="#fb7185" stroke="#0b101c" stroke-width="0.8" />`
+      )
+      .join('');
+
+    return `
+      <div class="psu-rail-alert-sparkline-overlay" data-rail="${railName}" role="region" aria-label="Historia napięcia szyny ${railName} (ostatnie 60 sekund)">
+        <div class="psu-rail-sparkline-header">
+          <span class="psu-rail-sparkline-title">${railName} · 60s</span>
+          <span class="psu-rail-sparkline-stats">${minVal.toFixed(2)}–${maxVal.toFixed(2)}V</span>
+          <button type="button" class="psu-rail-sparkline-close-btn" data-rail="${railName}" title="Zamknij wykres historii" aria-label="Zamknij wykres historii szyny ${railName}">×</button>
+        </div>
+        <div class="psu-rail-sparkline-plot" data-rail="${railName}">
+          <div class="psu-rail-sparkline-tooltip" role="status" aria-live="polite"></div>
+          <svg class="psu-rail-sparkline-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
+            <rect x="${padX}" y="${bandTopY.toFixed(1)}" width="${innerW}" height="${Math.max(1, bandBotY - bandTopY).toFixed(1)}" fill="rgba(16, 185, 129, 0.14)" />
+            <line x1="${padX}" y1="${bandTopY.toFixed(1)}" x2="${W - padX}" y2="${bandTopY.toFixed(1)}" stroke="rgba(244, 63, 94, 0.45)" stroke-width="0.8" stroke-dasharray="2,2" />
+            <line x1="${padX}" y1="${bandBotY.toFixed(1)}" x2="${W - padX}" y2="${bandBotY.toFixed(1)}" stroke="rgba(244, 63, 94, 0.45)" stroke-width="0.8" stroke-dasharray="2,2" />
+            <line x1="${padX}" y1="${nomY.toFixed(1)}" x2="${W - padX}" y2="${nomY.toFixed(1)}" stroke="rgba(148, 163, 184, 0.42)" stroke-width="0.8" stroke-dasharray="3,2" />
+            ${areaPts ? `<polygon points="${areaPts}" fill="rgba(244, 63, 94, 0.16)" />` : ''}
+            ${linePts ? `<polyline points="${linePts}" fill="none" stroke="#f43f5e" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" />` : ''}
+            ${alertDots}
+            ${lastCoord ? `<circle cx="${lastCoord.x.toFixed(1)}" cy="${lastCoord.y.toFixed(1)}" r="3.1" fill="#38bdf8" stroke="#0b101c" stroke-width="1" />` : ''}
+            <line class="psu-rail-sparkline-crosshair" x1="0" y1="${padY}" x2="0" y2="${H - padY}" stroke="rgba(56, 189, 248, 0.72)" stroke-width="1" stroke-dasharray="2,2" visibility="hidden" />
+            <circle class="psu-rail-sparkline-hover-dot" cx="0" cy="0" r="3.4" fill="#38bdf8" stroke="#0b101c" stroke-width="1.1" visibility="hidden" />
+          </svg>
+        </div>
+        <div class="psu-rail-sparkline-footer">
+          <span>-60s (${points.length} pkt)</span>
+          <span>Teraz: ${curVal.toFixed(2)}V (±${thresholdPct}%)</span>
+        </div>
+      </div>
+    `;
+  }
+
+  private applySparklineHoverTooltip(
+    overlayEl: HTMLElement,
+    railName: '+12V' | '+5V' | '+3.3V',
+    ratio: number
+  ): void {
+    const pts = this.psuSparklinePointsMap.get(railName);
+    if (!pts || pts.length === 0) return;
+
+    const idx = Math.max(0, Math.min(pts.length - 1, Math.round(ratio * (pts.length - 1))));
+    const pt = pts[idx];
+    const crosshair = overlayEl.querySelector<SVGLineElement>('.psu-rail-sparkline-crosshair');
+    const dot = overlayEl.querySelector<SVGCircleElement>('.psu-rail-sparkline-hover-dot');
+    const tooltip = overlayEl.querySelector<HTMLElement>('.psu-rail-sparkline-tooltip');
+
+    if (crosshair) {
+      crosshair.setAttribute('x1', pt.x.toFixed(1));
+      crosshair.setAttribute('x2', pt.x.toFixed(1));
+      crosshair.setAttribute('visibility', 'visible');
+    }
+    if (dot) {
+      dot.setAttribute('cx', pt.x.toFixed(1));
+      dot.setAttribute('cy', pt.y.toFixed(1));
+      dot.setAttribute('fill', pt.out ? '#fb7185' : '#38bdf8');
+      dot.setAttribute('visibility', 'visible');
+    }
+    if (tooltip) {
+      const formattedTime =
+        typeof pt.timestamp === 'number' && Number.isFinite(pt.timestamp)
+          ? new Date(pt.timestamp).toLocaleTimeString('pl-PL', {
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+              hour12: false,
+            })
+          : pt.timeLabel;
+      tooltip.innerHTML = `<span class="psu-rail-sparkline-tooltip-val">${pt.voltageV.toFixed(3)} V</span><span class="psu-rail-sparkline-tooltip-time">${formattedTime}</span>`;
+      tooltip.classList.add('is-visible');
+      tooltip.classList.toggle('is-out', pt.out);
+      const clampedPct = Math.max(18, Math.min(82, pt.xRatio * 100));
+      tooltip.style.left = `${clampedPct.toFixed(1)}%`;
+    }
+  }
+
+  private clearSparklineHoverTooltip(overlayEl: HTMLElement): void {
+    overlayEl.querySelector<SVGLineElement>('.psu-rail-sparkline-crosshair')?.setAttribute('visibility', 'hidden');
+    overlayEl.querySelector<SVGCircleElement>('.psu-rail-sparkline-hover-dot')?.setAttribute('visibility', 'hidden');
+    const tooltip = overlayEl.querySelector<HTMLElement>('.psu-rail-sparkline-tooltip');
+    if (tooltip) {
+      tooltip.classList.remove('is-visible', 'is-out');
+    }
+  }
+
+  private renderRailMovingAverageTrendHtml(
+    b: BatteryHealthState,
+    railName: '+12V' | '+5V' | '+3.3V',
+    currentV: number
+  ): string {
+    const points60s = this.getRailHistoryWindow60s(b, railName);
+    const ma60V =
+      points60s.length > 0
+        ? points60s.reduce((sum, pt) => sum + pt.voltageV, 0) / points60s.length
+        : currentV;
+    const deltaFromMa = currentV - ma60V;
+    const deltaPctFromMa = ma60V > 0 ? (deltaFromMa / ma60V) * 100 : 0;
+
+    // Fallback to recent slope if currentV happens to equal the 60s MA within 0.0002V
+    let trendDir: 'up' | 'down' | 'flat' =
+      deltaFromMa > 0.0002 ? 'up' : deltaFromMa < -0.0002 ? 'down' : 'flat';
+    if (trendDir === 'flat' && points60s.length >= 2) {
+      const slopeDelta = points60s[points60s.length - 1].voltageV - points60s[0].voltageV;
+      if (slopeDelta > 0.0002) trendDir = 'up';
+      else if (slopeDelta < -0.0002) trendDir = 'down';
+    }
+
+    const trendIconSvg =
+      trendDir === 'up'
+        ? `<svg class="psu-rail-alert-tooltip-trend-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="2 14 7 9 11 12 18 5"></polyline><polyline points="13 5 18 5 18 10"></polyline></svg>`
+        : trendDir === 'down'
+          ? `<svg class="psu-rail-alert-tooltip-trend-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="2 6 7 11 11 8 18 15"></polyline><polyline points="13 15 18 15 18 10"></polyline></svg>`
+          : `<svg class="psu-rail-alert-tooltip-trend-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="2" y1="10" x2="17" y2="10"></line><polyline points="13 6 17 10 13 14"></polyline></svg>`;
+
+    const badgeText =
+      trendDir === 'up' ? '▲ UPWARD' : trendDir === 'down' ? '▼ DOWNWARD' : '→ STEADY';
+    const signedV = `${deltaFromMa >= 0 ? '+' : ''}${deltaFromMa.toFixed(3)}V`;
+    const signedPct = `${deltaPctFromMa >= 0 ? '+' : ''}${deltaPctFromMa.toFixed(2)}%`;
+    const barWidthPct =
+      trendDir === 'flat' ? 4 : Math.max(8, Math.min(50, Math.abs(deltaPctFromMa) * 18));
+
+    return `
+      <div
+        class="psu-rail-alert-tooltip-trend is-${trendDir}"
+        data-rail="${railName}"
+        aria-label="Trend napięcia szyny ${railName} względem 60-sekundowej średniej kroczącej: ${badgeText} (${signedV}, ${signedPct}, 60s MA ${ma60V.toFixed(3)}V)"
+      >
+        <div class="psu-rail-alert-tooltip-trend-top">
+          <span class="psu-rail-alert-tooltip-trend-main">
+            ${trendIconSvg}
+            <span class="psu-rail-alert-tooltip-trend-badge">${badgeText}</span>
+            <span>${signedV} (${signedPct})</span>
+          </span>
+          <span class="psu-rail-alert-tooltip-trend-ma">60s MA: ${ma60V.toFixed(3)}V</span>
+        </div>
+        <div class="psu-rail-alert-tooltip-trend-track" aria-hidden="true">
+          <span class="psu-rail-alert-tooltip-trend-mid"></span>
+          <span class="psu-rail-alert-tooltip-trend-fill" style="width:${barWidthPct.toFixed(1)}%;"></span>
+        </div>
+      </div>
+    `;
+  }
+
   private renderRailDeviationTooltipHtml(
+    b: BatteryHealthState,
     railName: '+12V' | '+5V' | '+3.3V',
     currentV: number,
     deviationPct: number,
-    thresholdPct: number
+    thresholdPct: number,
+    isExceeded: boolean = true
   ): string {
     const checkHint =
       railName === '+12V'
@@ -8281,17 +10145,661 @@ export class SystemPulseApp {
           ? 'Sprawdź wtyczkę 24-pin ATX, kable zasilania SATA / Molex oraz odepnij nadmiarowe urządzenia i huby USB o dużym poborze prądu.'
           : 'Sprawdź dociśnięcie głównej wiązki 24-pin ATX na płycie głównej oraz osadzenie modułów RAM i M.2; przy nawrotach zweryfikuj kondycję kondensatorów PSU.';
     const tooltipId = `psu-rail-tooltip-${railName.replace(/[^0-9a-z]/gi, '')}`;
+    const isCopied = this.psuTooltipCopiedRail === railName;
+    const isJsonCopied = this.psuTooltipJsonCopiedRail === railName;
+    const isHistoryOpen = this.psuSparklineOpenRails.has(railName);
+    const tooltipHeaderText = isExceeded
+      ? `Chwilowa niestabilność szyny ${railName} (${currentV.toFixed(2)}V · ±${deviationPct.toFixed(1)}% &gt; ±${thresholdPct}%)`
+      : `Diagnostyka szyny ${railName} (${currentV.toFixed(2)}V · ±${deviationPct.toFixed(1)}% · próg ±${thresholdPct}%)`;
+    const preview5s = renderRail5sSparklinePreviewHtml(
+      b.railHistory || [],
+      railName,
+      currentV,
+      thresholdPct,
+      batteryHealthService.getRailHistoryResetAt(railName)
+    );
+    this.psuRail5sCoordsMap.set(railName, preview5s.coords);
+
     return `
       <div id="${tooltipId}" class="psu-rail-alert-tooltip" role="tooltip">
-        <div class="psu-rail-alert-tooltip-title">Chwilowa niestabilność szyny ${railName} (${currentV.toFixed(2)}V · ±${deviationPct.toFixed(1)}% &gt; ±${thresholdPct}%)</div>
-        <p class="psu-rail-alert-tooltip-body">
-          <strong>Co to oznacza:</strong> Nagły spadek lub skok napięcia podczas szybkich zmian obciążenia (transient rail instability), który może powodować zawieszanie systemu, błędy WHEA lub restarty pod obciążeniem.
-        </p>
-        <p class="psu-rail-alert-tooltip-action">
-          <strong>Jak sprawdzić połączenia:</strong> ${checkHint}
-        </p>
+        <div class="psu-rail-alert-tooltip-title">${tooltipHeaderText}</div>
+        ${preview5s.html}
+        ${this.renderRailMovingAverageTrendHtml(b, railName, currentV)}
+        <button
+          type="button"
+          class="psu-rail-alert-tooltip-copy ${isCopied ? 'is-copied' : ''}"
+          data-rail="${railName}"
+          aria-label="Skopiuj kroki sprawdzania połączeń dla szyny ${railName} do schowka"
+        >
+          <span class="psu-rail-alert-tooltip-body">
+            <strong>Co to oznacza:</strong> Nagły spadek lub skok napięcia podczas szybkich zmian obciążenia (transient rail instability), który może powodować zawieszanie systemu, błędy WHEA lub restarty pod obciążeniem.
+          </span>
+          <span class="psu-rail-alert-tooltip-action">
+            <strong>Jak sprawdzić połączenia:</strong> ${checkHint}
+          </span>
+          <span class="psu-rail-alert-tooltip-copy-hint">
+            ${isCopied ? '✓ Skopiowano kroki sprawdzania połączeń do schowka' : '📋 Kliknij tekst, aby skopiować kroki sprawdzania połączeń'}
+          </span>
+        </button>
+        <div class="psu-rail-alert-tooltip-actions">
+          <button
+            type="button"
+            class="psu-rail-alert-tooltip-action-btn psu-rail-alert-tooltip-json-btn ${isJsonCopied ? 'is-copied' : ''}"
+            data-rail="${railName}"
+            aria-label="Skopiuj surowe pomiary napięcia szyny ${railName} jako JSON"
+          >
+            ${isJsonCopied ? '✓ Copied JSON' : '{} Copy Raw JSON'}
+          </button>
+          <button
+            type="button"
+            class="psu-rail-alert-tooltip-action-btn psu-rail-alert-tooltip-history-btn ${isHistoryOpen ? 'is-active' : ''}"
+            data-rail="${railName}"
+            aria-expanded="${isHistoryOpen ? 'true' : 'false'}"
+            aria-label="Pokaż lub ukryj wykres ostatnich 60 sekund dla szyny ${railName}"
+          >
+            ${isHistoryOpen ? '📈 Hide Rail History' : '📈 View Rail History'}
+          </button>
+          <button
+            type="button"
+            class="psu-rail-alert-tooltip-action-btn psu-rail-alert-tooltip-full-history-btn"
+            data-rail="${railName}"
+            aria-label="Otwórz pełną 5-minutową historię napięcia szyny ${railName} w oknie modalnym D3.js"
+          >
+            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="2 14 6 9 10 11 14 5 18 7"></polyline>
+              <path d="M13 3h4v4"></path>
+              <line x1="2" y1="17" x2="18" y2="17"></line>
+            </svg>
+            <span>View Full History</span>
+          </button>
+        </div>
       </div>
     `;
+  }
+
+  private applyRail5sSparklineHoverTooltip(
+    previewEl: HTMLElement,
+    railName: '+12V' | '+5V' | '+3.3V',
+    ratio: number
+  ): void {
+    const pts = this.psuRail5sCoordsMap.get(railName);
+    if (!pts || pts.length === 0) return;
+
+    const idx = Math.max(0, Math.min(pts.length - 1, Math.round(ratio * (pts.length - 1))));
+    const pt = pts[idx];
+    const crosshair = previewEl.querySelector<SVGLineElement>('.psu-rail-5s-crosshair');
+    const dot = previewEl.querySelector<SVGCircleElement>('.psu-rail-5s-hover-dot');
+    const tooltip = previewEl.querySelector<HTMLElement>('.psu-rail-5s-sparkline-tooltip');
+
+    if (crosshair) {
+      crosshair.setAttribute('x1', pt.x.toFixed(1));
+      crosshair.setAttribute('x2', pt.x.toFixed(1));
+      crosshair.setAttribute('visibility', 'visible');
+    }
+    if (dot) {
+      dot.setAttribute('cx', pt.x.toFixed(1));
+      dot.setAttribute('cy', pt.y.toFixed(1));
+      dot.setAttribute('fill', pt.out ? '#fb7185' : '#38bdf8');
+      dot.setAttribute('visibility', 'visible');
+    }
+    if (tooltip) {
+      const formattedTime =
+        typeof pt.timestamp === 'number' && Number.isFinite(pt.timestamp)
+          ? new Date(pt.timestamp).toLocaleTimeString('pl-PL', {
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+              hour12: false,
+            })
+          : pt.timeLabel;
+      tooltip.innerHTML = `<span>${pt.voltageV.toFixed(3)} V</span><span>·</span><span>${formattedTime}</span>`;
+      tooltip.classList.add('is-visible');
+      tooltip.classList.toggle('is-out', pt.out);
+      const clampedPct = Math.max(20, Math.min(80, pt.xRatio * 100));
+      tooltip.style.left = `${clampedPct.toFixed(1)}%`;
+    }
+  }
+
+  private clearRail5sSparklineHoverTooltip(previewEl: HTMLElement): void {
+    previewEl.querySelector<SVGLineElement>('.psu-rail-5s-crosshair')?.setAttribute('visibility', 'hidden');
+    previewEl.querySelector<SVGCircleElement>('.psu-rail-5s-hover-dot')?.setAttribute('visibility', 'hidden');
+    const tooltip = previewEl.querySelector<HTMLElement>('.psu-rail-5s-sparkline-tooltip');
+    if (tooltip) {
+      tooltip.classList.remove('is-visible', 'is-out');
+    }
+  }
+
+  private getBaseRailThresholdPct(railName: '+12V' | '+5V' | '+3.3V'): number {
+    const rules = psuCalculatorService.getAlertRules();
+    return railName === '+12V'
+      ? rules.rail12VThresholdPct
+      : railName === '+5V'
+        ? rules.rail5VThresholdPct
+        : rules.rail3P3VThresholdPct;
+  }
+
+  private getEffectiveModalThresholdPct(railName: '+12V' | '+5V' | '+3.3V'): number {
+    return this.psuFullHistoryModalTempThresholdPct ?? this.getBaseRailThresholdPct(railName);
+  }
+
+  private openPsuRailFullHistoryModal(railName: '+12V' | '+5V' | '+3.3V'): void {
+    this.closePsuRailFullHistoryModal();
+    this.psuFullHistoryModalRail = railName;
+    this.psuFullHistoryModalZoom = 2;
+    this.psuFullHistoryModalWindowMin = 5;
+    this.psuFullHistoryModalTempThresholdPct = null;
+
+    const baseThresholdPct = this.getBaseRailThresholdPct(railName);
+    const clampedSliderInit = Math.max(2, Math.min(15, Math.round(baseThresholdPct * 2) / 2));
+
+    const backdrop = document.createElement('div');
+    backdrop.id = 'psu-rail-full-history-modal';
+    backdrop.className = 'psu-full-history-modal-backdrop';
+    backdrop.setAttribute('role', 'dialog');
+    backdrop.setAttribute('aria-modal', 'true');
+    backdrop.setAttribute('aria-labelledby', 'psu-full-history-modal-title');
+
+    backdrop.innerHTML = `
+      <div class="psu-full-history-modal">
+        <div class="psu-full-history-modal-head">
+          <div>
+            <h3 id="psu-full-history-modal-title" class="psu-full-history-modal-title">
+              Pełna historia napięcia szyny ${railName} — Oś czasu 5 min (D3.js High-Res)
+            </h3>
+            <p class="psu-full-history-modal-sub" id="psu-full-history-modal-sub">
+              Przewijalny wykres o wysokiej rozdzielczości obejmujący ostatnie 300 sekund pomiarów wraz z pasmem tolerancji ATX.
+            </p>
+          </div>
+          <div class="psu-full-history-controls">
+            <label class="psu-full-history-range-wrap" for="psu-full-history-range-select">
+              <span>Range:</span>
+              <select
+                id="psu-full-history-range-select"
+                class="psu-full-history-range-select"
+                aria-label="Zakres czasu historii napięcia szyny ${railName}"
+              >
+                <option value="1">1 min (60s)</option>
+                <option value="5" selected>5 min (300s)</option>
+                <option value="15">15 min (900s)</option>
+              </select>
+            </label>
+            <button type="button" class="psu-full-history-zoom-btn" data-zoom="1" title="Skala 1x">1x</button>
+            <button type="button" class="psu-full-history-zoom-btn is-active" data-zoom="2" title="Skala 2x (wysoka rozdzielczość)">2x</button>
+            <button type="button" class="psu-full-history-zoom-btn" data-zoom="3" title="Skala 3x (ultraszczegółowa)">3x</button>
+            <button type="button" class="psu-full-history-copy-btn" id="psu-full-history-copy-json-btn">{} Copy 5m JSON</button>
+            <button
+              type="button"
+              class="psu-full-history-export-csv-btn"
+              id="psu-full-history-export-csv-btn"
+              aria-label="Eksportuj bieżącą 5-minutową historię napięcia szyny ${railName} do lokalnego pliku CSV"
+            >
+              ${iconSvg('download', 13)}
+              <span>Export 5m History (CSV)</span>
+            </button>
+            <button
+              type="button"
+              class="psu-full-history-reset-btn"
+              id="psu-full-history-reset-btn"
+              title="Wyczyść bieżący 5-minutowy bufor danych dla szyny ${railName} i uruchom okres ponownego próbkowania"
+              aria-label="Reset 5-Minute History dla szyny ${railName}"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polyline points="1 4 1 10 7 10"></polyline>
+                <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
+              </svg>
+              <span>Reset 5-Minute History</span>
+            </button>
+            <button type="button" class="psu-full-history-close-btn" id="psu-full-history-close-btn" aria-label="Zamknij okno pełnej historii">✕ Zamknij</button>
+          </div>
+        </div>
+        <div class="psu-full-history-tolerance-bar">
+          <div class="psu-full-history-tolerance-left">
+            <label class="psu-full-history-tolerance-label" for="psu-full-history-threshold-slider">
+              Temp Deviation Threshold:
+              <strong id="psu-full-history-threshold-val" class="font-mono">±${baseThresholdPct.toFixed(1)}%</strong>
+            </label>
+            <span id="psu-full-history-threshold-mode" class="psu-full-history-threshold-mode">
+              Rule default (±${baseThresholdPct}%)
+            </span>
+            <button
+              type="button"
+              id="psu-full-history-threshold-reset-btn"
+              class="psu-full-history-threshold-reset-btn"
+              hidden
+            >
+              Reset to ±${baseThresholdPct}%
+            </button>
+          </div>
+          <div class="psu-full-history-slider-wrap">
+            <span class="psu-full-history-slider-bound font-mono">2%</span>
+            <input
+              id="psu-full-history-threshold-slider"
+              class="psu-full-history-threshold-slider"
+              type="range"
+              min="2"
+              max="15"
+              step="0.5"
+              value="${clampedSliderInit}"
+              aria-label="Tymczasowy próg tolerancji odchyłki szyny ${railName} w procentach"
+            />
+            <span class="psu-full-history-slider-bound font-mono">15%</span>
+          </div>
+          <div id="psu-full-history-tolerance-status" class="psu-full-history-tolerance-status is-within">
+            Sprawdzanie tolerancji…
+          </div>
+        </div>
+        <div id="psu-full-history-resampling-banner" class="psu-full-history-resampling-banner" hidden>
+          <div class="psu-full-history-resampling-head">
+            <span id="psu-full-history-resampling-text">Re-sampling ${railName} 5-minute buffer…</span>
+            <span id="psu-full-history-resampling-count" class="font-mono">0 / 20</span>
+          </div>
+          <div class="psu-full-history-resampling-track">
+            <div id="psu-full-history-resampling-fill" class="psu-full-history-resampling-fill" style="width:0%;"></div>
+          </div>
+        </div>
+        <div class="psu-full-history-kpi-strip" id="psu-full-history-kpi-strip"></div>
+        <div id="psu-full-history-d3-chart"></div>
+        <div class="psu-full-history-hint">
+          <span id="psu-full-history-hint-range">Przewiń oś czasu poziomo, aby przeanalizować każdy skok napięcia z ostatnich 5 minut. Najedź na krzywą, aby zobaczyć dokładne wartości.</span>
+          <span class="font-mono">Czerwone punkty = przekroczenie progu · Zielone pasmo = bezpieczny zakres</span>
+        </div>
+      </div>
+    `;
+
+    backdrop.addEventListener('click', (ev) => {
+      if (ev.target === backdrop) {
+        this.closePsuRailFullHistoryModal();
+      }
+    });
+
+    backdrop.querySelector<HTMLButtonElement>('#psu-full-history-close-btn')?.addEventListener('click', () => {
+      this.closePsuRailFullHistoryModal();
+    });
+
+    const copyBtn = backdrop.querySelector<HTMLButtonElement>('#psu-full-history-copy-json-btn');
+    const exportCsvBtn = backdrop.querySelector<HTMLButtonElement>('#psu-full-history-export-csv-btn');
+    const resetHistoryBtn = backdrop.querySelector<HTMLButtonElement>('#psu-full-history-reset-btn');
+    const rangeSelect = backdrop.querySelector<HTMLSelectElement>('#psu-full-history-range-select');
+    const thresholdSlider = backdrop.querySelector<HTMLInputElement>('#psu-full-history-threshold-slider');
+    const thresholdResetBtn = backdrop.querySelector<HTMLButtonElement>('#psu-full-history-threshold-reset-btn');
+
+    thresholdSlider?.addEventListener('input', () => {
+      const parsed = Number(thresholdSlider.value);
+      if (!Number.isFinite(parsed)) return;
+      this.psuFullHistoryModalTempThresholdPct = Math.max(2, Math.min(15, parsed));
+      this.updatePsuRailFullHistoryModal(batteryHealthService.getState());
+    });
+
+    thresholdResetBtn?.addEventListener('click', () => {
+      this.psuFullHistoryModalTempThresholdPct = null;
+      const ruleBase = this.getBaseRailThresholdPct(railName);
+      if (thresholdSlider) {
+        thresholdSlider.value = String(Math.max(2, Math.min(15, Math.round(ruleBase * 2) / 2)));
+      }
+      this.updatePsuRailFullHistoryModal(batteryHealthService.getState());
+    });
+
+    resetHistoryBtn?.addEventListener('click', () => {
+      if (!this.psuFullHistoryModalRail) return;
+      const rail = this.psuFullHistoryModalRail;
+      batteryHealthService.resetRail5MinHistory(rail, { durationMs: 10000, intervalMs: 500 });
+      this.updatePsuRailFullHistoryModal(batteryHealthService.getState());
+      void this.recordLog(
+        'BATTERY',
+        'INFO',
+        `Reset 5-minutowego bufora szyny ${rail}`,
+        'Ponowne próbkowanie (10s)',
+        'W toku',
+        `Wyczyszczono bieżący 5-minutowy bufor historii szyny ${rail} i wymuszono okres szybkiego ponownego próbkowania.`
+      );
+    });
+
+    rangeSelect?.addEventListener('change', () => {
+      const parsed = Number(rangeSelect.value);
+      const nextMin: 1 | 5 | 15 = parsed === 1 ? 1 : parsed === 15 ? 15 : 5;
+      this.psuFullHistoryModalWindowMin = nextMin;
+      const secs = nextMin * 60;
+      const titleEl = backdrop.querySelector<HTMLElement>('#psu-full-history-modal-title');
+      if (titleEl) {
+        titleEl.textContent = `Pełna historia napięcia szyny ${railName} — Oś czasu ${nextMin} min (D3.js High-Res)`;
+      }
+      const subEl = backdrop.querySelector<HTMLElement>('#psu-full-history-modal-sub');
+      if (subEl) {
+        subEl.textContent = `Przewijalny wykres o wysokiej rozdzielczości obejmujący ostatnie ${secs} sekund pomiarów wraz z pasmem tolerancji ATX.`;
+      }
+      const hintRangeEl = backdrop.querySelector<HTMLElement>('#psu-full-history-hint-range');
+      if (hintRangeEl) {
+        hintRangeEl.textContent = `Przewiń oś czasu poziomo, aby przeanalizować każdy skok napięcia z ostatnich ${nextMin} min (${secs}s). Najedź na krzywą, aby zobaczyć dokładne wartości.`;
+      }
+      if (copyBtn && !copyBtn.classList.contains('is-copied')) {
+        copyBtn.textContent = `{} Copy ${nextMin}m JSON`;
+      }
+      this.updatePsuRailFullHistoryModal(batteryHealthService.getState());
+    });
+
+    backdrop.querySelectorAll<HTMLButtonElement>('.psu-full-history-zoom-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const z = Number(btn.dataset.zoom) || 2;
+        this.psuFullHistoryModalZoom = z;
+        backdrop.querySelectorAll<HTMLButtonElement>('.psu-full-history-zoom-btn').forEach((b) => {
+          b.classList.toggle('is-active', Number(b.dataset.zoom) === z);
+        });
+        this.updatePsuRailFullHistoryModal(batteryHealthService.getState());
+      });
+    });
+
+    copyBtn?.addEventListener('click', async () => {
+      if (!this.psuFullHistoryModalRail) return;
+      const latest = batteryHealthService.getState();
+      const rail = this.psuFullHistoryModalRail;
+      const windowMin = this.psuFullHistoryModalWindowMin;
+      const thresholdPct = this.getEffectiveModalThresholdPct(rail);
+      const jsonStr = this.buildRailRawVoltageJson(latest, rail, thresholdPct, windowMin * 60);
+      const ok = await this.copyTextToClipboard(jsonStr);
+      if (ok && copyBtn) {
+        copyBtn.classList.add('is-copied');
+        copyBtn.textContent = `✓ Copied ${windowMin}m JSON`;
+        window.setTimeout(() => {
+          copyBtn.classList.remove('is-copied');
+          copyBtn.textContent = `{} Copy ${this.psuFullHistoryModalWindowMin}m JSON`;
+        }, 2200);
+      }
+    });
+
+    exportCsvBtn?.addEventListener('click', () => {
+      if (!this.psuFullHistoryModalRail) return;
+      const rail = this.psuFullHistoryModalRail;
+      const latest = batteryHealthService.getState();
+      const thresholdPct = this.getEffectiveModalThresholdPct(rail);
+      const nominalV = this.getRailNominalVoltage(rail);
+      const samples5m = this.getRailHistoryWindow(latest, rail, 300000);
+      const res = exportSinglePsuRail5mHistoryToCsv({
+        railName: rail,
+        nominalV,
+        thresholdPct,
+        samples: samples5m,
+        windowSeconds: 300,
+      });
+
+      if (exportCsvBtn) {
+        exportCsvBtn.classList.add('is-exported');
+        exportCsvBtn.innerHTML = `<span>✓ Exported 5m CSV (${res.count} pkt)</span>`;
+        window.setTimeout(() => {
+          exportCsvBtn.classList.remove('is-exported');
+          exportCsvBtn.innerHTML = `${iconSvg('download', 13)}<span>Export 5m History (CSV)</span>`;
+        }, 2200);
+      }
+
+      void this.recordLog(
+        'BATTERY',
+        'OK',
+        `Eksport CSV 5 min szyny ${rail}`,
+        `${res.count} próbek`,
+        'Wyeksportowano',
+        `Wyeksportowano bieżącą 5-minutową historię napięcia szyny ${rail} do lokalnego pliku CSV (${res.filename}).`
+      );
+    });
+
+    this.psuFullHistoryModalKeyHandler = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        this.closePsuRailFullHistoryModal();
+      }
+    };
+    window.addEventListener('keydown', this.psuFullHistoryModalKeyHandler);
+
+    document.body.appendChild(backdrop);
+    this.updatePsuRailFullHistoryModal(batteryHealthService.getState());
+  }
+
+  private updatePsuRailFullHistoryModal(b: BatteryHealthState): void {
+    const railName = this.psuFullHistoryModalRail;
+    if (!railName) return;
+    const modalEl = document.getElementById('psu-rail-full-history-modal');
+    if (!modalEl) {
+      this.psuFullHistoryModalRail = null;
+      return;
+    }
+
+    const baseThresholdPct = this.getBaseRailThresholdPct(railName);
+    const thresholdPct = this.getEffectiveModalThresholdPct(railName);
+    const isTempCustom =
+      this.psuFullHistoryModalTempThresholdPct !== null &&
+      Math.abs(this.psuFullHistoryModalTempThresholdPct - baseThresholdPct) > 0.001;
+    const nominalV = this.getRailNominalVoltage(railName);
+    const windowMin = this.psuFullHistoryModalWindowMin;
+    const samples5m = this.getRailHistoryWindow(b, railName, windowMin * 60 * 1000, true);
+    const currentV =
+      railName === '+12V' ? b.psu.rail12V : railName === '+5V' ? b.psu.rail5V : b.psu.rail3P3V;
+    const currentDevPct = (Math.abs(currentV - nominalV) / nominalV) * 100;
+
+    let minV = Infinity;
+    let maxV = -Infinity;
+    let sumV = 0;
+    let peakDevPct = 0;
+    let outCount = 0;
+    for (const pt of samples5m) {
+      if (pt.voltageV < minV) minV = pt.voltageV;
+      if (pt.voltageV > maxV) maxV = pt.voltageV;
+      sumV += pt.voltageV;
+      const dev = (Math.abs(pt.voltageV - nominalV) / nominalV) * 100;
+      if (dev > peakDevPct) peakDevPct = dev;
+      if (dev > thresholdPct) outCount += 1;
+    }
+    const avgV = samples5m.length > 0 ? sumV / samples5m.length : currentV;
+    const spanSec =
+      samples5m.length >= 2
+        ? Math.max(1, Math.round((samples5m[samples5m.length - 1].timestamp - samples5m[0].timestamp) / 1000))
+        : 0;
+
+    // Update temporary threshold readout & live tolerance status pill
+    const thresholdValEl = modalEl.querySelector<HTMLElement>('#psu-full-history-threshold-val');
+    if (thresholdValEl) {
+      thresholdValEl.textContent = `±${thresholdPct.toFixed(1)}%`;
+    }
+    const thresholdModeEl = modalEl.querySelector<HTMLElement>('#psu-full-history-threshold-mode');
+    if (thresholdModeEl) {
+      thresholdModeEl.textContent = isTempCustom
+        ? `Temporary preview (Rule: ±${baseThresholdPct}%)`
+        : `Rule default (±${baseThresholdPct}%)`;
+      thresholdModeEl.classList.toggle('is-custom', isTempCustom);
+    }
+    const thresholdResetBtn = modalEl.querySelector<HTMLButtonElement>('#psu-full-history-threshold-reset-btn');
+    if (thresholdResetBtn) {
+      thresholdResetBtn.hidden = !isTempCustom;
+      thresholdResetBtn.textContent = `Reset to ±${baseThresholdPct}%`;
+    }
+
+    const toleranceStatusEl = modalEl.querySelector<HTMLElement>('#psu-full-history-tolerance-status');
+    if (toleranceStatusEl) {
+      const effectivePeak = Math.max(peakDevPct, currentDevPct);
+      const withinRange = outCount === 0 && currentDevPct <= thresholdPct;
+      toleranceStatusEl.classList.toggle('is-within', withinRange);
+      toleranceStatusEl.classList.toggle('is-exceeded', !withinRange);
+      if (withinRange) {
+        toleranceStatusEl.textContent = `✓ Within ±${thresholdPct.toFixed(1)}% tolerance (Peak ±${effectivePeak.toFixed(2)}%)`;
+      } else {
+        toleranceStatusEl.textContent = `⚠ Exceeds ±${thresholdPct.toFixed(1)}% (${outCount} excursions · Peak ±${effectivePeak.toFixed(2)}%)`;
+      }
+    }
+
+    // Update forced re-sampling status banner & button state
+    const resampling = batteryHealthService.getRailResamplingState(railName);
+    const resamplingBanner = modalEl.querySelector<HTMLElement>('#psu-full-history-resampling-banner');
+    const resamplingText = modalEl.querySelector<HTMLElement>('#psu-full-history-resampling-text');
+    const resamplingCount = modalEl.querySelector<HTMLElement>('#psu-full-history-resampling-count');
+    const resamplingFill = modalEl.querySelector<HTMLElement>('#psu-full-history-resampling-fill');
+    const resetBtn = modalEl.querySelector<HTMLButtonElement>('#psu-full-history-reset-btn');
+
+    if (resamplingBanner) {
+      resamplingBanner.hidden = !resampling.active;
+      if (resampling.active) {
+        if (resamplingText) {
+          resamplingText.textContent = `Re-sampling ${railName} 5-minute buffer (fresh high-rate capture)…`;
+        }
+        if (resamplingCount) {
+          resamplingCount.textContent = `${resampling.samplesCollected} / ${resampling.targetSamples} pkt (${resampling.progressPct}%)`;
+        }
+        if (resamplingFill) {
+          resamplingFill.style.width = `${resampling.progressPct}%`;
+        }
+      }
+    }
+    if (resetBtn) {
+      resetBtn.classList.toggle('is-resampling', resampling.active);
+      const labelSpan = resetBtn.querySelector('span');
+      if (labelSpan) {
+        labelSpan.textContent = resampling.active
+          ? `Re-sampling (${resampling.progressPct}%)`
+          : 'Reset 5-Minute History';
+      }
+    }
+
+    const kpiStrip = modalEl.querySelector<HTMLElement>('#psu-full-history-kpi-strip');
+    if (kpiStrip) {
+      kpiStrip.innerHTML = `
+        <div class="psu-full-history-kpi">
+          <div class="psu-full-history-kpi-label">Aktualne napięcie</div>
+          <div class="psu-full-history-kpi-val">${currentV.toFixed(3)} V</div>
+        </div>
+        <div class="psu-full-history-kpi">
+          <div class="psu-full-history-kpi-label">Zakres (Min / Max)</div>
+          <div class="psu-full-history-kpi-val">${samples5m.length > 0 ? `${minV.toFixed(2)}–${maxV.toFixed(2)} V` : '—'}</div>
+        </div>
+        <div class="psu-full-history-kpi">
+          <div class="psu-full-history-kpi-label">Średnia (${windowMin} min)</div>
+          <div class="psu-full-history-kpi-val">${samples5m.length > 0 ? `${avgV.toFixed(3)} V` : '—'}</div>
+        </div>
+        <div class="psu-full-history-kpi">
+          <div class="psu-full-history-kpi-label">Szczytowa odchyłka</div>
+          <div class="psu-full-history-kpi-val" style="color:${peakDevPct > thresholdPct ? '#fb7185' : '#34d399'};">${samples5m.length > 0 ? `±${peakDevPct.toFixed(2)}%` : '—'}</div>
+        </div>
+        <div class="psu-full-history-kpi">
+          <div class="psu-full-history-kpi-label">Przekroczenia (&gt;±${thresholdPct.toFixed(1)}%${isTempCustom ? ' Temp' : ''})</div>
+          <div class="psu-full-history-kpi-val" style="color:${outCount > 0 ? '#fb7185' : '#34d399'};">${outCount} / ${samples5m.length}</div>
+        </div>
+        <div class="psu-full-history-kpi">
+          <div class="psu-full-history-kpi-label">Okno osi czasu</div>
+          <div class="psu-full-history-kpi-val">${Math.floor(spanSec / 60)}m ${spanSec % 60}s</div>
+        </div>
+      `;
+    }
+
+    const chartHost = modalEl.querySelector<HTMLElement>('#psu-full-history-d3-chart');
+    if (chartHost) {
+      const emptyMsg = resampling.active
+        ? `Wyczyszczono 5-minutowy bufor szyny ${railName}. Zbieranie nowych próbek telemetrii…`
+        : undefined;
+      renderRailFullHistoryD3ModalChart(
+        chartHost,
+        railName,
+        samples5m,
+        thresholdPct,
+        nominalV,
+        this.psuFullHistoryModalZoom,
+        emptyMsg
+      );
+    }
+  }
+
+  private closePsuRailFullHistoryModal(): void {
+    document.getElementById('psu-rail-full-history-modal')?.remove();
+    this.psuFullHistoryModalRail = null;
+    this.psuFullHistoryModalTempThresholdPct = null;
+    if (this.psuFullHistoryModalKeyHandler) {
+      window.removeEventListener('keydown', this.psuFullHistoryModalKeyHandler);
+      this.psuFullHistoryModalKeyHandler = null;
+    }
+  }
+
+  private openPredictiveBearingAlertModal(
+    channelId: string | null = null,
+    pwmState: FanPwmMonitorState = fanTestService.getPwmMonitorState()
+  ): void {
+    if (channelId) this.predictiveBearingAlertFocusedChannelId = channelId;
+    const existing = document.getElementById('predictive-bearing-alert-modal');
+    if (existing) {
+      this.updatePredictiveBearingAlertModal(pwmState);
+      return;
+    }
+
+    const backdrop = document.createElement('div');
+    backdrop.id = 'predictive-bearing-alert-modal';
+    backdrop.className = 'psu-full-history-modal-backdrop';
+    backdrop.setAttribute('role', 'dialog');
+    backdrop.setAttribute('aria-modal', 'true');
+    backdrop.setAttribute('aria-labelledby', 'predictive-bearing-alert-title');
+
+    backdrop.addEventListener('click', (ev) => {
+      if (ev.target === backdrop) {
+        this.closePredictiveBearingAlertModal(true);
+      }
+    });
+
+    this.predictiveBearingAlertKeyHandler = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        this.closePredictiveBearingAlertModal(true);
+      }
+    };
+    window.addEventListener('keydown', this.predictiveBearingAlertKeyHandler);
+
+    document.body.appendChild(backdrop);
+    this.updatePredictiveBearingAlertModal(pwmState);
+  }
+
+  private updatePredictiveBearingAlertModal(
+    pwmState: FanPwmMonitorState = fanTestService.getPwmMonitorState()
+  ): void {
+    const backdrop = document.getElementById('predictive-bearing-alert-modal');
+    if (!backdrop) return;
+    backdrop.innerHTML = renderPredictiveBearingAlertModalHtml(
+      pwmState,
+      this.predictiveBearingAlertFocusedChannelId
+    );
+
+    backdrop.querySelector('#predictive-bearing-alert-close-btn')?.addEventListener('click', () => {
+      this.closePredictiveBearingAlertModal(true);
+    });
+    backdrop.querySelector('#predictive-bearing-alert-ack-btn')?.addEventListener('click', () => {
+      this.closePredictiveBearingAlertModal(true);
+    });
+    backdrop.querySelector('#predictive-bearing-alert-history-btn')?.addEventListener('click', () => {
+      this.closePredictiveBearingAlertModal(true);
+      this.fanHeatmapTab = 'bearing_history';
+      if (this.activeModule === 'peripherals') {
+        const resPanel = this.root.querySelector<HTMLElement>('#fan-heatmap-tab-resonance');
+        const histPanel = this.root.querySelector<HTMLElement>('#fan-heatmap-tab-bearing-history');
+        if (resPanel) resPanel.hidden = true;
+        if (histPanel) histPanel.hidden = false;
+        this.root.querySelectorAll<HTMLButtonElement>('[data-fan-heatmap-tab]').forEach((btn) => {
+          const match = btn.dataset.fanHeatmapTab === 'bearing_history';
+          btn.classList.toggle('active', match);
+          btn.setAttribute('aria-selected', match ? 'true' : 'false');
+        });
+        const bhChartHost = this.root.querySelector<HTMLElement>('#fan-bearing-history-d3');
+        if (bhChartHost) renderFanBearingHistoryChartD3(bhChartHost, pwmState);
+        const histSummary = this.root.querySelector<HTMLElement>('#fan-bearing-history-summary');
+        if (histSummary) histSummary.innerHTML = renderFanBearingHistorySummaryHtml(pwmState);
+        this.root.querySelector('#fan-acoustic-heatmap-panel')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      } else {
+        this.setModule('peripherals');
+      }
+    });
+    backdrop.querySelectorAll<HTMLButtonElement>('[data-alert-select-channel]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.predictiveBearingAlertFocusedChannelId = btn.dataset.alertSelectChannel || null;
+        this.updatePredictiveBearingAlertModal(fanTestService.getPwmMonitorState());
+      });
+    });
+  }
+
+  private closePredictiveBearingAlertModal(dismiss = true): void {
+    document.getElementById('predictive-bearing-alert-modal')?.remove();
+    if (dismiss) this.predictiveBearingAlertDismissed = true;
+    this.predictiveBearingAlertFocusedChannelId = null;
+    if (this.predictiveBearingAlertKeyHandler) {
+      window.removeEventListener('keydown', this.predictiveBearingAlertKeyHandler);
+      this.predictiveBearingAlertKeyHandler = null;
+    }
   }
 
   private renderPcPsuRailCardsHtml(b: BatteryHealthState): string {
@@ -8310,41 +10818,99 @@ export class SystemPulseApp {
     const isExceeded5 = dev5 > rules.rail5VThresholdPct;
     const isExceeded3 = dev3 > rules.rail3P3VThresholdPct;
 
+    this.syncPsuTransientHighlights(b);
+    const hl12 = this.psuTransientTracker.isHighlighted('+12V');
+    const hl5 = this.psuTransientTracker.isHighlighted('+5V');
+    const hl3 = this.psuTransientTracker.isHighlighted('+3.3V');
+
+    const powerAlertThresholdPct = psuCalculatorService.getPowerAlertThresholdPct();
+    const powerAlertThresholdLabel = Number.isInteger(powerAlertThresholdPct)
+      ? `${powerAlertThresholdPct}%`
+      : `${powerAlertThresholdPct.toFixed(1)}%`;
+    const overThresholdCapacity = isPsuCapacityOver95(
+      psuCalc.totalSystemPowerW,
+      psuCalc.psuCapacityW,
+      psuCalc.loadPercentageOfPsu,
+      powerAlertThresholdPct
+    );
+
     return `
-          <div class="metric-card ${isExceeded12 ? 'psu-rail-deviation-alert' : ''}" ${isExceeded12 ? 'tabindex="0" aria-describedby="psu-rail-tooltip-12V" title="Chwilowa niestabilność szyny +12V — sprawdź wtyczki 24-pin ATX, 8-pin EPS oraz PCIe/12VHPWR"' : ''}>
+          <div class="metric-card psu-rail-metric-card ${isExceeded12 ? 'psu-rail-deviation-alert' : ''}" ${isExceeded12 ? 'tabindex="0" aria-describedby="psu-rail-tooltip-12V"' : ''}>
             <span class="metric-label">Szyna +12V (CPU/GPU) ${isExceeded12 ? '⚠️ >±' + rules.rail12VThresholdPct + '%' : ''}</span>
             <div class="metric-row">
-              <span class="metric-value ${isExceeded12 ? 'status-err' : (p.rail12V < 11.4 ? 'status-err' : 'status-ok')}">${p.rail12V.toFixed(2)}</span>
+              <span class="metric-value psu-rail-value-hover-target ${isExceeded12 ? 'status-err' : (p.rail12V < 11.4 ? 'status-err' : 'status-ok')} ${hl12 ? 'is-transient-spike-highlight' : ''}" tabindex="0" data-rail="+12V" aria-describedby="psu-rail-tooltip-12V" title="Najedź kursorem, aby zobaczyć 5-sekundowy wykres wahań napięcia">${p.rail12V.toFixed(2)}</span>
               <span class="metric-unit">V</span>
+              <span class="psu-rail-transient-badge" data-rail="+12V" ${hl12 ? '' : 'hidden'}>⚡ SPIKE &gt;5%</span>
+              <button
+                type="button"
+                class="psu-rail-info-btn"
+                data-rail="+12V"
+                aria-label="Pokaż szczegóły i historię szyny +12V"
+                aria-describedby="psu-rail-tooltip-12V"
+              >i</button>
             </div>
             <span class="metric-foot">Próg reguły: ±${rules.rail12VThresholdPct}% (Odchyłka: ±${dev12.toFixed(1)}%)</span>
-            ${isExceeded12 ? this.renderRailDeviationTooltipHtml('+12V', p.rail12V, dev12, rules.rail12VThresholdPct) : ''}
+            ${this.psuSparklineOpenRails.has('+12V') ? this.renderRailAlertSparklineOverlayHtml(b, '+12V', rules.rail12VThresholdPct) : ''}
+            ${this.renderRailDeviationTooltipHtml(b, '+12V', p.rail12V, dev12, rules.rail12VThresholdPct, isExceeded12)}
           </div>
-          <div class="metric-card ${isExceeded5 ? 'psu-rail-deviation-alert' : ''}" ${isExceeded5 ? 'tabindex="0" aria-describedby="psu-rail-tooltip-5V" title="Chwilowa niestabilność szyny +5V — sprawdź wtyczkę 24-pin ATX, złącza SATA/Molex oraz porty USB"' : ''}>
+          <div class="metric-card psu-rail-metric-card ${isExceeded5 ? 'psu-rail-deviation-alert' : ''}" ${isExceeded5 ? 'tabindex="0" aria-describedby="psu-rail-tooltip-5V"' : ''}>
             <span class="metric-label">Szyna +5V (Logika / USB) ${isExceeded5 ? '⚠️ >±' + rules.rail5VThresholdPct + '%' : ''}</span>
             <div class="metric-row">
-              <span class="metric-value ${isExceeded5 ? 'status-err' : 'status-ok'}">${p.rail5V.toFixed(2)}</span>
+              <span class="metric-value psu-rail-value-hover-target ${isExceeded5 ? 'status-err' : 'status-ok'} ${hl5 ? 'is-transient-spike-highlight' : ''}" tabindex="0" data-rail="+5V" aria-describedby="psu-rail-tooltip-5V" title="Najedź kursorem, aby zobaczyć 5-sekundowy wykres wahań napięcia">${p.rail5V.toFixed(2)}</span>
               <span class="metric-unit">V</span>
+              <span class="psu-rail-transient-badge" data-rail="+5V" ${hl5 ? '' : 'hidden'}>⚡ SPIKE &gt;5%</span>
+              <button
+                type="button"
+                class="psu-rail-info-btn"
+                data-rail="+5V"
+                aria-label="Pokaż szczegóły i historię szyny +5V"
+                aria-describedby="psu-rail-tooltip-5V"
+              >i</button>
             </div>
             <span class="metric-foot">Próg reguły: ±${rules.rail5VThresholdPct}% (Odchyłka: ±${dev5.toFixed(1)}%)</span>
-            ${isExceeded5 ? this.renderRailDeviationTooltipHtml('+5V', p.rail5V, dev5, rules.rail5VThresholdPct) : ''}
+            ${this.psuSparklineOpenRails.has('+5V') ? this.renderRailAlertSparklineOverlayHtml(b, '+5V', rules.rail5VThresholdPct) : ''}
+            ${this.renderRailDeviationTooltipHtml(b, '+5V', p.rail5V, dev5, rules.rail5VThresholdPct, isExceeded5)}
           </div>
-          <div class="metric-card ${isExceeded3 ? 'psu-rail-deviation-alert' : ''}" ${isExceeded3 ? 'tabindex="0" aria-describedby="psu-rail-tooltip-33V" title="Chwilowa niestabilność szyny +3.3V — sprawdź główną wiązkę 24-pin ATX oraz osadzenie RAM/M.2"' : ''}>
+          <div class="metric-card psu-rail-metric-card ${isExceeded3 ? 'psu-rail-deviation-alert' : ''}" ${isExceeded3 ? 'tabindex="0" aria-describedby="psu-rail-tooltip-33V"' : ''}>
             <span class="metric-label">Szyna +3.3V (RAM / Chipset) ${isExceeded3 ? '⚠️ >±' + rules.rail3P3VThresholdPct + '%' : ''}</span>
             <div class="metric-row">
-              <span class="metric-value ${isExceeded3 ? 'status-err' : 'status-ok'}">${p.rail3P3V.toFixed(2)}</span>
+              <span class="metric-value psu-rail-value-hover-target ${isExceeded3 ? 'status-err' : 'status-ok'} ${hl3 ? 'is-transient-spike-highlight' : ''}" tabindex="0" data-rail="+3.3V" aria-describedby="psu-rail-tooltip-33V" title="Najedź kursorem, aby zobaczyć 5-sekundowy wykres wahań napięcia">${p.rail3P3V.toFixed(2)}</span>
               <span class="metric-unit">V</span>
+              <span class="psu-rail-transient-badge" data-rail="+3.3V" ${hl3 ? '' : 'hidden'}>⚡ SPIKE &gt;5%</span>
+              <button
+                type="button"
+                class="psu-rail-info-btn"
+                data-rail="+3.3V"
+                aria-label="Pokaż szczegóły i historię szyny +3.3V"
+                aria-describedby="psu-rail-tooltip-33V"
+              >i</button>
             </div>
             <span class="metric-foot">Próg reguły: ±${rules.rail3P3VThresholdPct}% (Odchyłka: ±${dev3.toFixed(1)}%)</span>
-            ${isExceeded3 ? this.renderRailDeviationTooltipHtml('+3.3V', p.rail3P3V, dev3, rules.rail3P3VThresholdPct) : ''}
+            ${this.psuSparklineOpenRails.has('+3.3V') ? this.renderRailAlertSparklineOverlayHtml(b, '+3.3V', rules.rail3P3VThresholdPct) : ''}
+            ${this.renderRailDeviationTooltipHtml(b, '+3.3V', p.rail3P3V, dev3, rules.rail3P3VThresholdPct, isExceeded3)}
           </div>
-          <div class="metric-card">
-            <span class="metric-label">Pobór mocy systemu (W)</span>
+          <div id="psu-power-draw-rail-card" class="metric-card psu-rail-metric-card ${overThresholdCapacity ? 'psu-rail-deviation-alert psu-rail-capacity-alert' : ''}">
+            <span id="psu-power-draw-rail-label" class="metric-label">Pobór mocy systemu (W)${overThresholdCapacity ? ` ⚠️ >${powerAlertThresholdLabel} PSU` : ''}</span>
             <div class="metric-row">
-              <span class="metric-value status-cyan">${psuCalc.totalSystemPowerW}</span>
+              <span class="metric-value ${overThresholdCapacity ? 'status-err' : 'status-cyan'}" data-metric-key="psu-total-power-w" data-metric-target="${psuCalc.totalSystemPowerW}">${psuCalc.totalSystemPowerW}</span>
               <span class="metric-unit">W / ${psuCalc.psuCapacityW}W</span>
             </div>
-            <span class="metric-foot">CPU: ${psuCalc.cpuPowerW}W · GPU: ${psuCalc.gpuPowerW}W</span>
+            <span class="metric-foot">CPU: ${psuCalc.cpuPowerW}W · GPU: ${psuCalc.gpuPowerW}W · ${psuCalc.loadPercentageOfPsu}% PSU</span>
+            <div class="psu-rail-threshold-control">
+              <label for="psu-power-alert-threshold-input" class="psu-rail-threshold-label">Próg alertu (%):</label>
+              <input
+                id="psu-power-alert-threshold-input"
+                type="number"
+                min="1"
+                max="100"
+                step="1"
+                value="${powerAlertThresholdPct}"
+                class="input-text font-mono psu-rail-threshold-input"
+                aria-label="Ręczny próg procentowy alertu poboru mocy PSU (domyślnie 95%)"
+                title="Ustaw własny próg procentowy mocy PSU wyzwalający alert (nadpisuje domyślne 95%)"
+              />
+            </div>
+            <div id="psu-capacity-alert-slot">${renderPsuCapacityAlertBannerHtml(psuCalc.totalSystemPowerW, psuCalc.psuCapacityW, psuCalc.loadPercentageOfPsu, powerAlertThresholdPct)}</div>
           </div>
           <div class="metric-card">
             <span class="metric-label">Temperatura Zasilacza (PSU)</span>
@@ -8355,6 +10921,139 @@ export class SystemPulseApp {
             <span class="metric-foot">${thermalMonitorService.getLivePsuTempC() !== null ? 'Czujnik sprzętowy PSU (LIVE)' : 'Wpływ na degradację sprawności'}</span>
           </div>
     `;
+  }
+
+  private syncPsuTransientHighlights(b: BatteryHealthState): void {
+    const pairs: Array<[TransientHighlightRail, number]> = [
+      ['+12V', b.psu.rail12V],
+      ['+5V', b.psu.rail5V],
+      ['+3.3V', b.psu.rail3P3V],
+    ];
+    const nowMs = Date.now();
+    for (const [rail, voltage] of pairs) {
+      const triggered = this.psuTransientTracker.updateRail(rail, voltage, nowMs);
+      if (triggered) {
+        const prevTimer = this.psuTransientTimers.get(rail);
+        if (prevTimer !== undefined) {
+          window.clearTimeout(prevTimer);
+        }
+        const timerId = window.setTimeout(() => {
+          this.psuTransientTimers.delete(rail);
+          this.clearPsuTransientHighlightDom(rail);
+        }, TRANSIENT_RAIL_HIGHLIGHT_DURATION_MS);
+        this.psuTransientTimers.set(rail, timerId);
+      }
+    }
+  }
+
+  private clearPsuTransientHighlightDom(rail: TransientHighlightRail): void {
+    const valEl = this.root.querySelector<HTMLElement>(
+      `#psu-rail-kpi-grid .psu-rail-value-hover-target[data-rail="${rail}"]`
+    );
+    if (valEl) {
+      valEl.classList.remove('is-transient-spike-highlight');
+    }
+    const badgeEl = this.root.querySelector<HTMLElement>(
+      `#psu-rail-kpi-grid .psu-rail-transient-badge[data-rail="${rail}"]`
+    );
+    if (badgeEl) {
+      badgeEl.hidden = true;
+    }
+  }
+
+  private patchPsuPowerDrawCardAlert(b: BatteryHealthState): void {
+    const cardEl = this.root.querySelector<HTMLElement>('#psu-power-draw-rail-card');
+    if (!cardEl) return;
+    const p = b.psu;
+    const psuCalc = psuCalculatorService.calculate(
+      b.currentLoadPct,
+      gpuStressEngine.isRunning() ? 90 : 25,
+      this.specs?.cpuCores || 8,
+      p.tempC
+    );
+    const thresholdPct = psuCalculatorService.getPowerAlertThresholdPct();
+    const overThreshold = isPsuCapacityOver95(
+      psuCalc.totalSystemPowerW,
+      psuCalc.psuCapacityW,
+      psuCalc.loadPercentageOfPsu,
+      thresholdPct
+    );
+    const thresholdLabel = Number.isInteger(thresholdPct)
+      ? `${thresholdPct}%`
+      : `${thresholdPct.toFixed(1)}%`;
+
+    cardEl.classList.toggle('psu-rail-deviation-alert', overThreshold);
+    cardEl.classList.toggle('psu-rail-capacity-alert', overThreshold);
+
+    const labelEl = cardEl.querySelector<HTMLElement>('#psu-power-draw-rail-label');
+    if (labelEl) {
+      labelEl.textContent = `Pobór mocy systemu (W)${overThreshold ? ` ⚠️ >${thresholdLabel} PSU` : ''}`;
+    }
+
+    const valEl = cardEl.querySelector<HTMLElement>('.metric-value[data-metric-key="psu-total-power-w"]');
+    if (valEl) {
+      valEl.classList.toggle('status-err', overThreshold);
+      valEl.classList.toggle('status-cyan', !overThreshold);
+    }
+
+    const slotEl = cardEl.querySelector<HTMLElement>('#psu-capacity-alert-slot');
+    if (slotEl) {
+      slotEl.innerHTML = renderPsuCapacityAlertBannerHtml(
+        psuCalc.totalSystemPowerW,
+        psuCalc.psuCapacityW,
+        psuCalc.loadPercentageOfPsu,
+        thresholdPct
+      );
+    }
+  }
+
+  private renderPcPsuMainGaugeInnerHtml(
+    b: BatteryHealthState,
+    psuCalc: ReturnType<typeof psuCalculatorService.calculate>
+  ): string {
+    return `
+          <div class="row-between" style="margin-bottom:6px;">
+            <span style="font-size:13px;font-weight:600;">Żywy wskaźnik obciążenia zasilacza (PSU Load Gauge)</span>
+            <span class="font-mono ${psuCalc.loadPercentageOfPsu > 85 ? 'status-err' : 'status-ok'}">${psuCalc.loadPercentageOfPsu}% obciążenia (${psuCalc.totalSystemPowerW}W / ${psuCalc.psuCapacityW}W)</span>
+          </div>
+          <div style="background:var(--bg-main);border-radius:8px;height:12px;overflow:hidden;position:relative;border:1px solid rgba(255,255,255,0.1);">
+            <div style="background:linear-gradient(90deg, #10b981, #06b6d4 ${psuCalc.loadPercentageOfPsu > 75 ? ', #f59e0b' : ''} ${psuCalc.loadPercentageOfPsu > 90 ? ', #ef4444' : ''});width:${Math.min(100, psuCalc.loadPercentageOfPsu)}%;height:100%;transition:width 0.4s ease;"></div>
+          </div>
+          <div class="row-between" style="font-size:11px;color:var(--text-secondary);margin-top:6px;">
+            <span>Sprawność zasilacza (z korekcją termiczną ${b.psu.tempC.toFixed(1)}°C): <strong>${psuCalc.efficiencyPct}%</strong></span>
+            <span>Straty ciepła: <strong>~${psuCalc.estimatedHeatDissipationW}W</strong></span>
+          </div>
+          <div style="font-size:11.5px;color:var(--text-primary);margin-top:4px;font-style:italic;">
+            ${esc(psuCalc.recommendation)}
+          </div>
+    `;
+  }
+
+  private renderPsuPowerDrawTrendHtmlForCalc(
+    psuCalc: ReturnType<typeof psuCalculatorService.calculate>
+  ): string {
+    const samples = psuCalculatorService.getPowerDrawSamples1m();
+    const trend = computePowerDrawTrend1m(
+      samples,
+      psuCalc.totalSystemPowerW,
+      psuCalc.psuCapacityW
+    );
+    return renderPsuPowerDrawTrendHtml(trend, psuCalc.psuCapacityW);
+  }
+
+  private patchPsuMainGaugeAndTrend(
+    b: BatteryHealthState,
+    psuCalc: ReturnType<typeof psuCalculatorService.calculate>
+  ): void {
+    const gaugeBox = this.root.querySelector<HTMLElement>('#psu-main-load-gauge-box');
+    if (gaugeBox) {
+      gaugeBox.classList.toggle('psu-gauge-pulse-box', psuCalc.loadPercentageOfPsu > 90);
+      gaugeBox.innerHTML = this.renderPcPsuMainGaugeInnerHtml(b, psuCalc);
+    }
+    const trendSlot = this.root.querySelector<HTMLElement>('#psu-power-draw-trend-slot');
+    if (trendSlot) {
+      trendSlot.innerHTML = this.renderPsuPowerDrawTrendHtmlForCalc(psuCalc);
+    }
   }
 
   private renderPcPsuPanelHtml(b: BatteryHealthState): string {
@@ -8398,8 +11097,15 @@ export class SystemPulseApp {
               ${iconSvg('download', 13)}
               <span>Pobierz Portable .EXE (.ZIP)</span>
             </button>
+            <button id="psu-copy-all-rails-btn" type="button" class="btn btn-secondary btn-sm" title="Skompiluj surowe dane napięć wszystkich trzech szyn (+12V, +5V, +3.3V) do pojedynczego obiektu JSON i skopiuj do schowka">
+              {} Copy All Rail Data
+            </button>
             <button id="psu-export-csv-btn" type="button" class="btn btn-secondary btn-sm" title="Download CSV containing the last 60 seconds of voltage fluctuation data for 12V, 5V, and 3.3V rails">
-              Download Rail Data
+              Download Rail Data (CSV)
+            </button>
+            <button id="psu-export-json-btn" type="button" class="btn btn-secondary btn-sm" title="Eksportuj pełną historię wahań napięć szyn +12V, +5V i +3.3V wraz ze statystykami i progami do ustrukturyzowanego logu JSON">
+              ${iconSvg('download', 13)}
+              <span>Export Rail Log (JSON)</span>
             </button>
             <button id="psu-clear-alerts-btn" type="button" class="btn btn-secondary btn-sm" title="Resetuj znaczniki wizualne odchyłek na wykresie napięć bez usuwania danych historii szyn">
               Clear Alerts
@@ -8414,21 +11120,12 @@ export class SystemPulseApp {
           ${this.renderPcPsuRailCardsHtml(b)}
         </div>
 
-        <div class="panel stack-sm ${psuCalc.loadPercentageOfPsu > 90 ? 'psu-gauge-pulse-box' : ''}" style="background:var(--bg-inset);padding:14px;border-radius:12px;">
-          <div class="row-between" style="margin-bottom:6px;">
-            <span style="font-size:13px;font-weight:600;">Żywy wskaźnik obciążenia zasilacza (PSU Load Gauge)</span>
-            <span class="font-mono ${psuCalc.loadPercentageOfPsu > 85 ? 'status-err' : 'status-ok'}">${psuCalc.loadPercentageOfPsu}% obciążenia (${psuCalc.totalSystemPowerW}W / ${psuCalc.psuCapacityW}W)</span>
-          </div>
-          <div style="background:var(--bg-main);border-radius:8px;height:12px;overflow:hidden;position:relative;border:1px solid rgba(255,255,255,0.1);">
-            <div style="background:linear-gradient(90deg, #10b981, #06b6d4 ${psuCalc.loadPercentageOfPsu > 75 ? ', #f59e0b' : ''} ${psuCalc.loadPercentageOfPsu > 90 ? ', #ef4444' : ''});width:${Math.min(100, psuCalc.loadPercentageOfPsu)}%;height:100%;transition:width 0.4s ease;"></div>
-          </div>
-          <div class="row-between" style="font-size:11px;color:var(--text-secondary);margin-top:6px;">
-            <span>Sprawność zasilacza (z korekcją termiczną ${p.tempC.toFixed(1)}°C): <strong>${psuCalc.efficiencyPct}%</strong></span>
-            <span>Straty ciepła: <strong>~${psuCalc.estimatedHeatDissipationW}W</strong></span>
-          </div>
-          <div style="font-size:11.5px;color:var(--text-primary);margin-top:4px;font-style:italic;">
-            ${esc(psuCalc.recommendation)}
-          </div>
+        <div id="psu-main-load-gauge-box" class="panel stack-sm ${psuCalc.loadPercentageOfPsu > 90 ? 'psu-gauge-pulse-box' : ''}" style="background:var(--bg-inset);padding:14px;border-radius:12px;">
+          ${this.renderPcPsuMainGaugeInnerHtml(b, psuCalc)}
+        </div>
+
+        <div id="psu-power-draw-trend-slot">
+          ${this.renderPsuPowerDrawTrendHtmlForCalc(psuCalc)}
         </div>
 
         <!-- Hardware Component Stress Profiles Section -->
@@ -8673,6 +11370,8 @@ export class SystemPulseApp {
     gpuStressEngine.unmount();
     gameBenchService.unmount();
     fanTestService.stop();
+    fanTestService.stopPwmFrequencyMonitor();
+    fanTestService.stopLiveAcousticHeatmapCapture();
     displayDiagnostics.closeFullscreen();
     displayDiagnostics.detachPreviewCanvas();
     this.detachPeripheralsListeners();

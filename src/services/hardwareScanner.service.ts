@@ -1,4 +1,17 @@
-import { DetectedHardwareDevice, DiskTestResult, DisplayPanelInfo, RamTestResult, SystemSpecs } from '../types';
+import {
+  BatteryHealthState,
+  ComponentScanCard,
+  DetectedHardwareDevice,
+  DiskDriveTarget,
+  DiskTestResult,
+  DisplayPanelInfo,
+  GpuStressMetrics,
+  NetworkTestResult,
+  RamTestResult,
+  SystemSpecs,
+} from '../types';
+import { diskTestService } from './diskTest.service';
+import { getLocalBridgeBases } from './localBridge';
 
 export interface ParsedRamModule {
   slot: string;
@@ -19,6 +32,15 @@ export interface ParsedDiskDrive {
   serial: string;
 }
 
+export interface ParsedLogicalDisk {
+  letter: string;
+  volumeName: string;
+  fileSystem: string;
+  totalGB: number;
+  freeGB: number;
+  driveType: string | number;
+}
+
 export interface ParsedDeepHardwareInventory {
   sourceOs: 'Windows' | 'Linux' | 'macOS' | 'Inny';
   importedAt: number;
@@ -30,6 +52,7 @@ export interface ParsedDeepHardwareInventory {
   gpus: Array<{ name: string; vramGB: string; driver: string }>;
   ramModules: ParsedRamModule[];
   disks: ParsedDiskDrive[];
+  logicalDisks?: ParsedLogicalDisk[];
   monitors: Array<{ manufacturer: string; model: string; serial: string }>;
   battery: string;
   networkAdapters: string[];
@@ -141,7 +164,7 @@ export interface HardwareScanSnapshot {
 }
 
 export const DEEP_SCAN_COMMANDS = {
-  windows: `$d={param($a)if(!$a){''}else{(-join($a|Where-Object{$_ -gt 31 -and $_ -lt 127}|ForEach-Object{[char][int]$_})).Trim()}};$o=[ordered]@{os='Windows';sys=(Get-CimInstance Win32_ComputerSystem|Select Manufacturer,Model);board=(Get-CimInstance Win32_BaseBoard|Select Manufacturer,Product);bios=(Get-CimInstance Win32_BIOS|Select Manufacturer,SMBIOSBIOSVersion,ReleaseDate);cpu=(Get-CimInstance Win32_Processor|Select Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed);gpu=@(Get-CimInstance Win32_VideoController|Select Name,AdapterRAM,DriverVersion);ram=@(Get-CimInstance Win32_PhysicalMemory|Select DeviceLocator,BankLabel,Manufacturer,PartNumber,Capacity,Speed,SMBIOSMemoryType,SerialNumber);disks=@(Get-CimInstance Win32_DiskDrive|Select Model,InterfaceType,MediaType,Size,Status,SerialNumber);monitors=@(Get-CimInstance -Namespace root\\wmi WmiMonitorID -EA SilentlyContinue|ForEach-Object{@{m=&$d $_.ManufacturerName;n=&$d $_.UserFriendlyName;s=&$d $_.SerialNumberID}});net=@(Get-CimInstance Win32_NetworkAdapter -Filter 'PhysicalAdapter=True'|Select -Expand Name)};$j=$o|ConvertTo-Json -Depth 4 -Compress;try{Set-Clipboard -Value $j -EA Stop}catch{$j|clip};Write-Host 'SKOPIOWANO DO SCHOWKA - wklej teraz w SystemPulse Pro!' -ForegroundColor Yellow`,
+  windows: `$d={param($a)if(!$a){''}else{(-join($a|Where-Object{$_ -gt 31 -and $_ -lt 127}|ForEach-Object{[char][int]$_})).Trim()}};$o=[ordered]@{os='Windows';sys=(Get-CimInstance Win32_ComputerSystem|Select Manufacturer,Model);board=(Get-CimInstance Win32_BaseBoard|Select Manufacturer,Product);bios=(Get-CimInstance Win32_BIOS|Select Manufacturer,SMBIOSBIOSVersion,ReleaseDate);cpu=(Get-CimInstance Win32_Processor|Select Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed);gpu=@(Get-CimInstance Win32_VideoController|Select Name,AdapterRAM,DriverVersion);ram=@(Get-CimInstance Win32_PhysicalMemory|Select DeviceLocator,BankLabel,Manufacturer,PartNumber,Capacity,Speed,SMBIOSMemoryType,SerialNumber);disks=@(Get-CimInstance Win32_DiskDrive|Select Model,InterfaceType,MediaType,Size,Status,SerialNumber);logicalDisks=@(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=2 OR DriveType=3 OR DriveType=4'|Select DeviceID,VolumeName,FileSystem,Size,FreeSpace,DriveType);monitors=@(Get-CimInstance -Namespace root\\wmi WmiMonitorID -EA SilentlyContinue|ForEach-Object{@{m=&$d $_.ManufacturerName;n=&$d $_.UserFriendlyName;s=&$d $_.SerialNumberID}});net=@(Get-CimInstance Win32_NetworkAdapter -Filter 'PhysicalAdapter=True'|Select -Expand Name)};$j=$o|ConvertTo-Json -Depth 4 -Compress;try{Set-Clipboard -Value $j -EA Stop}catch{$j|clip};Write-Host 'SKOPIOWANO DO SCHOWKA - wklej teraz w SystemPulse Pro!' -ForegroundColor Yellow`,
   linux: `bash -c 'echo "---CPU---"; lscpu | grep -E "Model name|Core|Thread|MHz"; echo "---BOARD---"; cat /sys/devices/virtual/dmi/id/board_vendor /sys/devices/virtual/dmi/id/board_name /sys/devices/virtual/dmi/id/bios_version 2>/dev/null; echo "---RAM---"; sudo dmidecode -t memory 2>/dev/null | grep -E "Locator:|Size:|Type:|Speed:|Manufacturer:|Part Number:" || free -h; echo "---DISKS---"; lsblk -d -o NAME,MODEL,SIZE,TRAN,ROTA,SERIAL; echo "---GPU---"; lspci | grep -iE "vga|3d|display"'`,
   macos: `system_profiler SPHardwareDataType SPDisplaysDataType SPMemoryDataType SPNVMeDataType SPSerialATADataType -json | pbcopy && echo "SKOPIOWANO DO SCHOWKA - wklej w SystemPulse Pro!"`,
 };
@@ -324,10 +347,65 @@ class HardwareScannerService {
   private measuredExactHz: number | null = null;
   private edidDetailsNote = '';
   private autoEdidProbed = false;
+  private nativeFullBridgeConnected = false;
+  private nativeFullBridgeProbed = false;
+  private cachedCodecSupport: Record<string, string> = {};
+  private cachedAudioDac: { sampleRate: number; maxChannels: number; baseLatencyMs: number } | null = null;
+  private cachedWebGlLimits: { maxTex: number; maxRb: number; maxMsaa: number; maxAniso: number; maxVertexUniforms: number } | null = null;
+  private last12Scans: ComponentScanCard[] = [];
 
   constructor() {
     this.restoreSavedEdid();
+    void this.autoProbeFullLocalBridge();
     void this.autoProbeLocalEdidBridge();
+  }
+
+  public isNativeBridgeActive(): boolean {
+    return this.nativeFullBridgeConnected || diskTestService.isNativeBridgeConnected();
+  }
+
+  public getLast12ComponentScans(): ComponentScanCard[] {
+    return [...this.last12Scans];
+  }
+
+  public async autoProbeFullLocalBridge(force = false): Promise<boolean> {
+    if (this.nativeFullBridgeProbed && !force) return this.nativeFullBridgeConnected;
+    this.nativeFullBridgeProbed = true;
+    if (typeof fetch !== 'function' || typeof window === 'undefined') return false;
+
+    const bases = getLocalBridgeBases(force);
+    if (bases.length === 0) return false;
+
+    for (const base of bases) {
+      const url = `${base}/api/hardware/full`;
+      try {
+        const ctrl = new AbortController();
+        const timer = window.setTimeout(() => ctrl.abort(), 1400);
+        const resp = await fetch(url, { signal: ctrl.signal, cache: 'no-store' });
+        window.clearTimeout(timer);
+        if (!resp.ok) continue;
+        const ct = resp.headers.get('content-type') || '';
+        if (!ct.includes('json')) continue;
+        const text = await resp.text();
+        if (text && text.includes('"os"')) {
+          const parsed = this.parseDeepHardwareDump(text);
+          if (parsed.ok) {
+            this.nativeFullBridgeConnected = true;
+            if (this.deepInventory?.disks?.length || this.deepInventory?.logicalDisks?.length) {
+              diskTestService.registerHardwareInventoryDrives(
+                this.deepInventory.disks || [],
+                this.deepInventory.logicalDisks || []
+              );
+            }
+            await diskTestService.refreshAvailableDrives();
+            return true;
+          }
+        }
+      } catch {
+        // Local bridge not available on this endpoint
+      }
+    }
+    return false;
   }
 
   private restoreSavedEdid(): void {
@@ -352,11 +430,13 @@ class HardwareScannerService {
     }
   }
 
-  public async autoProbeLocalEdidBridge(): Promise<boolean> {
-    if (this.autoEdidProbed) return Boolean(this.cachedPanelLabel);
+  public async autoProbeLocalEdidBridge(force = false): Promise<boolean> {
+    if (this.autoEdidProbed && !force) return Boolean(this.cachedPanelLabel);
     this.autoEdidProbed = true;
-    const endpoints = ['/api/edid', 'http://127.0.0.1:45880/api/edid'];
-    for (const url of endpoints) {
+    const bases = getLocalBridgeBases(force);
+    if (bases.length === 0 || typeof fetch !== 'function') return false;
+    for (const base of bases) {
+      const url = `${base}/api/edid`;
       try {
         const ctrl = new AbortController();
         const timer = window.setTimeout(() => ctrl.abort(), 1400);
@@ -1211,13 +1291,17 @@ class HardwareScannerService {
     if (firstBrace !== -1 && lastBrace > firstBrace) {
       try {
         const json = JSON.parse(trimmed.slice(firstBrace, lastBrace + 1));
-        if (json.os === 'Windows' || json.ram || json.disks || json.board) {
+        if (json.os === 'Windows' || json.ram || json.disks || json.logicalDisks || json.board) {
           const inv = this.parseWindowsJson(json, trimmed.split('\n').length);
           inv.rawDumpPreview = preview;
           this.deepInventory = inv;
+          if (inv.disks.length > 0 || (inv.logicalDisks && inv.logicalDisks.length > 0)) {
+            diskTestService.registerHardwareInventoryDrives(inv.disks, inv.logicalDisks || []);
+          }
+          const partCount = inv.logicalDisks?.length || 0;
           return {
             ok: true,
-            message: `Zaimportowano pełną specyfikację Windows: ${inv.ramModules.length} kość(ci) RAM, ${inv.disks.length} dysk(ów), ${inv.gpus.length} GPU, ${inv.monitors.length} matryc(y).`,
+            message: `Zaimportowano pełną specyfikację Windows: ${inv.ramModules.length} kość(ci) RAM, ${inv.disks.length} dysk(ów) fiz., ${partCount} partycji, ${inv.gpus.length} GPU, ${inv.monitors.length} matryc(y).`,
             inventory: inv,
           };
         }
@@ -1225,6 +1309,9 @@ class HardwareScannerService {
           const inv = this.parseMacOsJson(json, trimmed.split('\n').length);
           inv.rawDumpPreview = preview;
           this.deepInventory = inv;
+          if (inv.disks.length > 0) {
+            diskTestService.registerHardwareInventoryDrives(inv.disks, []);
+          }
           return {
             ok: true,
             message: `Zaimportowano pełną specyfikację macOS: ${inv.ramModules.length} kość(ci) RAM, ${inv.disks.length} dysk(ów).`,
@@ -1240,6 +1327,9 @@ class HardwareScannerService {
     const inv = this.parseLinuxOrTextDump(trimmed);
     inv.rawDumpPreview = preview;
     this.deepInventory = inv;
+    if (inv.disks.length > 0) {
+      diskTestService.registerHardwareInventoryDrives(inv.disks, []);
+    }
     return {
       ok: true,
       message: `Przeanalizowano raport tekstowy: ${inv.ramModules.length} modułów RAM, ${inv.disks.length} dysków, ${inv.gpus.length} GPU.`,
@@ -1274,6 +1364,17 @@ class HardwareScannerService {
       serial: String(d.SerialNumber || '—').trim(),
     }));
 
+    const logicalDisks: ParsedLogicalDisk[] = toArr(json.logicalDisks)
+      .filter((ld: any) => ld && (ld.DeviceID || ld.letter))
+      .map((ld: any) => ({
+        letter: String(ld.DeviceID || ld.letter).trim(),
+        volumeName: String(ld.VolumeName || ld.volumeName || '').trim(),
+        fileSystem: String(ld.FileSystem || ld.fileSystem || 'NTFS').trim(),
+        totalGB: Number(ld.Size || 0) > 1e6 ? Math.round((Number(ld.Size) / 1024 ** 3) * 10) / 10 : Number(ld.totalGB || 0),
+        freeGB: Number(ld.FreeSpace || 0) > 1e6 ? Math.round((Number(ld.FreeSpace) / 1024 ** 3) * 10) / 10 : Number(ld.freeGB || 0),
+        driveType: ld.DriveType ?? ld.driveType ?? 3,
+      }));
+
     const gpus = toArr(json.gpu).map((g: any) => {
       const vramBytes = Number(g.AdapterRAM || 0);
       const vramGB = vramBytes > 0 ? `${(vramBytes / 1024 ** 3).toFixed(1)} GB` : 'Współdzielona / >4GB';
@@ -1305,6 +1406,7 @@ class HardwareScannerService {
       gpus,
       ramModules,
       disks,
+      logicalDisks,
       monitors,
       battery: '',
       networkAdapters: toArr(json.net).map((n: any) => String(n).trim()).filter(Boolean),
@@ -1497,6 +1599,347 @@ class HardwareScannerService {
     } catch {
       // Ignore
     }
+  }
+
+  private async probeHardwareCodecs(): Promise<Record<string, string>> {
+    if (Object.keys(this.cachedCodecSupport).length > 0) return this.cachedCodecSupport;
+    const out: Record<string, string> = {
+      'H.264 (AVC 4K60)': 'Sprawdzanie',
+      'H.265 (HEVC 4K60)': 'Sprawdzanie',
+      'VP9 (4K60 HDR)': 'Sprawdzanie',
+      'AV1 (4K60)': 'Sprawdzanie',
+    };
+    const tests: Array<[string, string]> = [
+      ['H.264 (AVC 4K60)', 'video/mp4; codecs="avc1.640034"'],
+      ['H.265 (HEVC 4K60)', 'video/mp4; codecs="hvc1.1.6.L153.B0"'],
+      ['VP9 (4K60 HDR)', 'video/webm; codecs="vp09.02.51.10.01.09.16.09.00"'],
+      ['AV1 (4K60)', 'video/mp4; codecs="av01.0.12M.08"'],
+    ];
+    try {
+      const mc = navigator.mediaCapabilities;
+      if (mc && typeof mc.decodingInfo === 'function') {
+        await Promise.all(
+          tests.map(async ([label, contentType]) => {
+            try {
+              const info = await mc.decodingInfo({
+                type: 'file',
+                video: { contentType, width: 3840, height: 2160, bitrate: 25000000, framerate: 60 },
+              });
+              out[label] = info.supported
+                ? info.powerEfficient
+                  ? 'Sprzętowy GPU (HW)'
+                  : 'Programowy (SW)'
+                : 'Brak wsparcia';
+            } catch {
+              out[label] = 'Nieobsługiwany';
+            }
+          })
+        );
+      }
+    } catch {
+      // Ignore codec capability errors
+    }
+    this.cachedCodecSupport = out;
+    return out;
+  }
+
+  private probeAudioDacInfo(): { sampleRate: number; maxChannels: number; baseLatencyMs: number } {
+    if (this.cachedAudioDac) return this.cachedAudioDac;
+    const info = { sampleRate: 48000, maxChannels: 2, baseLatencyMs: 0 };
+    try {
+      const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (Ctx) {
+        const ctx = new Ctx();
+        info.sampleRate = ctx.sampleRate || 48000;
+        info.maxChannels = ctx.destination?.maxChannelCount || 2;
+        info.baseLatencyMs = Number(((ctx.baseLatency || 0) * 1000).toFixed(2));
+        void ctx.close().catch(() => {});
+      }
+    } catch {
+      // Ignore AudioContext init restrictions
+    }
+    this.cachedAudioDac = info;
+    return info;
+  }
+
+  private probeWebGlLimits(): { maxTex: number; maxRb: number; maxMsaa: number; maxAniso: number; maxVertexUniforms: number } {
+    if (this.cachedWebGlLimits) return this.cachedWebGlLimits;
+    const out = { maxTex: 8192, maxRb: 8192, maxMsaa: 4, maxAniso: 16, maxVertexUniforms: 1024 };
+    try {
+      const canvas = document.createElement('canvas');
+      const gl = canvas.getContext('webgl2');
+      if (gl) {
+        out.maxTex = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || 8192;
+        out.maxRb = Number(gl.getParameter(gl.MAX_RENDERBUFFER_SIZE)) || 8192;
+        out.maxMsaa = Number(gl.getParameter(gl.MAX_SAMPLES)) || 4;
+        out.maxVertexUniforms = Number(gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS)) || 1024;
+        const ext = gl.getExtension('EXT_texture_filter_anisotropic');
+        if (ext) {
+          out.maxAniso = Number(gl.getParameter(ext.MAX_TEXTURE_MAX_ANISOTROPY_EXT)) || 16;
+        }
+        gl.getExtension('WEBGL_lose_context')?.loseContext();
+      }
+    } catch {
+      // Ignore WebGL probe failures
+    }
+    this.cachedWebGlLimits = out;
+    return out;
+  }
+
+  public async scanAll12Components(context: {
+    specs: SystemSpecs | null;
+    scan: HardwareScanSnapshot | null;
+    ramState: RamTestResult;
+    diskState: DiskTestResult;
+    gpuState: GpuStressMetrics;
+    batteryState: BatteryHealthState;
+    networkState: NetworkTestResult;
+    drives: DiskDriveTarget[];
+    liveSensorsCount: number;
+    liveCpuTempC: number | null;
+    liveGpuTempC: number | null;
+  }): Promise<ComponentScanCard[]> {
+    await this.autoProbeFullLocalBridge(false);
+    const [codecs] = await Promise.all([this.probeHardwareCodecs()]);
+    const audioDac = this.probeAudioDacInfo();
+    const glLim = this.probeWebGlLimits();
+    const deep = this.deepInventory;
+    const specs = context.specs;
+    const scan = context.scan;
+    const now = Date.now();
+    const isNative = this.isNativeBridgeActive();
+    const srcDefault: ComponentScanCard['source'] = isNative ? 'Auto (.EXE Native)' : 'Auto (Web API)';
+
+    const hasWasmSimd = typeof WebAssembly === 'object' && typeof SharedArrayBuffer !== 'undefined';
+    const cpuModel = deep?.cpuModel || `${specs?.platform || 'x86-64'} · ${specs?.cpuCores || navigator.hardwareConcurrency || 4} wątków`;
+    const gpuName = deep?.gpus[0]?.name || specs?.gpuRenderer || 'Wykryty GPU WebGL2';
+    const ramTotalGB = deep?.ramModules?.length
+      ? deep.ramModules.reduce((acc, m) => acc + m.capacityGB, 0)
+      : typeof specs?.deviceMemory === 'number'
+        ? specs.deviceMemory
+        : 0;
+    const drives = context.drives.length > 0 ? context.drives : diskTestService.getAvailableDrives();
+    const activeDrive = diskTestService.getSelectedDrive();
+    const mediaDevs = (scan?.devices || []).filter((d) => ['Audio (Wyjście)', 'Mikrofon', 'Kamera'].includes(d.category));
+    const hwCodecsCount = Object.values(codecs).filter((v) => v.includes('HW')).length;
+    const padsCount =
+      typeof navigator.getGamepads === 'function'
+        ? Array.from(navigator.getGamepads()).filter((p) => p !== null).length
+        : 0;
+
+    const cards: ComponentScanCard[] = [
+      {
+        id: 'cpu',
+        title: '1. Procesor (CPU & ISA)',
+        category: 'CPU',
+        status: 'OK',
+        score: deep?.cpuModel ? 98 : 88,
+        headline: cpuModel,
+        summary: deep?.cpuDetails || `${specs?.cpuCores || navigator.hardwareConcurrency || 4} wątków logicznych · WASM/SIMD: ${hasWasmSimd ? 'Aktywne' : 'Standard'}`,
+        source: deep?.cpuModel ? (isNative ? 'Auto (.EXE Native)' : 'SMBIOS') : 'Auto (Web API)',
+        metrics: [
+          { label: 'Wątki', value: `${specs?.cpuCores || navigator.hardwareConcurrency || 4}` },
+          { label: 'Architektura', value: specs?.platform?.split('·')[1]?.trim() || 'x86-64' },
+          { label: 'Temp. Live', value: context.liveCpuTempC !== null ? `${context.liveCpuTempC.toFixed(1)} °C` : 'Brak LHM' },
+        ],
+        scannedAt: now,
+      },
+      {
+        id: 'gpu',
+        title: '2. Karta Graficzna (GPU 3D & WebGPU)',
+        category: 'GPU',
+        status: context.gpuState.isSoftwareGl ? 'UWAGA' : 'OK',
+        score: context.gpuState.isSoftwareGl ? 52 : 96,
+        headline: gpuName.slice(0, 62),
+        summary: `${specs?.webglVersion || 'WebGL 2.0'} · ${scan?.webGpuSummary || 'WebGPU Gotowy'}`,
+        source: deep?.gpus?.length ? (isNative ? 'Auto (.EXE Native)' : 'SMBIOS') : 'Auto (Web API)',
+        metrics: [
+          { label: 'Max Tekstura', value: `${glLim.maxTex}px` },
+          { label: 'MSAA / AF', value: `${glLim.maxMsaa}× / ${glLim.maxAniso}×` },
+          { label: 'VRAM / Ster.', value: deep?.gpus[0]?.vramGB || (context.liveGpuTempC !== null ? `${context.liveGpuTempC.toFixed(0)} °C` : 'Sprzętowy') },
+        ],
+        scannedAt: now,
+      },
+      {
+        id: 'ram',
+        title: '3. Pamięć RAM (DIMM & Heap)',
+        category: 'RAM',
+        status: context.ramState.errorsFound > 0 ? 'UWAGA' : 'OK',
+        score: context.ramState.errorsFound > 0 ? 45 : deep?.ramModules?.length ? 97 : 86,
+        headline: deep?.ramModules?.length
+          ? `${ramTotalGB} GB (${deep.ramModules.length}× ${deep.ramModules[0].memoryType} @ ${deep.ramModules[0].speedMHz} MHz)`
+          : `${ramTotalGB > 0 ? `≥ ${ramTotalGB} GB RAM` : 'Pamięć operacyjna aktywna'}`,
+        summary: context.ramState.bandwidthReadMBs > 0
+          ? `Odczyt ${context.ramState.bandwidthReadMBs.toLocaleString('pl-PL')} MB/s · Opóźnienie ${context.ramState.latencyNs} ns · ${context.ramState.errorsFound} błędów`
+          : 'Auto-detekcja pamięci zakończona — uruchom test 14-etapowy MemTest86+ dla przepustowości.',
+        source: deep?.ramModules?.length ? (isNative ? 'Auto (.EXE Native)' : 'SMBIOS') : 'Auto (Web API)',
+        metrics: [
+          { label: 'Kości DIMM', value: deep?.ramModules?.length ? `${deep.ramModules.length} wykryte` : 'Web Heap' },
+          { label: 'Read MB/s', value: context.ramState.bandwidthReadMBs > 0 ? `${context.ramState.bandwidthReadMBs}` : '—' },
+          { label: 'Błędy', value: `${context.ramState.errorsFound}` },
+        ],
+        scannedAt: now,
+      },
+      {
+        id: 'disk',
+        title: '4. Dyski i Partycje (NVMe / SSD / USB)',
+        category: 'DISK',
+        status: context.diskState.smartStatus === 'KRYTYCZNY' ? 'UWAGA' : 'OK',
+        score: context.diskState.smartHealthPct || 94,
+        headline: `${drives.length} dysk(ów) / woluminów · Aktywny: ${activeDrive.path}`,
+        summary: deep?.disks?.length
+          ? deep.disks.map((d) => `${d.model} (${d.sizeGB} GB)`).join(' · ')
+          : `Aktywny cel testu: ${activeDrive.label} (${activeDrive.interfaceType})`,
+        source: drives.some((d) => d.kind === 'native_exe') ? 'Auto (.EXE Native)' : 'Auto (Web API)',
+        metrics: [
+          { label: 'Wykryte dyski', value: `${drives.length}` },
+          { label: 'Seq Read/Write', value: context.diskState.seqReadMBs > 0 ? `${context.diskState.seqReadMBs}/${context.diskState.seqWriteMBs}` : 'Gotowy' },
+          { label: 'SMART', value: `${context.diskState.smartStatus} (${context.diskState.smartHealthPct}%)` },
+        ],
+        scannedAt: now,
+      },
+      {
+        id: 'board',
+        title: '5. Płyta Główna, BIOS & Chipset',
+        category: 'BOARD',
+        status: deep?.motherboard ? 'OK' : 'WYKRYTO',
+        score: deep?.motherboard ? 96 : 80,
+        headline: deep?.motherboard || specs?.os || 'Platforma PC / Laptop',
+        summary: deep?.bios
+          ? `BIOS/UEFI: ${deep.bios} · Model: ${deep.computerModel}`
+          : `${specs?.platform || 'Desktop'} · Zegar precyzyjny HR-Timer aktywny`,
+        source: deep?.motherboard ? (isNative ? 'Auto (.EXE Native)' : 'SMBIOS') : 'Auto (Web API)',
+        metrics: [
+          { label: 'System OS', value: specs?.os || 'Windows/Linux' },
+          { label: 'BIOS', value: deep?.bios ? deep.bios.slice(0, 18) : 'Auto-Web' },
+          { label: 'Mostek .EXE', value: isNative ? 'POŁĄCZONY' : 'Tryb Web' },
+        ],
+        scannedAt: now,
+      },
+      {
+        id: 'display',
+        title: '6. Ekran, Matryca & EDID',
+        category: 'DISPLAY',
+        status: 'OK',
+        score: 95,
+        headline: scan?.panel?.label || `${specs?.screenResolution || '1920×1080'} @ ${specs?.estimatedRefreshRate || 60}Hz`,
+        summary: `${scan?.panel?.nativeResolution || specs?.screenResolution || '—'} · ${scan?.panel?.refreshRateHz || specs?.estimatedRefreshRate || 60} Hz · ${scan?.panel?.colorGamut || 'sRGB'} · ${scan?.panel?.hdrSupported ? 'HDR Aktywne' : 'SDR'}`,
+        source: this.cachedPanelLabel ? (isNative ? 'Auto (.EXE Native)' : 'Live Probe') : 'Auto (Web API)',
+        metrics: [
+          { label: 'Odświeżanie', value: `${scan?.panel?.refreshRateHz || specs?.estimatedRefreshRate || 60} Hz` },
+          { label: 'Gamut / Bit', value: `${scan?.panel?.colorGamut || 'sRGB'} ${scan?.panel?.colorDepthBit || 24}b` },
+          { label: 'Ekrany', value: `${scan?.panel?.screenCount || 1}` },
+        ],
+        scannedAt: now,
+      },
+      {
+        id: 'network',
+        title: '7. Sieć, Karta NIC & Łącze PHY',
+        category: 'NETWORK',
+        status: navigator.onLine ? 'OK' : 'UWAGA',
+        score: navigator.onLine ? 92 : 35,
+        headline: context.networkState.adapters?.[0]?.name || deep?.networkAdapters[0] || (navigator.onLine ? 'Interfejs sieciowy Online' : 'Brak połączenia'),
+        summary: context.networkState.downloadEstMbps > 0
+          ? `DL ${context.networkState.downloadEstMbps} Mbps · UL ${context.networkState.uploadEstMbps} Mbps · Ping ${context.networkState.pingAvgMs} ms`
+          : `Link: ${specs?.connectionType || 'Ethernet / Wi-Fi'} · RTT: ${specs?.rtt ?? '—'} ms · Downlink: ${specs?.downlink ?? '—'} Mbps`,
+        source: context.networkState.adapters?.length ? 'Auto (.EXE Native)' : 'Auto (Web API)',
+        metrics: [
+          { label: 'Stan', value: navigator.onLine ? 'ONLINE' : 'OFFLINE' },
+          { label: 'Ping / Jitter', value: context.networkState.pingAvgMs > 0 ? `${context.networkState.pingAvgMs} ms` : `${specs?.rtt ?? '—'} ms` },
+          { label: 'Prędkość', value: context.networkState.downloadEstMbps > 0 ? `${context.networkState.downloadEstMbps} Mbps` : `${specs?.downlink ?? '—'} Mbps` },
+        ],
+        scannedAt: now,
+      },
+      {
+        id: 'audio_codecs',
+        title: '8. Audio DAC & Kodeki Sprzętowe (AV1/HEVC)',
+        category: 'MEDIA',
+        status: 'OK',
+        score: Math.min(100, 78 + hwCodecsCount * 6),
+        headline: `DAC ${audioDac.sampleRate / 1000} kHz (${audioDac.maxChannels} kan.) · ${hwCodecsCount}/4 kodeki 4K HW`,
+        summary: Object.entries(codecs)
+          .map(([k, v]) => `${k.split(' ')[0]}: ${v.includes('HW') ? 'HW' : v.includes('SW') ? 'SW' : 'Brak'}`)
+          .join(' · '),
+        source: 'Live Probe',
+        metrics: [
+          { label: 'Próbkowanie', value: `${audioDac.sampleRate} Hz` },
+          { label: 'Latencja DAC', value: `${audioDac.baseLatencyMs} ms` },
+          { label: 'AV1 / HEVC', value: `${codecs['AV1 (4K60)']?.includes('HW') ? 'AV1 HW' : 'SW'} / ${codecs['H.265 (HEVC 4K60)']?.includes('HW') ? 'HEVC HW' : 'SW'}` },
+        ],
+        scannedAt: now,
+      },
+      {
+        id: 'power',
+        title: '9. Zasilacz ATX PSU & Bateria ACPI',
+        category: 'POWER',
+        status: (context.batteryState.railAlertEvents?.length || 0) > 0 ? 'UWAGA' : 'OK',
+        score: context.batteryState.healthPct || 94,
+        headline: context.batteryState.psu?.detected
+          ? `PSU +12V: ${context.batteryState.psu.rail12V.toFixed(2)}V · +5V: ${context.batteryState.psu.rail5V.toFixed(2)}V`
+          : `Bateria ${context.batteryState.levelPct}% (${context.batteryState.charging ? 'Zasilacz AC' : 'Praca bateryjna'})`,
+        summary: `Stan: ${context.batteryState.condition} · Zdrowie: ${context.batteryState.healthPct}% · Moc: ${context.batteryState.currentPowerDrawW} W`,
+        source: srcDefault,
+        metrics: [
+          { label: 'Linia +12V', value: context.batteryState.psu?.detected ? `${context.batteryState.psu.rail12V.toFixed(2)}V` : '—' },
+          { label: 'Moc', value: `${context.batteryState.currentPowerDrawW} W` },
+          { label: 'Alerty szyn', value: `${context.batteryState.railAlertEvents?.length || 0}` },
+        ],
+        scannedAt: now,
+      },
+      {
+        id: 'thermal',
+        title: '10. Chłodzenie, Wentylatory & Czujniki °C',
+        category: 'THERMAL',
+        status: context.liveSensorsCount > 0 ? 'OK' : 'WYKRYTO',
+        score: context.liveSensorsCount > 0 ? 96 : 82,
+        headline: context.liveSensorsCount > 0
+          ? `${context.liveSensorsCount} aktywnych czujników sprzętowych LIVE`
+          : 'Czujniki termiczne (gotowy do podpięcia LHM :8085 / .EXE)',
+        summary: `CPU: ${context.liveCpuTempC !== null ? `${context.liveCpuTempC.toFixed(1)} °C` : 'Brak odczytu'} · GPU: ${context.liveGpuTempC !== null ? `${context.liveGpuTempC.toFixed(1)} °C` : 'Brak odczytu'}`,
+        source: context.liveSensorsCount > 0 ? 'Auto (.EXE Native)' : 'Live Probe',
+        metrics: [
+          { label: 'Czujniki', value: `${context.liveSensorsCount}` },
+          { label: 'CPU °C', value: context.liveCpuTempC !== null ? `${context.liveCpuTempC.toFixed(1)}°` : '—' },
+          { label: 'GPU °C', value: context.liveGpuTempC !== null ? `${context.liveGpuTempC.toFixed(1)}°` : '—' },
+        ],
+        scannedAt: now,
+      },
+      {
+        id: 'usb_bus',
+        title: '11. Magistrala USB, HID, Bluetooth & COM',
+        category: 'BUS',
+        status: 'OK',
+        score: this.usbHidDevices.length > 0 ? 95 : 85,
+        headline: `${this.usbHidDevices.length} sparowanych urządzeń USB/HID/BT/COM`,
+        summary: `WebUSB: ${'usb' in navigator ? 'Tak' : 'Nie'} · WebHID: ${'hid' in navigator ? 'Tak' : 'Nie'} · WebBT: ${'bluetooth' in navigator ? 'Tak' : 'Nie'} · Serial: ${'serial' in navigator ? 'Tak' : 'Nie'}`,
+        source: 'Auto (Web API)',
+        metrics: [
+          { label: 'USB / HID', value: `${this.usbHidDevices.filter((u) => u.bus === 'USB' || u.bus === 'HID').length}` },
+          { label: 'BT / Serial', value: `${this.usbHidDevices.filter((u) => u.bus === 'Bluetooth' || u.bus === 'Serial').length}` },
+          { label: 'Interfejsy', value: 'Gotowe' },
+        ],
+        scannedAt: now,
+      },
+      {
+        id: 'input_media',
+        title: '12. Peryferia Wejścia (Mysz, Klaw., Pad, Kamera)',
+        category: 'INPUT',
+        status: 'OK',
+        score: 92,
+        headline: `${mediaDevs.length} urz. audio/wideo · ${padsCount} kontroler(ów) · Dotyk: ${navigator.maxTouchPoints || 0} pkt`,
+        summary: `Klawiatura NKRO, tester polling-rate myszy (Hz), wykrywanie dwukliku, pad + wibracje i kamera na żywo.`,
+        source: 'Auto (Web API)',
+        metrics: [
+          { label: 'Audio/Kamery', value: `${mediaDevs.length}` },
+          { label: 'Kontrolery', value: `${padsCount}` },
+          { label: 'Wskaźnik', value: typeof window !== 'undefined' && window.matchMedia?.('(pointer: fine)').matches ? 'Mysz / Precyzyjny' : 'Dotykowy' },
+        ],
+        scannedAt: now,
+      },
+    ];
+
+    this.last12Scans = cards;
+    return cards;
   }
 }
 

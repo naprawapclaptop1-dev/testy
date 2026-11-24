@@ -15,16 +15,95 @@ import {
   GpuTelemetryPoint,
 } from '../types';
 import { thermalMonitorService } from './thermalMonitor.service';
+import { gameAudioService } from './gameAudio.service';
 import {
+  createAircraftCarrierModel,
+  createAlpineSnowPeakTexture,
   createArchitecturePbrTextures,
   createArticulatedSoccerPlayer,
   createContactShadowTexture,
+  createDesertMesaTexture,
   createDetailedAircraftModel,
+  createDetailedBattleshipModel,
+  createDetailedChinookModel,
+  createDetailedGunshipModel,
+  createDetailedHoverbikeModel,
+  createDetailedMechModel,
   createDetailedRaceCarModel,
+  createDetailedStarfighterModel,
+  createDetailedSubmarineModel,
+  createDetailedSuperbikeModel,
+  createDetailedTankModel,
+  createEnemyTargetModel,
+  createNavalDestroyerModel,
+  createNightCityGroundTexture,
   createRacingTrackTextures,
+  createSoftCloudTexture,
+  createUnderwaterCoralReefTexture,
+  createVolcanicBasaltTexture,
+  createVolcanicIslandTexture,
   FlightStyle,
   VehicleStyle,
 } from './gameVehicleModels';
+
+/** Builds a sculpted, craggy angular rock/mesa/seamount geometry instead of smooth spheres. */
+function createJaggedRockGeometry(
+  radius: number,
+  detail: number,
+  cragAmp = 0.28,
+  flattenTop = false
+): THREE.BufferGeometry {
+  const geo = new THREE.IcosahedronGeometry(radius, detail);
+  const pos = geo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    const z = pos.getZ(i);
+    const len = Math.hypot(x, y, z) || 1;
+    const nx = x / len;
+    const ny = y / len;
+    const nz = z / len;
+    const ridge1 = Math.abs(Math.sin(nx * 5.2 + nz * 4.1) * Math.cos(ny * 3.8 + nx * 2.4));
+    const ridge2 = Math.sin(nx * 11.3 - ny * 7.7 + nz * 9.5) * 0.5 + 0.5;
+    const strata = Math.sin(ny * 14.0) * 0.08;
+    const disp = 1.0 - cragAmp * 0.42 + ridge1 * cragAmp + ridge2 * (cragAmp * 0.45) + strata;
+    let fx = x * disp;
+    let fy = y * disp;
+    let fz = z * disp;
+    if (flattenTop && ny > 0.42) {
+      fy *= 0.68;
+      fx *= 1.08;
+      fz *= 1.08;
+    }
+    if (ny < -0.35) {
+      fx *= 1.24;
+      fz *= 1.24;
+    }
+    pos.setXYZ(i, fx, fy, fz);
+  }
+  const nonIndexed = geo.toNonIndexed();
+  geo.dispose();
+  nonIndexed.computeVertexNormals();
+  return nonIndexed;
+}
+
+/** Generates a soft circular radial glow sprite so PointsMaterial particles are never harsh square pixels. */
+function createSoftParticleTexture(): THREE.CanvasTexture {
+  const c = document.createElement('canvas');
+  c.width = 64;
+  c.height = 64;
+  const ctx = c.getContext('2d')!;
+  const grad = ctx.createRadialGradient(32, 32, 1, 32, 32, 30);
+  grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
+  grad.addColorStop(0.28, 'rgba(255, 255, 255, 0.85)');
+  grad.addColorStop(0.62, 'rgba(255, 255, 255, 0.24)');
+  grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 64, 64);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
 
 export interface GamePresetConfig {
   label: string;
@@ -88,10 +167,20 @@ export interface GameCatalogItem {
     | 'dakar_rally'
     | 'bugatti_hypercar'
     | 'snow_rally'
+    | 'motogp_superbike'
     | 'soccer_stadium'
     | 'f22_jet'
     | 'sr71_plane'
-    | 'apache_heli';
+    | 'apache_heli'
+    | 'f18_naval'
+    | 'tank_blitz'
+    | 'mech_titan'
+    | 'submarine_hunt'
+    | 'starfighter_trench'
+    | 'ac130_gunship'
+    | 'cyber_hoverbike'
+    | 'volcano_heli'
+    | 'battleship_yamato';
 }
 
 export const GAME_CATALOG: GameCatalogItem[] = [
@@ -809,6 +898,216 @@ export const GAME_CATALOG: GameCatalogItem[] = [
     lightPalette: [0x10b981, 0xf59e0b, 0x38bdf8, 0xef4444],
     layoutMode: 'apache_heli',
   },
+  {
+    id: 'tank_blitz_3d',
+    title: 'M1A2 ABRAMS: Desert Armor Blitz (Kampania 5 Etapów)',
+    shortTitle: 'AKCJA: Abrams Czołg 3D',
+    genre: 'Armored Tank Warfare · A/D Sterowanie + Spacja Działo 120mm + Shift Turbo',
+    badge: 'CZOŁG 3D',
+    description: 'Ciężka 5-etapowa kampania pancerna na pustynnych wydmach: niszcz wrogie czołgi, wieżyczki i bossów z działa 120mm.',
+    skyBaseTop: 0x1e3a5f,
+    skyBaseBottom: 0xd99b52,
+    nebulaColA: [0.22, 0.52, 0.85],
+    nebulaColB: [0.95, 0.68, 0.32],
+    nebulaColC: [1.0, 0.86, 0.56],
+    coreColA: [0.96, 0.62, 0.14],
+    coreColB: [0.98, 0.35, 0.12],
+    floorColor: 0xc29563,
+    gridColor: 'rgba(217, 119, 6, 0.22)',
+    gridBorder: 'rgba(245, 158, 11, 0.22)',
+    fogColor: 0x9c7248,
+    lightPalette: [0xf59e0b, 0xf97316, 0x38bdf8, 0xef4444],
+    layoutMode: 'tank_blitz',
+  },
+  {
+    id: 'mech_titan_3d',
+    title: 'TITAN VANGUARD: Cyber-City Mech Assault (Kampania 5 Etapów)',
+    shortTitle: 'AKCJA: Mech Tytan 3D',
+    genre: 'Heavy Assault Mech · A/D Ruch + Spacja Podwójne Railguny + Shift Dopalacz',
+    badge: 'MECH 3D',
+    description: 'Dwunożny bojowy Mech Tytan z podwójnymi działami szynowymi w nocnej metropolii — 5 eskalujących fal wrogich dronów i bossów.',
+    skyBaseTop: 0x050814,
+    skyBaseBottom: 0x162440,
+    nebulaColA: [0.06, 0.62, 0.92],
+    nebulaColB: [0.48, 0.24, 0.86],
+    nebulaColC: [0.95, 0.38, 0.22],
+    coreColA: [0.06, 0.88, 0.98],
+    coreColB: [0.98, 0.32, 0.42],
+    floorColor: 0x0d1526,
+    gridColor: 'rgba(56, 189, 248, 0.24)',
+    gridBorder: 'rgba(244, 63, 94, 0.22)',
+    fogColor: 0x091122,
+    lightPalette: [0x38bdf8, 0xf43f5e, 0xa855f7, 0x22d3ee],
+    layoutMode: 'mech_titan',
+  },
+  {
+    id: 'f18_naval_strike',
+    title: 'F/A-18 SUPER HORNET: Ocean Carrier Strike (Kampania 5 Etapów)',
+    shortTitle: 'LOTNICTWO: F/A-18 Ocean',
+    genre: 'Naval Carrier Dogfight · WASD Lot + Spacja Rakiety + Shift Dopalacz',
+    badge: 'LOTNICTWO',
+    description: 'Morski myśliwiec F/A-18 Super Hornet lecący tuż nad falującym oceanem GLSL o zachodzie słońca — 5 etapów walk powietrznych.',
+    skyBaseTop: 0x0b2545,
+    skyBaseBottom: 0xee8c4b,
+    nebulaColA: [0.12, 0.48, 0.88],
+    nebulaColB: [0.95, 0.52, 0.24],
+    nebulaColC: [1.0, 0.82, 0.42],
+    coreColA: [0.98, 0.65, 0.22],
+    coreColB: [0.18, 0.78, 0.98],
+    floorColor: 0x062d50,
+    gridColor: 'rgba(56, 189, 248, 0.24)',
+    gridBorder: 'rgba(251, 146, 60, 0.24)',
+    fogColor: 0x1e4c78,
+    lightPalette: [0x38bdf8, 0xfb923c, 0xfacc15, 0xef4444],
+    layoutMode: 'f18_naval',
+  },
+  {
+    id: 'submarine_hunt_3d',
+    title: 'SSN-774 ABYSS: Deep-Sea Submarine Hunt (Kampania 5 Etapów)',
+    shortTitle: 'AKCJA: Okręt Podwodny 3D',
+    genre: 'Abyssal Sub Warfare · WASD Głębokość + Spacja Torpedy + Shift Sonar Boost',
+    badge: 'OKRĘT 3D',
+    description: 'Podwodny pościg w głębinach z animowaną kaustyką dna, reflektorami wolumetrycznymi, minami morskimi i torpedami.',
+    skyBaseTop: 0x02121e,
+    skyBaseBottom: 0x063547,
+    nebulaColA: [0.02, 0.48, 0.62],
+    nebulaColB: [0.06, 0.78, 0.72],
+    nebulaColC: [0.12, 0.92, 0.84],
+    coreColA: [0.08, 0.92, 0.86],
+    coreColB: [0.14, 0.65, 0.98],
+    floorColor: 0x062533,
+    gridColor: 'rgba(45, 212, 191, 0.26)',
+    gridBorder: 'rgba(56, 189, 248, 0.24)',
+    fogColor: 0x032030,
+    lightPalette: [0x2dd4bf, 0x38bdf8, 0x22d3ee, 0xf43f5e],
+    layoutMode: 'submarine_hunt',
+  },
+  {
+    id: 'motogp_superbike_3d',
+    title: 'MOTOGP APEX 1000RR: Night Superbike GP (5 Okrążeń)',
+    shortTitle: 'WYŚCIGI: MotoGP Superbike',
+    genre: 'Superbike Racing · A/D Przechył na Kolano + W/Shift Nitro + Bramki Boost',
+    badge: 'MOTOGP 3D',
+    description: 'Długi 5-okrążeniowy wyścig motocykli MotoGP 1000RR z głębokim przechyłem w zakrętach, bramkami nitro i premiami wyprzedzania.',
+    skyBaseTop: 0x060a18,
+    skyBaseBottom: 0x1a1433,
+    nebulaColA: [0.92, 0.16, 0.28],
+    nebulaColB: [0.14, 0.62, 0.98],
+    nebulaColC: [0.98, 0.72, 0.18],
+    coreColA: [0.96, 0.18, 0.28],
+    coreColB: [0.98, 0.78, 0.18],
+    floorColor: 0x111827,
+    gridColor: 'rgba(239, 68, 68, 0.26)',
+    gridBorder: 'rgba(250, 204, 21, 0.24)',
+    fogColor: 0x0b1020,
+    lightPalette: [0xef4444, 0xfacc15, 0x38bdf8, 0x22c55e],
+    layoutMode: 'motogp_superbike',
+  },
+  {
+    id: 'starfighter_trench_3d',
+    title: 'X-WING VANGUARD: Orbital Trench Run (Kampania 5 Etapów)',
+    shortTitle: 'KOSMOS: Gwiezdny Myśliwiec',
+    genre: 'Starfighter Trench Run · WASD Uniki + Spacja Quad-Lasery + Shift Hipernapęd',
+    badge: 'KOSMOS 3D',
+    description: 'Atak myśliwcem X-Foil przez opancerzony kanion stacji bojowej: 4 działka laserowe, wieżyczki obronne, myśliwce wroga i reaktor-boss.',
+    skyBaseTop: 0x02040a,
+    skyBaseBottom: 0x0d1528,
+    nebulaColA: [0.08, 0.42, 0.88],
+    nebulaColB: [0.78, 0.16, 0.34],
+    nebulaColC: [0.96, 0.58, 0.18],
+    coreColA: [0.98, 0.26, 0.28],
+    coreColB: [0.14, 0.84, 0.98],
+    floorColor: 0x182130,
+    gridColor: 'rgba(239, 68, 68, 0.26)',
+    gridBorder: 'rgba(56, 189, 248, 0.26)',
+    fogColor: 0x080d18,
+    lightPalette: [0xef4444, 0x38bdf8, 0xf59e0b, 0x10b981],
+    layoutMode: 'starfighter_trench',
+  },
+  {
+    id: 'ac130_gunship_3d',
+    title: 'AC-130J GHOSTRIDER: Nocne Wsparcie Ogniowe (Kampania 5 Etapów)',
+    shortTitle: 'LOTNICTWO: AC-130 Gunship',
+    genre: 'Heavy Gunship Strike · WASD Lot + Spacja Haubica 105mm/40mm + Shift Flary',
+    badge: 'GUNSHIP 4K',
+    description: 'Ciężki czterosilnikowy samolot wsparcia AC-130J Ghostrider nad pustynnym kanionem nocą: ostrzał ciężką artylerią 105mm i eksplozje.',
+    skyBaseTop: 0x040711,
+    skyBaseBottom: 0x181326,
+    nebulaColA: [0.95, 0.45, 0.12],
+    nebulaColB: [0.18, 0.56, 0.92],
+    nebulaColC: [0.85, 0.24, 0.14],
+    coreColA: [0.98, 0.52, 0.14],
+    coreColB: [0.22, 0.78, 0.98],
+    floorColor: 0x1c1410,
+    gridColor: 'rgba(249, 115, 22, 0.25)',
+    gridBorder: 'rgba(56, 189, 248, 0.22)',
+    fogColor: 0x0b0a14,
+    lightPalette: [0xf97316, 0x38bdf8, 0xfacc15, 0xef4444],
+    layoutMode: 'ac130_gunship',
+  },
+  {
+    id: 'cyber_hoverbike_3d',
+    title: 'CYBERTRONIC 3099: Neon Hoverbike GP (5 Okrążeń 540 km/h)',
+    shortTitle: 'WYŚCIGI: Cyber Hoverbike',
+    genre: 'Anti-Grav Hoverbike · A/D Przechył + W/Shift Hiper-Nitro + Bramki 540 km/h',
+    badge: 'HOVERBIKE',
+    description: 'Antygrawitacyjny wyścig futurystycznych motocykli z neonowymi turbinami, mokrym odbijającym asfaltem i ekstremalnym tempem 540 km/h.',
+    skyBaseTop: 0x040212,
+    skyBaseBottom: 0x180930,
+    nebulaColA: [0.06, 0.92, 0.98],
+    nebulaColB: [0.95, 0.14, 0.65],
+    nebulaColC: [0.58, 0.18, 0.98],
+    coreColA: [0.06, 0.94, 0.98],
+    coreColB: [0.96, 0.18, 0.68],
+    floorColor: 0x0a0718,
+    gridColor: 'rgba(6, 182, 212, 0.30)',
+    gridBorder: 'rgba(236, 72, 153, 0.28)',
+    fogColor: 0x080416,
+    lightPalette: [0x06b6d4, 0xec4899, 0xa855f7, 0x22d3ee],
+    layoutMode: 'cyber_hoverbike',
+  },
+  {
+    id: 'volcano_heli_rescue',
+    title: 'CHINOOK INFERNO: Lot nad Kalderą Wulkanu (Kampania 5 Etapów)',
+    shortTitle: 'LOTNICTWO: Wulkan Chinook',
+    genre: 'Volcanic Heavy Rotorcraft · WASD Pułap + Spacja Rakiety + Shift Turbo',
+    badge: 'WULKAN 4K',
+    description: 'Dwuwirnikowy ciężki śmigłowiec bojowy nad wrzącą kalderą GLSL z rzekami płynnej magmy, bazaltowymi grzbietami i ogniem rakietowym.',
+    skyBaseTop: 0x140404,
+    skyBaseBottom: 0x3b1106,
+    nebulaColA: [0.98, 0.36, 0.06],
+    nebulaColB: [0.98, 0.72, 0.14],
+    nebulaColC: [0.58, 0.08, 0.06],
+    coreColA: [1.0, 0.44, 0.08],
+    coreColB: [1.0, 0.82, 0.18],
+    floorColor: 0x1f0904,
+    gridColor: 'rgba(249, 115, 22, 0.32)',
+    gridBorder: 'rgba(239, 68, 68, 0.28)',
+    fogColor: 0x1e0804,
+    lightPalette: [0xf97316, 0xfacc15, 0xef4444, 0xfb923c],
+    layoutMode: 'volcano_heli',
+  },
+  {
+    id: 'battleship_yamato_3d',
+    title: 'YAMATO DREADNOUGHT: Bitwa Pancerników 460mm (Kampania 5 Etapów)',
+    shortTitle: 'AKCJA: Pancernik Yamato 3D',
+    genre: 'Heavy Naval Battleship · A/D Kurs + Spacja Salwa 460mm + Shift Pełna Naprzód',
+    badge: 'PANCERNIK 3D',
+    description: 'Potężny pancernik z trzema potrójnymi wieżami 460mm na falującym oceanie GLSL: potrójne salwy artyleryjskie, niszczyciele i bossowie.',
+    skyBaseTop: 0x0c2440,
+    skyBaseBottom: 0x476b8c,
+    nebulaColA: [0.16, 0.46, 0.82],
+    nebulaColB: [0.98, 0.68, 0.32],
+    nebulaColC: [0.42, 0.72, 0.94],
+    coreColA: [0.98, 0.62, 0.22],
+    coreColB: [0.22, 0.74, 0.96],
+    floorColor: 0x08263d,
+    gridColor: 'rgba(56, 189, 248, 0.26)',
+    gridBorder: 'rgba(251, 146, 60, 0.24)',
+    fogColor: 0x26445e,
+    lightPalette: [0xf59e0b, 0x38bdf8, 0xf97316, 0x22d3ee],
+    layoutMode: 'battleship_yamato',
+  },
 ];
 
 const GAME_PRESETS: Record<GameQualityPreset, GamePresetConfig> = {
@@ -817,10 +1116,10 @@ const GAME_PRESETS: Record<GameQualityPreset, GamePresetConfig> = {
     drones: 2200,
     particles: 4000,
     towers: 180,
-    shadowSize: 1024,
+    shadowSize: 2048,
     renderScale: 1.0,
-    bloomStrength: 0.26,
-    raymarchSteps: 28,
+    bloomStrength: 0.28,
+    raymarchSteps: 32,
     refFps: 120,
   },
   ultra: {
@@ -882,6 +1181,7 @@ precision highp float;
 varying vec3 vWorldDir;
 uniform float uTime;
 uniform int uSteps;
+uniform int uSkyMode; // 0 = Daylight/Golden Atmosphere, 1 = Night City/Dusk, 2 = Abyssal Underwater, 3 = Deep Space Nebula
 uniform vec3 uColA;
 uniform vec3 uColB;
 uniform vec3 uColC;
@@ -924,9 +1224,96 @@ float fbm(vec3 p) {
 
 void main() {
   vec3 dir = normalize(vWorldDir);
-  vec3 baseSky = mix(uColA * 0.08, vec3(0.004, 0.007, 0.020), clamp(dir.y * 1.4, 0.0, 1.0));
+  float yUp = clamp(dir.y, 0.0, 1.0);
+  vec3 sunDir = normalize(vec3(0.28, 0.20, -0.94));
+  float sunDot = max(dot(dir, sunDir), 0.0);
 
-  // Real volumetric raymarching loop scaled by preset (28 to 128 GPU steps per pixel!)
+  if (uSkyMode == 0) {
+    // Physically inspired Rayleigh + Mie Daylight / Golden-Hour Sky with Volumetric Sunlit Cumulus Clouds
+    vec3 zenith = mix(vec3(0.04, 0.16, 0.42), uColA * 0.55, 0.35);
+    vec3 midSky = mix(vec3(0.16, 0.44, 0.78), uColA, 0.32);
+    vec3 horizonCol = mix(vec3(0.88, 0.62, 0.42), mix(uColB, uColC, 0.52), 0.58);
+    vec3 sky = mix(midSky, zenith, pow(yUp, 0.62));
+    float hBand = exp(-max(dir.y, 0.0) * 6.5);
+    sky = mix(sky, horizonCol, hBand * 0.86);
+
+    // Subtle below-horizon ocean reflection tint
+    if (dir.y < 0.0) {
+      sky = mix(horizonCol * 0.65, vec3(0.02, 0.09, 0.18), clamp(-dir.y * 4.0, 0.0, 1.0));
+    }
+
+    // Mie sun scattering & HDR sun disc
+    float mieGlow = pow(sunDot, 7.0) * 0.42 + pow(sunDot, 42.0) * 0.85;
+    float sunDisc = smoothstep(0.9984, 0.9996, sunDot);
+    vec3 sunTint = mix(vec3(1.0, 0.86, 0.62), uColC, 0.35);
+    sky += sunTint * (mieGlow + sunDisc * 3.2);
+
+    // Layered procedural volumetric clouds in upper hemisphere
+    if (dir.y > 0.02) {
+      vec2 cloudUv = dir.xz / (dir.y + 0.16);
+      vec3 cp1 = vec3(cloudUv * 0.42 + vec2(uTime * 0.018, -uTime * 0.024), 1.4);
+      vec3 cp2 = vec3(cloudUv * 0.95 + vec2(-uTime * 0.012, uTime * 0.016), 3.7);
+      float cBase = fbm(cp1);
+      float cDetail = fbm(cp2);
+      float cloudCov = smoothstep(0.46, 0.78, cBase * 0.72 + cDetail * 0.34);
+      float distFade = smoothstep(0.02, 0.24, dir.y);
+      float silverLining = pow(sunDot, 5.0) * 0.72 + 0.28;
+      vec3 cloudLit = mix(vec3(0.98, 0.94, 0.88), sunTint * 1.18, 0.52) * silverLining;
+      vec3 cloudShade = mix(vec3(0.24, 0.34, 0.52), horizonCol * 0.58, hBand);
+      vec3 cloudCol = mix(cloudShade, cloudLit, smoothstep(0.32, 0.78, cDetail));
+      sky = mix(sky, cloudCol, cloudCov * distFade * 0.78);
+    }
+
+    gl_FragColor = vec4(sky, 1.0);
+    return;
+  }
+
+  if (uSkyMode == 1) {
+    // Cinematic Night Metropolis / Dusk Sky with City Horizon Glow & High-Altitude Wisps
+    vec3 zenith = vec3(0.015, 0.028, 0.075);
+    vec3 horizonCol = mix(vec3(0.07, 0.14, 0.28), mix(uColA, uColB, 0.45) * 0.48, 0.65);
+    vec3 sky = mix(horizonCol, zenith, pow(yUp, 0.52));
+    float hGlow = exp(-abs(dir.y) * 9.5);
+    sky += mix(uColA, uColC, 0.45) * hGlow * 0.38;
+
+    if (dir.y > 0.03) {
+      vec2 wUv = dir.xz / (dir.y + 0.22);
+      float wisp = fbm(vec3(wUv * 0.55 + vec2(uTime * 0.015, 0.0), 2.1));
+      float wMask = smoothstep(0.52, 0.82, wisp) * smoothstep(0.03, 0.3, dir.y);
+      sky = mix(sky, mix(uColA, uColB, 0.5) * 0.36, wMask * 0.42);
+    }
+
+    // Crisp moon / distant skyline glow & sharp starfield
+    float moonHalo = pow(sunDot, 24.0) * 0.45 + smoothstep(0.9986, 0.9996, sunDot) * 1.8;
+    sky += vec3(0.84, 0.92, 1.0) * moonHalo;
+    float starCell = hash31(floor(dir * 460.0));
+    if (starCell > 0.9945 && dir.y > 0.08) {
+      sky += vec3(0.88, 0.94, 1.0) * ((starCell - 0.9945) * 165.0) * smoothstep(0.08, 0.35, dir.y);
+    }
+    gl_FragColor = vec4(sky, 1.0);
+    return;
+  }
+
+  if (uSkyMode == 2) {
+    // Abyssal Deep-Sea Underwater Sky with Animated Volumetric Surface God-Rays
+    vec3 deepCol = vec3(0.008, 0.045, 0.085);
+    vec3 midCol = vec3(0.018, 0.14, 0.22);
+    vec3 surfCol = vec3(0.06, 0.48, 0.58);
+    vec3 col = mix(deepCol, midCol, smoothstep(-0.2, 0.35, dir.y));
+    col = mix(col, surfCol, smoothstep(0.32, 0.95, dir.y));
+    if (dir.y > -0.1) {
+      float rayAngle = atan(dir.x, -dir.z);
+      float shafts = pow(max(0.0, sin(rayAngle * 9.0 + uTime * 0.65) * 0.5 + 0.5), 4.0);
+      float shafts2 = pow(max(0.0, cos(rayAngle * 15.0 - uTime * 0.45 + dir.y * 3.0) * 0.5 + 0.5), 5.0);
+      float rayMask = smoothstep(-0.08, 0.78, dir.y) * (1.0 - smoothstep(0.72, 0.98, dir.y) * 0.35);
+      col += vec3(0.14, 0.78, 0.76) * (shafts * 0.22 + shafts2 * 0.16) * rayMask;
+    }
+    gl_FragColor = vec4(col, 1.0);
+    return;
+  }
+
+  // uSkyMode == 3: Deep Space Volumetric Raymarched Cosmic Nebula + Sharp Stars
+  vec3 baseSky = mix(uColA * 0.08, vec3(0.004, 0.007, 0.022), clamp(dir.y * 1.4, 0.0, 1.0));
   vec3 acc = vec3(0.0);
   float trans = 1.0;
   float t = 1.2;
@@ -939,24 +1326,20 @@ void main() {
     float band = smoothstep(0.42, 0.85, d) * smoothstep(-0.15, 0.45, dir.y);
     vec3 nebCol = mix(uColA, uColB, sin(t * 0.5 + d * 3.1) * 0.5 + 0.5);
     nebCol = mix(nebCol, uColC, smoothstep(0.68, 0.92, d));
-    float dens = band * 0.042;
+    float dens = band * 0.046;
     acc += trans * nebCol * dens;
     trans *= (1.0 - dens * 0.72);
     t += dt;
   }
-
-  // Crisp horizon glow, directional sun halo, atmospheric scattering & sharp stars
-  vec3 sunDir = normalize(vec3(0.32, 0.28, -0.9));
-  float sunDot = max(dot(dir, sunDir), 0.0);
   float sunDisc = smoothstep(0.9975, 0.9994, sunDot);
-  float sunHalo = pow(sunDot, 14.0) * 0.45 + pow(sunDot, 3.0) * 0.14;
+  float sunHalo = pow(sunDot, 14.0) * 0.48 + pow(sunDot, 3.0) * 0.15;
   float horizon = exp(-abs(dir.y) * 8.5);
   vec3 zenithCol = mix(baseSky, uColB * 0.18, smoothstep(0.0, 0.85, dir.y));
-  vec3 col = zenithCol + acc * 0.96 + mix(uColA, uColC, 0.35) * horizon * 0.56;
-  col += mix(uColC, vec3(1.0, 0.92, 0.78), 0.65) * (sunHalo + sunDisc * 2.2);
+  vec3 col = zenithCol + acc * 1.05 + mix(uColA, uColC, 0.35) * horizon * 0.54;
+  col += mix(uColC, vec3(1.0, 0.92, 0.78), 0.65) * (sunHalo + sunDisc * 2.4);
   float starCell = hash31(floor(dir * 420.0));
-  if (starCell > 0.994 && dir.y > 0.04) {
-    col += vec3(0.85, 0.92, 1.0) * ((starCell - 0.994) * 155.0);
+  if (starCell > 0.9935 && dir.y > -0.15) {
+    col += vec3(0.86, 0.93, 1.0) * ((starCell - 0.9935) * 160.0);
   }
   gl_FragColor = vec4(col, 1.0);
 }
@@ -1021,16 +1404,327 @@ void main() {
 }
 `;
 
+// AAA Animated GLSL Ocean Shader (5-Wave Gerstner Swells + FBM Micro-Ripples + Subsurface Scattering + HDR Sun Glint)
+const OCEAN_VERT = `
+uniform float uTime;
+varying vec3 vWorldPos;
+varying float vWaveH;
+void main() {
+  vec3 pos = position;
+  float w1 = sin(pos.x * 0.072 + pos.y * 0.045 + uTime * 1.45) * 0.72;
+  float w2 = cos(pos.x * 0.11 - pos.y * 0.092 + uTime * 2.05) * 0.44;
+  float w3 = sin((pos.x * 0.19 + pos.y * 0.15) - uTime * 2.75) * 0.24;
+  float w4 = cos((pos.x * 0.29 - pos.y * 0.24) + uTime * 3.4) * 0.12;
+  float w5 = sin(pos.y * 0.42 + uTime * 4.1) * 0.07;
+  float h = w1 + w2 + w3 + w4 + w5;
+  pos.z += h;
+  vWaveH = h;
+  vec4 wp = modelMatrix * vec4(pos, 1.0);
+  vWorldPos = wp.xyz;
+  gl_Position = projectionMatrix * viewMatrix * wp;
+}
+`;
+
+const OCEAN_FRAG = `
+precision highp float;
+uniform float uTime;
+uniform vec3 uDeepCol;
+uniform vec3 uShallowCol;
+uniform vec3 uSunCol;
+varying vec3 vWorldPos;
+varying float vWaveH;
+
+float hash21(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+
+float noise2(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  float a = hash21(i);
+  float b = hash21(i + vec2(1.0, 0.0));
+  float c = hash21(i + vec2(0.0, 1.0));
+  float d = hash21(i + vec2(1.0, 1.0));
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+float rippleFbm(vec2 p) {
+  float v = 0.0;
+  float amp = 0.5;
+  for (int i = 0; i < 4; i++) {
+    v += amp * noise2(p);
+    p = mat2(1.62, 1.18, -1.18, 1.62) * p;
+    amp *= 0.48;
+  }
+  return v;
+}
+
+void main() {
+  vec3 toCam = cameraPosition - vWorldPos;
+  float dist = length(toCam);
+  vec3 viewDir = toCam / max(dist, 0.001);
+
+  // Dual-layer animated FBM micro-ripples for crisp near-field water detail
+  vec2 uvA = vWorldPos.xz * 0.14 + vec2(uTime * 0.42, uTime * 0.85);
+  vec2 uvB = vWorldPos.xz * 0.34 + vec2(-uTime * 0.55, uTime * 0.62);
+  float eps = 0.22;
+  float rC = rippleFbm(uvA) * 0.65 + rippleFbm(uvB) * 0.35;
+  float rX = rippleFbm(uvA + vec2(eps, 0.0)) * 0.65 + rippleFbm(uvB + vec2(eps, 0.0)) * 0.35;
+  float rZ = rippleFbm(uvA + vec2(0.0, eps)) * 0.65 + rippleFbm(uvB + vec2(0.0, eps)) * 0.35;
+
+  float swellNx = cos(vWorldPos.x * 0.072 + vWorldPos.z * 0.045 + uTime * 1.45) * 0.16 +
+                  sin(vWorldPos.x * 0.19 - vWorldPos.z * 0.15 + uTime * 2.6) * 0.11;
+  float swellNz = sin(vWorldPos.z * 0.092 - uTime * 2.05) * 0.16 +
+                  cos(vWorldPos.x * 0.15 + vWorldPos.z * 0.22 - uTime * 2.4) * 0.11;
+  float detailAtten = clamp(1.0 - dist / 240.0, 0.22, 1.0);
+  vec3 normal = normalize(vec3(
+    swellNx + (rX - rC) * 1.45 * detailAtten,
+    1.0,
+    swellNz + (rZ - rC) * 1.45 * detailAtten
+  ));
+
+  // Schlick Fresnel sky reflection + turquoise subsurface crest glow
+  float ndotv = max(dot(normal, viewDir), 0.0);
+  float fresnel = 0.03 + 0.97 * pow(1.0 - ndotv, 4.2);
+  vec3 skyReflect = mix(vec3(0.14, 0.38, 0.68), mix(uSunCol, vec3(0.95, 0.78, 0.56), 0.45), fresnel * 0.62);
+
+  // Subsurface scattering through backlit wave peaks
+  float sss = smoothstep(0.18, 1.05, vWaveH) * (0.45 + 0.55 * (1.0 - ndotv));
+  vec3 waterBody = mix(uDeepCol, uShallowCol, clamp(0.18 + sss * 0.68, 0.0, 1.0));
+  vec3 col = mix(waterBody, skyReflect, clamp(fresnel * 0.85, 0.0, 0.88));
+
+  // Dazzling HDR Sun Specular Glitter Trail
+  vec3 sunDir = normalize(vec3(0.28, 0.20, -0.94));
+  vec3 halfVec = normalize(sunDir + viewDir);
+  float ndoth = max(dot(normal, halfVec), 0.0);
+  float specTight = pow(ndoth, 280.0) * 4.2;
+  float specBroad = pow(ndoth, 36.0) * 0.52;
+  col += mix(uSunCol, vec3(1.0, 0.96, 0.88), 0.55) * (specTight + specBroad);
+
+  // Crisp breaking whitecap foam on wave crests
+  float foamNoise = smoothstep(0.52, 0.78, rC);
+  float whitecap = smoothstep(0.62, 1.18, vWaveH) * (0.45 + 0.55 * foamNoise);
+  col = mix(col, vec3(0.92, 0.96, 1.0), clamp(whitecap * 0.55, 0.0, 0.65));
+
+  // Distant-only horizon atmospheric blend (keeps foreground ocean rich & razor-sharp!)
+  float horizonFade = smoothstep(82.0, 265.0, dist);
+  vec3 horizonTint = mix(vec3(0.18, 0.42, 0.66), uSunCol * 0.85, 0.38);
+  col = mix(col, horizonTint, horizonFade * 0.82);
+
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+// AAA Animated GLSL Underwater Caustics Seabed Shader (Displaced Sand Ridges + Dual-Layer Voronoi Sunlight Caustics)
+const UNDERWATER_CAUSTIC_VERT = `
+uniform float uTime;
+varying vec3 vWorldPos;
+varying float vElev;
+void main() {
+  vec3 pos = position;
+  float h = sin(pos.x * 0.068) * cos(pos.y * 0.055) * 2.8 +
+            sin(pos.x * 0.16 + pos.y * 0.12) * 0.95 +
+            cos(pos.x * 0.31 - pos.y * 0.27) * 0.32;
+  pos.z += h;
+  vElev = h;
+  vec4 wp = modelMatrix * vec4(pos, 1.0);
+  vWorldPos = wp.xyz;
+  gl_Position = projectionMatrix * viewMatrix * wp;
+}
+`;
+
+const UNDERWATER_CAUSTIC_FRAG = `
+precision highp float;
+uniform float uTime;
+varying vec3 vWorldPos;
+varying float vElev;
+
+vec2 hash22(vec2 p) {
+  p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+  return fract(sin(p) * 43758.5453);
+}
+
+float voronoiCaustic(vec2 uv, float t) {
+  vec2 i = floor(uv);
+  vec2 f = fract(uv);
+  float minD1 = 8.0;
+  float minD2 = 8.0;
+  for (int y = -1; y <= 1; y++) {
+    for (int x = -1; x <= 1; x++) {
+      vec2 neighbor = vec2(float(x), float(y));
+      vec2 pt = hash22(i + neighbor);
+      pt = 0.5 + 0.42 * sin(t + 6.2831 * pt);
+      vec2 diff = neighbor + pt - f;
+      float d = length(diff);
+      if (d < minD1) {
+        minD2 = minD1;
+        minD1 = d;
+      } else if (d < minD2) {
+        minD2 = d;
+      }
+    }
+  }
+  return smoothstep(0.0, 0.24, minD2 - minD1);
+}
+
+void main() {
+  float dist = length(cameraPosition - vWorldPos);
+  vec2 worldUv = vWorldPos.xz * 0.11 + vec2(0.0, -uTime * 0.65);
+
+  // Dual animated Voronoi caustic layers simulating sunlight refracting through waves above
+  float c1 = 1.0 - voronoiCaustic(worldUv * 1.15 + vec2(uTime * 0.14, 0.0), uTime * 1.35);
+  float c2 = 1.0 - voronoiCaustic(worldUv * 1.75 - vec2(uTime * 0.11, uTime * 0.08), uTime * 1.72 + 1.5);
+  float caustics = pow(clamp(c1 * 0.68 + c2 * 0.52, 0.0, 1.0), 2.1);
+
+  // Sand ripple shading
+  float sandRipple = sin(vWorldPos.x * 1.2 + sin(vWorldPos.z * 0.4) * 2.5) * 0.5 + 0.5;
+  vec3 deepSand = vec3(0.03, 0.14, 0.20);
+  vec3 ridgeSand = vec3(0.09, 0.30, 0.36);
+  vec3 baseSand = mix(deepSand, ridgeSand, clamp((vElev + 2.6) * 0.2 + sandRipple * 0.18, 0.0, 1.0));
+
+  // Crisp turquoise-aqua sunlit caustics + subtle chromatic edge
+  vec3 causticCol = vec3(0.24, 0.94, 0.90) * caustics * 1.35 + vec3(0.75, 1.0, 0.98) * pow(caustics, 3.0) * 0.85;
+  float causticAtten = clamp(1.0 - dist / 140.0, 0.18, 1.0);
+  vec3 col = baseSand + causticCol * causticAtten;
+
+  // Deep underwater volumetric blue-teal fog blend
+  float fog = smoothstep(32.0, 185.0, dist);
+  col = mix(col, vec3(0.015, 0.11, 0.19), fog * 0.92);
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+// AAA Animated GLSL Molten Volcanic Lava Caldera Shader (Domain-Warped Magma Rivers + Basalt Crust)
+const LAVA_CALDERA_VERT = `
+uniform float uTime;
+varying vec3 vWorldPos;
+varying float vElev;
+void main() {
+  vec3 pos = position;
+  float h = sin(pos.x * 0.055 + uTime * 0.55) * cos(pos.y * 0.048 - uTime * 0.42) * 1.45 +
+            sin(pos.x * 0.13 - pos.y * 0.11 + uTime * 0.9) * 0.55;
+  pos.z += h;
+  vElev = h;
+  vec4 wp = modelMatrix * vec4(pos, 1.0);
+  vWorldPos = wp.xyz;
+  gl_Position = projectionMatrix * viewMatrix * wp;
+}
+`;
+
+const LAVA_CALDERA_FRAG = `
+precision highp float;
+uniform float uTime;
+varying vec3 vWorldPos;
+varying float vElev;
+
+float hash21(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+
+float noise2(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x),
+    mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x),
+    f.y
+  );
+}
+
+float fbm(vec2 p) {
+  float v = 0.0;
+  float a = 0.5;
+  for (int i = 0; i < 4; i++) {
+    v += a * noise2(p);
+    p = mat2(1.6, 1.2, -1.2, 1.6) * p;
+    a *= 0.5;
+  }
+  return v;
+}
+
+void main() {
+  float dist = length(cameraPosition - vWorldPos);
+  vec2 uv = vWorldPos.xz * 0.055 + vec2(0.0, -uTime * 0.35);
+  float warp = fbm(uv * 1.4 + vec2(uTime * 0.15, -uTime * 0.18));
+  float flow = fbm(uv * 2.1 + vec2(warp * 2.2, -warp * 1.8));
+  float cracks = smoothstep(0.38, 0.66, flow);
+  float hotCore = smoothstep(0.58, 0.84, flow);
+
+  vec3 basalt = vec3(0.07, 0.05, 0.05) + vec3(0.05, 0.02, 0.01) * (vElev * 0.3 + 0.5);
+  vec3 magmaRed = vec3(0.95, 0.18, 0.03);
+  vec3 magmaGold = vec3(1.0, 0.78, 0.22);
+  vec3 col = mix(basalt, magmaRed * 1.45, cracks);
+  col = mix(col, magmaGold * 2.1, hotCore);
+
+  float fog = smoothstep(55.0, 220.0, dist);
+  col = mix(col, vec3(0.16, 0.04, 0.02), fog * 0.85);
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
 interface LaserBolt {
-  mesh: THREE.Mesh;
+  mesh: THREE.Object3D;
   vel: THREE.Vector3;
   life: number;
+  damage: number;
+  kind?: 'shell' | 'missile' | 'torpedo' | 'laser';
+}
+
+interface EnemyTarget {
+  group: THREE.Group;
+  kind: 'drone' | 'fighter' | 'tank' | 'turret' | 'mine' | 'boss';
+  hp: number;
+  maxHp: number;
+  radius: number;
+  baseX: number;
+  baseY: number;
+  speedZ: number;
+  phase: number;
+  isBoss: boolean;
+  hitFlash: number;
+}
+
+interface ExplosionFx {
+  group: THREE.Group;
+  light?: THREE.PointLight;
+  ring: THREE.Mesh;
+  ring2: THREE.Mesh;
+  core: THREE.Mesh;
+  pillar?: THREE.Mesh;
+  fireballs: { mesh: THREE.Mesh; vel: THREE.Vector3; initScale: number }[];
+  smokePuffs: { mesh: THREE.Mesh; vel: THREE.Vector3; initScale: number }[];
+  sparks: { mesh: THREE.Mesh; vel: THREE.Vector3 }[];
+  age: number;
+  maxAge: number;
+  maxScale: number;
+  isUnderwater?: boolean;
+}
+
+interface MuzzleFlashFx {
+  group: THREE.Group;
+  ring: THREE.Mesh;
+  age: number;
+  maxAge: number;
+}
+
+interface BoostGate {
+  mesh: THREE.Group;
+  innerRing: THREE.Mesh;
+  passed: boolean;
+  radius: number;
 }
 
 export class GameBenchService {
   private mountEl: HTMLElement | null = null;
   private renderer: THREE.WebGLRenderer | null = null;
   private composer: EffectComposer | null = null;
+  private composerRT: THREE.WebGLRenderTarget | null = null;
   private bloomPass: UnrealBloomPass | null = null;
   private scene: THREE.Scene | null = null;
   private camera: THREE.PerspectiveCamera | null = null;
@@ -1038,6 +1732,9 @@ export class GameBenchService {
   private resizeObserver: ResizeObserver | null = null;
 
   private skyMat: THREE.ShaderMaterial | null = null;
+  private oceanMat: THREE.ShaderMaterial | null = null;
+  private causticMat: THREE.ShaderMaterial | null = null;
+  private lavaMat: THREE.ShaderMaterial | null = null;
   private plasmaMat: THREE.ShaderMaterial | null = null;
   private coreGroup: THREE.Group | null = null;
   private droneMesh: THREE.InstancedMesh | null = null;
@@ -1046,6 +1743,15 @@ export class GameBenchService {
   private particlePoints: THREE.Points | null = null;
   private dynLights: THREE.PointLight[] = [];
   private lasers: LaserBolt[] = [];
+  private combatEnemies: EnemyTarget[] = [];
+  private explosions: ExplosionFx[] = [];
+  private muzzleFlashes: MuzzleFlashFx[] = [];
+  private boostGates: BoostGate[] = [];
+  private muzzleLight: THREE.PointLight | null = null;
+  private muzzleFlashTimer = 0;
+  private fireCooldown = 0;
+  private cameraShake = 0;
+  private isMouseFireDown = false;
 
   private droneMeta: Float32Array = new Float32Array(0);
   private lastTriangles = 0;
@@ -1062,8 +1768,8 @@ export class GameBenchService {
   private fogEnabled = true;
   private anisotropy = 16;
   private toneMapping: GameToneMappingMode = 'aces';
-  private exposure = 1.05;
-  private envIntensity = 0.72;
+  private exposure = 1.12;
+  private envIntensity = 1.32;
   private sceneryDensityPct = 100;
   private dynamicResolution = true;
   private aiProfile: GameAiProfile = 'ai_auto';
@@ -1096,12 +1802,14 @@ export class GameBenchService {
   private lastMouseY = 0;
   private playerCarGroup: THREE.Group | null = null;
   private playerAircraftGroup: THREE.Group | null = null;
+  private playerCombatGroup: THREE.Group | null = null;
   private aircraftRotors: THREE.Object3D[] = [];
   private raceRoadTexture: THREE.CanvasTexture | null = null;
   private flightGroundTex: THREE.CanvasTexture | null = null;
   private flightCloudsMesh: THREE.InstancedMesh | null = null;
   private flightCloudMeta: Float32Array = new Float32Array(0);
   private contactShadowTex: THREE.CanvasTexture | null = null;
+  private particleTex: THREE.CanvasTexture | null = null;
   private raceGantries: THREE.Object3D[] = [];
   private raceWheels: THREE.Object3D[] = [];
   private raceSteerWheels: THREE.Object3D[] = [];
@@ -1112,8 +1820,25 @@ export class GameBenchService {
   private raceSpeedKmh = 340;
   private raceDistanceM = 0;
   private raceLap = 1;
+  private raceTotalLaps = 5;
   private raceNitroPct = 100;
   private racePosition = 4;
+  private overtakeScoredIds = new Set<number>();
+
+  // Playable 5-Stage Campaign & Arcade Score Loop
+  private gameScore = 0;
+  private gameCombo = 1;
+  private gameComboTimer = 0;
+  private gameStage = 1;
+  private readonly gameMaxStage = 5;
+  private gameHealthPct = 100;
+  private gameTargetsDestroyed = 0;
+  private gameStageKills = 0;
+  private gameGatesPassed = 0;
+  private targetLocked = false;
+  private gameMissionText = '';
+  private gameBannerText = '';
+  private gameBannerUntilTs = 0;
 
   // 3D Soccer Match state
   private soccerPlayerGroup: THREE.Group | null = null;
@@ -1157,7 +1882,7 @@ export class GameBenchService {
     if (this.scene && this.mountEl) {
       this.clearSceneObjects(this.scene);
       this.scene.background = new THREE.Color(found.skyBaseTop);
-      this.scene.fog = this.fogEnabled ? new THREE.FogExp2(found.fogColor, 0.0068) : null;
+      this.scene.fog = this.fogEnabled ? new THREE.FogExp2(found.fogColor, this.getFogDensity(found.layoutMode)) : null;
       this.buildWorld(this.scene);
       this.applyPresetScale(Math.max(360, this.mountEl.clientWidth), Math.max(280, this.mountEl.clientHeight));
       if (!this.running) {
@@ -1200,6 +1925,17 @@ export class GameBenchService {
     }
     this.dynLights = [];
     this.lasers = [];
+    this.combatEnemies = [];
+    this.explosions = [];
+    this.muzzleFlashes = [];
+    this.boostGates = [];
+    this.muzzleLight = null;
+    this.muzzleFlashTimer = 0;
+    this.fireCooldown = 0;
+    this.cameraShake = 0;
+    this.oceanMat = null;
+    this.causticMat = null;
+    this.lavaMat = null;
     this.towerMesh = null;
     this.accentStripMesh = null;
     this.droneMesh = null;
@@ -1207,6 +1943,7 @@ export class GameBenchService {
     this.coreGroup = null;
     this.playerCarGroup = null;
     this.playerAircraftGroup = null;
+    this.playerCombatGroup = null;
     this.aircraftRotors = [];
     this.raceRoadTexture?.dispose();
     this.raceRoadTexture = null;
@@ -1216,6 +1953,8 @@ export class GameBenchService {
     this.flightCloudMeta = new Float32Array(0);
     this.contactShadowTex?.dispose();
     this.contactShadowTex = null;
+    this.particleTex?.dispose();
+    this.particleTex = null;
     this.raceGantries = [];
     this.raceWheels = [];
     this.raceSteerWheels = [];
@@ -1224,6 +1963,7 @@ export class GameBenchService {
     this.soccerTeammates = [];
     this.soccerOpponents = [];
     this.skyMat = null;
+    this.oceanMat = null;
     this.plasmaMat = null;
   }
 
@@ -1254,13 +1994,33 @@ export class GameBenchService {
       mode === 'dakar_rally' ||
       mode === 'bugatti_hypercar' ||
       mode === 'snow_rally' ||
+      mode === 'motogp_superbike' ||
+      mode === 'cyber_hoverbike' ||
       mode === 'corridor'
     );
   }
 
   public isFlightScene(layoutMode?: GameCatalogItem['layoutMode']): boolean {
     const mode = layoutMode || this.getGameCatalogItem().layoutMode;
-    return mode === 'f22_jet' || mode === 'sr71_plane' || mode === 'apache_heli';
+    return (
+      mode === 'f22_jet' ||
+      mode === 'sr71_plane' ||
+      mode === 'apache_heli' ||
+      mode === 'f18_naval' ||
+      mode === 'ac130_gunship' ||
+      mode === 'volcano_heli'
+    );
+  }
+
+  public isCombatScene(layoutMode?: GameCatalogItem['layoutMode']): boolean {
+    const mode = layoutMode || this.getGameCatalogItem().layoutMode;
+    return (
+      mode === 'tank_blitz' ||
+      mode === 'mech_titan' ||
+      mode === 'submarine_hunt' ||
+      mode === 'starfighter_trench' ||
+      mode === 'battleship_yamato'
+    );
   }
 
   public isSoccerScene(layoutMode?: GameCatalogItem['layoutMode']): boolean {
@@ -1270,8 +2030,10 @@ export class GameBenchService {
 
   private updateSceneModeFlags(layoutMode: GameCatalogItem['layoutMode']): void {
     const racing = this.isRacingScene(layoutMode) || this.isFlightScene(layoutMode);
+    const combat = this.isCombatScene(layoutMode) || this.isFlightScene(layoutMode);
     const soccer = this.isSoccerScene(layoutMode);
     this.metrics.isRacingMode = racing;
+    this.metrics.isCombatMode = combat;
     this.metrics.isSoccerMode = soccer;
   }
 
@@ -1322,7 +2084,21 @@ export class GameBenchService {
       shotsFired: 0,
       targetsHit: 0,
       isRacingMode: this.isRacingScene(gameMeta.layoutMode) || this.isFlightScene(gameMeta.layoutMode),
+      isCombatMode: this.isCombatScene(gameMeta.layoutMode) || this.isFlightScene(gameMeta.layoutMode),
       isSoccerMode: this.isSoccerScene(gameMeta.layoutMode),
+      raceTotalLaps: this.raceTotalLaps,
+      racePosition: this.racePosition,
+      gameScore: 0,
+      gameCombo: 1,
+      gameStage: 1,
+      gameMaxStage: this.gameMaxStage,
+      gameHealthPct: 100,
+      gameMissionText: 'Przygotuj się do misji — kliknij START i użyj WASD + Spacja!',
+      gameBannerText: '',
+      gameTargetsDestroyed: 0,
+      gameGatesPassed: 0,
+      targetLocked: false,
+      sfxEnabled: gameAudioService.isEnabled(),
       soccerScoreHome: 0,
       soccerScoreAway: 0,
       soccerBallSpeedKmh: 0,
@@ -1354,11 +2130,18 @@ export class GameBenchService {
     const h = Math.max(280, container.clientHeight);
     const gameMeta = this.getGameCatalogItem();
 
-    const renderer = new THREE.WebGLRenderer({
-      antialias: true,
-      powerPreference: 'high-performance',
-      stencil: false,
-    });
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        powerPreference: 'high-performance',
+        stencil: false,
+      });
+    } catch {
+      container.innerHTML =
+        '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#94a3b8;font-family:var(--font-mono);font-size:13px;padding:16px;text-align:center;">Brak dostępnego kontekstu WebGL2 w tym środowisku.</div>';
+      return;
+    }
     renderer.info.autoReset = false;
     this.applyRendererToneMapping(renderer);
     renderer.shadowMap.enabled = this.shadowsEnabled;
@@ -1367,6 +2150,11 @@ export class GameBenchService {
     container.innerHTML = '';
     container.appendChild(renderer.domElement);
     this.renderer = renderer;
+
+    renderer.domElement.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault();
+      this.stop();
+    });
 
     // Inspect real WebGL GPU renderer string for on-device AI Graphics Engine
     try {
@@ -1397,14 +2185,18 @@ export class GameBenchService {
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(gameMeta.skyBaseTop);
-    scene.fog = this.fogEnabled ? new THREE.FogExp2(gameMeta.fogColor, 0.0068) : null;
+    scene.fog = this.fogEnabled ? new THREE.FogExp2(gameMeta.fogColor, this.getFogDensity(gameMeta.layoutMode)) : null;
     this.scene = scene;
 
-    const pmrem = new THREE.PMREMGenerator(renderer);
-    this.envRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
-    scene.environment = this.envRT.texture;
-    scene.environmentIntensity = this.envIntensity;
-    pmrem.dispose();
+    try {
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      this.envRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
+      scene.environment = this.envRT.texture;
+      scene.environmentIntensity = this.envIntensity;
+      pmrem.dispose();
+    } catch {
+      this.envRT = null;
+    }
 
     const camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 460);
     camera.position.set(0, 12.5, 36);
@@ -1427,17 +2219,63 @@ export class GameBenchService {
     this.emitMetrics();
   }
 
+  private getSkyMode(layoutMode: GameCatalogItem['layoutMode']): number {
+    if (
+      layoutMode === 'f18_naval' ||
+      layoutMode === 'f22_jet' ||
+      layoutMode === 'dakar_rally' ||
+      layoutMode === 'tank_blitz' ||
+      layoutMode === 'snow_rally' ||
+      layoutMode === 'formula_gp' ||
+      layoutMode === 'bugatti_hypercar' ||
+      layoutMode === 'battleship_yamato'
+    ) {
+      return 0; // Daylight / Golden-Hour Rayleigh+Mie Atmosphere
+    }
+    if (
+      layoutMode === 'apache_heli' ||
+      layoutMode === 'mech_titan' ||
+      layoutMode === 'motogp_superbike' ||
+      layoutMode === 'drift_touge' ||
+      layoutMode === 'soccer_stadium' ||
+      layoutMode === 'corridor' ||
+      layoutMode === 'cyber_hoverbike' ||
+      layoutMode === 'ac130_gunship'
+    ) {
+      return 1; // Night Metropolis / Dusk
+    }
+    if (layoutMode === 'submarine_hunt' || layoutMode === 'abyss') {
+      return 2; // Abyssal Underwater God-Rays
+    }
+    return 3; // Deep Space / Volcanic Dramatic Nebula
+  }
+
+  private getFogDensity(layoutMode: GameCatalogItem['layoutMode']): number {
+    if (layoutMode === 'submarine_hunt' || layoutMode === 'abyss') return 0.0056;
+    if (
+      this.isFlightScene(layoutMode) ||
+      this.isRacingScene(layoutMode) ||
+      this.isCombatScene(layoutMode) ||
+      layoutMode === 'soccer_stadium'
+    ) {
+      return 0.0029;
+    }
+    return 0.0052;
+  }
+
   private buildWorld(scene: THREE.Scene): void {
     const cfg = GAME_PRESETS[this.preset];
     const gameMeta = this.getGameCatalogItem();
+    const skyMode = this.getSkyMode(gameMeta.layoutMode);
 
-    // 1. Volumetric GPU Raymarched Sky Dome tailored to the selected game's palette
+    // 1. Volumetric GPU Raymarched Atmospheric / Nebula Sky Dome tailored per genre
     this.skyMat = new THREE.ShaderMaterial({
       vertexShader: VOLUMETRIC_SKY_VERT,
       fragmentShader: VOLUMETRIC_SKY_FRAG,
       uniforms: {
         uTime: { value: 0 },
         uSteps: { value: cfg.raymarchSteps },
+        uSkyMode: { value: skyMode },
         uColA: { value: new THREE.Vector3(...gameMeta.nebulaColA) },
         uColB: { value: new THREE.Vector3(...gameMeta.nebulaColB) },
         uColC: { value: new THREE.Vector3(...gameMeta.nebulaColC) },
@@ -1445,30 +2283,32 @@ export class GameBenchService {
       side: THREE.BackSide,
       depthWrite: false,
     });
-    const skyDome = new THREE.Mesh(new THREE.SphereGeometry(240, 32, 24), this.skyMat);
+    const skyDome = new THREE.Mesh(new THREE.SphereGeometry(280, 40, 28), this.skyMat);
     scene.add(skyDome);
 
-    // 2. Balanced 3-Point Cinematic Studio Lighting (Key Sun + Cool Sky/Ground Hemi + Rim Fill)
-    const hemi = new THREE.HemisphereLight(gameMeta.lightPalette[0], gameMeta.skyBaseBottom, 0.92);
+    // 2. High-Contrast AAA 3-Point Lighting (Key Sun + Atmospheric Sky/Ground Hemi + Specular Rim Fill)
+    const hemiSkyCol = skyMode === 0 ? 0x9bd0ff : gameMeta.lightPalette[0];
+    const hemiGroundCol = skyMode === 0 ? 0x163856 : gameMeta.skyBaseBottom;
+    const hemi = new THREE.HemisphereLight(hemiSkyCol, hemiGroundCol, skyMode === 0 ? 1.08 : 0.96);
     scene.add(hemi);
 
-    const sun = new THREE.DirectionalLight(0xfff1dc, 2.55);
-    sun.position.set(34, 58, 30);
+    const sun = new THREE.DirectionalLight(skyMode === 0 ? 0xfff3dc : 0xf4f7ff, skyMode === 0 ? 3.05 : 2.65);
+    sun.position.set(36, 56, -42);
     sun.castShadow = this.shadowsEnabled;
     sun.shadow.mapSize.set(cfg.shadowSize, cfg.shadowSize);
     sun.shadow.camera.near = 4;
-    sun.shadow.camera.far = 175;
-    const d = 62;
+    sun.shadow.camera.far = 185;
+    const d = 64;
     sun.shadow.camera.left = -d;
     sun.shadow.camera.right = d;
     sun.shadow.camera.top = d;
     sun.shadow.camera.bottom = -d;
-    sun.shadow.bias = -0.0004;
-    sun.shadow.normalBias = 0.02;
+    sun.shadow.bias = -0.00035;
+    sun.shadow.normalBias = 0.025;
     scene.add(sun);
 
-    const rimDir = new THREE.DirectionalLight(gameMeta.lightPalette[0], 1.15);
-    rimDir.position.set(-42, 22, -48);
+    const rimDir = new THREE.DirectionalLight(skyMode === 0 ? 0x7dd3fc : gameMeta.lightPalette[0], 1.38);
+    rimDir.position.set(-42, 24, 48);
     scene.add(rimDir);
 
     this.dynLights = gameMeta.lightPalette.map((col, idx) => {
@@ -1493,13 +2333,19 @@ export class GameBenchService {
         gameMeta.layoutMode === 'maglev_track' ||
         gameMeta.layoutMode === 'dakar_rally' ||
         gameMeta.layoutMode === 'bugatti_hypercar' ||
-        gameMeta.layoutMode === 'snow_rally';
+        gameMeta.layoutMode === 'snow_rally' ||
+        gameMeta.layoutMode === 'motogp_superbike' ||
+        gameMeta.layoutMode === 'cyber_hoverbike';
 
       if (isRacingTrack || gameMeta.layoutMode === 'corridor') {
         const trackStyle: VehicleStyle =
           gameMeta.layoutMode === 'snow_rally'
             ? 'dakar_rally'
-            : (gameMeta.layoutMode as VehicleStyle);
+            : gameMeta.layoutMode === 'motogp_superbike'
+              ? 'formula_gp'
+              : gameMeta.layoutMode === 'cyber_hoverbike'
+                ? 'maglev_track'
+                : (gameMeta.layoutMode as VehicleStyle);
         const textures = createRacingTrackTextures(trackStyle, this.anisotropy);
         if (gameMeta.layoutMode === 'snow_rally') {
           // Tint snow rally ground into crisp alpine tarmac + icy snow shoulders
@@ -1699,50 +2545,167 @@ export class GameBenchService {
           })
         );
         floor.rotation.x = -Math.PI / 2;
-        if (this.isFlightScene(gameMeta.layoutMode)) {
-          // Stratospheric sea / canyon ridge texture scrolling underneath aircraft at Mach velocity
-          const flCanvas = document.createElement('canvas');
-          flCanvas.width = 512;
-          flCanvas.height = 512;
-          const flctx = flCanvas.getContext('2d')!;
-          const grad = flctx.createLinearGradient(0, 0, 512, 512);
-          if (gameMeta.layoutMode === 'sr71_plane') {
-            grad.addColorStop(0, '#041428');
-            grad.addColorStop(0.5, '#07223e');
-            grad.addColorStop(1, '#041428');
-          } else if (gameMeta.layoutMode === 'f22_jet') {
-            grad.addColorStop(0, '#2a1810');
-            grad.addColorStop(0.5, '#472818');
-            grad.addColorStop(1, '#26140c');
-          } else {
-            grad.addColorStop(0, '#091f17');
-            grad.addColorStop(0.5, '#133528');
-            grad.addColorStop(1, '#081a13');
-          }
-          flctx.fillStyle = grad;
-          flctx.fillRect(0, 0, 512, 512);
-          flctx.strokeStyle = gameMeta.layoutMode === 'sr71_plane' ? 'rgba(56, 189, 248, 0.22)' : 'rgba(255, 255, 255, 0.14)';
-          flctx.lineWidth = 2;
-          for (let y = 0; y < 512; y += 32) {
-            flctx.beginPath();
-            flctx.moveTo(0, y);
-            for (let x = 0; x <= 512; x += 64) {
-              flctx.lineTo(x, y + Math.sin(x * 0.04 + y * 0.1) * 9);
+        if (
+          this.isFlightScene(gameMeta.layoutMode) ||
+          this.isCombatScene(gameMeta.layoutMode)
+        ) {
+          if (
+            gameMeta.layoutMode === 'f18_naval' ||
+            gameMeta.layoutMode === 'sr71_plane' ||
+            gameMeta.layoutMode === 'battleship_yamato'
+          ) {
+            // High-Resolution Animated GLSL Rolling Ocean with FBM Micro-Ripples & HDR Sun Glint
+            const oceanGeo = new THREE.PlaneGeometry(460, 460, 112, 112);
+            this.oceanMat = new THREE.ShaderMaterial({
+              vertexShader: OCEAN_VERT,
+              fragmentShader: OCEAN_FRAG,
+              uniforms: {
+                uTime: { value: 0 },
+                uDeepCol: { value: new THREE.Vector3(0.012, 0.068, 0.165) },
+                uShallowCol: { value: new THREE.Vector3(0.04, 0.34, 0.52) },
+                uSunCol: {
+                  value:
+                    gameMeta.layoutMode === 'f18_naval' || gameMeta.layoutMode === 'battleship_yamato'
+                      ? new THREE.Vector3(1.0, 0.78, 0.42)
+                      : new THREE.Vector3(0.52, 0.86, 1.0),
+                },
+              },
+            });
+            floor.geometry.dispose();
+            floor.geometry = oceanGeo;
+            floor.material.dispose();
+            floor.material = this.oceanMat as unknown as THREE.MeshPhysicalMaterial;
+            floor.position.y = gameMeta.layoutMode === 'battleship_yamato' ? -0.35 : -13.5;
+          } else if (gameMeta.layoutMode === 'volcano_heli') {
+            // Animated GLSL Molten Volcanic Lava Caldera Sea
+            const lavaGeo = new THREE.PlaneGeometry(420, 420, 96, 96);
+            this.lavaMat = new THREE.ShaderMaterial({
+              vertexShader: LAVA_CALDERA_VERT,
+              fragmentShader: LAVA_CALDERA_FRAG,
+              uniforms: {
+                uTime: { value: 0 },
+              },
+            });
+            floor.geometry.dispose();
+            floor.geometry = lavaGeo;
+            floor.material.dispose();
+            floor.material = this.lavaMat as unknown as THREE.MeshPhysicalMaterial;
+            floor.position.y = -11.5;
+          } else if (gameMeta.layoutMode === 'apache_heli' || gameMeta.layoutMode === 'mech_titan') {
+            // Wet Night Metropolis Avenues with Subtle Illuminated Intersections & Warm Streetlamps
+            const cityTex = createNightCityGroundTexture(gameMeta.lightPalette[0], this.anisotropy);
+            this.flightGroundTex = cityTex.map;
+            const cityGeo = new THREE.PlaneGeometry(320, 340, 4, 4);
+            floor.geometry.dispose();
+            floor.geometry = cityGeo;
+            floor.material.map = cityTex.map;
+            floor.material.emissiveMap = cityTex.emissiveMap;
+            floor.material.roughnessMap = cityTex.roughnessMap;
+            floor.material.color.setHex(0xffffff);
+            floor.material.emissive.setHex(0xffffff);
+            floor.material.emissiveIntensity = 0.72;
+            floor.material.roughness = 0.36;
+            floor.material.metalness = 0.48;
+            floor.material.needsUpdate = true;
+            floor.position.y = gameMeta.layoutMode === 'mech_titan' ? 0 : -11.5;
+          } else if (
+            gameMeta.layoutMode === 'tank_blitz' ||
+            gameMeta.layoutMode === 'f22_jet' ||
+            gameMeta.layoutMode === 'ac130_gunship'
+          ) {
+            // Sculpted 3D Desert Dunes & Canyon Floor
+            const duneGeo = new THREE.PlaneGeometry(320, 340, 64, 64);
+            const dPos = duneGeo.attributes.position;
+            for (let i = 0; i < dPos.count; i++) {
+              const vx = dPos.getX(i);
+              const vy = dPos.getY(i);
+              const laneClear = Math.max(0, Math.min(1, (Math.abs(vx) - 16) / 26));
+              const duneH =
+                (Math.sin(vx * 0.06) * Math.cos(vy * 0.045) * 4.5 + Math.sin(vx * 0.14 + vy * 0.08) * 1.4) *
+                (gameMeta.layoutMode === 'tank_blitz' ? 0.25 + laneClear * 2.1 : 1.0 + laneClear * 2.2);
+              dPos.setZ(i, duneH);
             }
-            flctx.stroke();
+            duneGeo.computeVertexNormals();
+            const sandCanvas = document.createElement('canvas');
+            sandCanvas.width = 512;
+            sandCanvas.height = 512;
+            const sctx = sandCanvas.getContext('2d')!;
+            const isNightDesert = gameMeta.layoutMode === 'ac130_gunship';
+            const sg = sctx.createLinearGradient(0, 0, 512, 512);
+            sg.addColorStop(0, isNightDesert ? '#3d2c20' : '#9a6d43');
+            sg.addColorStop(0.5, isNightDesert ? '#4c3829' : '#b88754');
+            sg.addColorStop(1, isNightDesert ? '#2f2118' : '#8c6038');
+            sctx.fillStyle = sg;
+            sctx.fillRect(0, 0, 512, 512);
+            sctx.strokeStyle = isNightDesert ? 'rgba(249, 115, 22, 0.12)' : 'rgba(255, 224, 178, 0.16)';
+            sctx.lineWidth = 3;
+            for (let y = 0; y < 512; y += 24) {
+              sctx.beginPath();
+              sctx.moveTo(0, y);
+              for (let x = 0; x <= 512; x += 48) sctx.lineTo(x, y + Math.sin(x * 0.05 + y * 0.07) * 6);
+              sctx.stroke();
+            }
+            const sandTex = new THREE.CanvasTexture(sandCanvas);
+            sandTex.wrapS = sandTex.wrapT = THREE.RepeatWrapping;
+            sandTex.repeat.set(16, 20);
+            sandTex.colorSpace = THREE.SRGBColorSpace;
+            sandTex.anisotropy = this.anisotropy;
+            this.flightGroundTex = sandTex;
+            floor.geometry.dispose();
+            floor.geometry = duneGeo;
+            floor.material.map = sandTex;
+            floor.material.color.setHex(0xffffff);
+            floor.material.roughness = 0.88;
+            floor.material.metalness = 0.06;
+            floor.material.clearcoat = 0.0;
+            floor.material.needsUpdate = true;
+            floor.position.y = gameMeta.layoutMode === 'tank_blitz' ? -0.15 : -13.5;
+          } else if (gameMeta.layoutMode === 'submarine_hunt') {
+            // Animated GLSL Dual-Layer Voronoi Sunlight Caustics Seabed!
+            const seaGeo = new THREE.PlaneGeometry(360, 380, 88, 88);
+            this.causticMat = new THREE.ShaderMaterial({
+              vertexShader: UNDERWATER_CAUSTIC_VERT,
+              fragmentShader: UNDERWATER_CAUSTIC_FRAG,
+              uniforms: {
+                uTime: { value: 0 },
+              },
+            });
+            floor.geometry.dispose();
+            floor.geometry = seaGeo;
+            floor.material.dispose();
+            floor.material = this.causticMat as unknown as THREE.MeshPhysicalMaterial;
+            floor.position.y = -10.5;
+          } else {
+            // Starfighter Armored Metallic Trench Deck
+            const trC = document.createElement('canvas');
+            trC.width = 512;
+            trC.height = 512;
+            const tctx = trC.getContext('2d')!;
+            tctx.fillStyle = '#141c28';
+            tctx.fillRect(0, 0, 512, 512);
+            tctx.strokeStyle = '#293548';
+            tctx.lineWidth = 4;
+            for (let i = 0; i < 512; i += 64) {
+              tctx.strokeRect(i, 0, 64, 512);
+              tctx.strokeRect(0, i, 512, 64);
+            }
+            tctx.fillStyle = 'rgba(239, 68, 68, 0.26)';
+            tctx.fillRect(248, 0, 16, 512);
+            const trTex = new THREE.CanvasTexture(trC);
+            trTex.wrapS = trTex.wrapT = THREE.RepeatWrapping;
+            trTex.repeat.set(10, 24);
+            trTex.colorSpace = THREE.SRGBColorSpace;
+            trTex.anisotropy = this.anisotropy;
+            this.flightGroundTex = trTex;
+            floor.geometry.dispose();
+            floor.geometry = new THREE.PlaneGeometry(260, 340, 4, 4);
+            floor.material.map = trTex;
+            floor.material.color.setHex(0xffffff);
+            floor.material.roughness = 0.36;
+            floor.material.metalness = 0.84;
+            floor.material.needsUpdate = true;
+            floor.position.y = -9.0;
           }
-          const flightTex = new THREE.CanvasTexture(flCanvas);
-          flightTex.wrapS = THREE.RepeatWrapping;
-          flightTex.wrapT = THREE.RepeatWrapping;
-          flightTex.repeat.set(16, 22);
-          flightTex.colorSpace = THREE.SRGBColorSpace;
-          flightTex.anisotropy = this.anisotropy;
-          this.flightGroundTex = flightTex;
-          floor.material.map = flightTex;
-          floor.material.roughness = 0.45;
-          floor.material.metalness = gameMeta.layoutMode === 'sr71_plane' ? 0.55 : 0.22;
-          floor.material.needsUpdate = true;
-          floor.position.y = -14;
         }
         floor.receiveShadow = true;
         scene.add(floor);
@@ -2284,7 +3247,9 @@ export class GameBenchService {
       gameMeta.layoutMode === 'maglev_track' ||
       gameMeta.layoutMode === 'dakar_rally' ||
       gameMeta.layoutMode === 'bugatti_hypercar' ||
-      gameMeta.layoutMode === 'snow_rally'
+      gameMeta.layoutMode === 'snow_rally' ||
+      gameMeta.layoutMode === 'motogp_superbike' ||
+      gameMeta.layoutMode === 'cyber_hoverbike'
     ) {
       // HIGH-FIDELITY 3D MOTORSPORT CIRCUITS using gameVehicleModels.ts + Contact Shadows + Steerable Wheels
       coreGroup.position.set(0, 0, 0);
@@ -2362,10 +3327,12 @@ export class GameBenchService {
         this.raceGantries.push(gantry);
       }
 
+      const isMoto = gameMeta.layoutMode === 'motogp_superbike';
+      const isHoverbike = gameMeta.layoutMode === 'cyber_hoverbike';
       const vStyle: VehicleStyle =
         gameMeta.layoutMode === 'snow_rally' ? 'dakar_rally' : (gameMeta.layoutMode as VehicleStyle);
 
-      // 6 Sculpted Rivals
+      // 6 Sculpted Rivals (Cars, MotoGP Superbikes, or Cyber Hoverbikes)
       const rivalSpecs: Array<{ x: number; relZ: number; speedMult: number; color: number; accent: number }> = [
         { x: -6.8, relZ: -16, speedMult: 1.02, color: 0xef4444, accent: 0xfef08a },
         { x: 6.9, relZ: -30, speedMult: 0.99, color: 0x2563eb, accent: 0x38bdf8 },
@@ -2376,17 +3343,21 @@ export class GameBenchService {
       ];
       for (let rIdx = 0; rIdx < rivalSpecs.length; rIdx++) {
         const spec = rivalSpecs[rIdx];
-        const rivalCar = createDetailedRaceCarModel({
-          style: vStyle,
-          paintHex: spec.color,
-          accentHex: spec.accent,
-          isHero: false,
-          plasmaMat: this.plasmaMat,
-          shadowTex: this.contactShadowTex,
-          wheelRegister: this.raceWheels,
-        });
-        rivalCar.scale.setScalar(1.24);
-        rivalCar.position.set(spec.x, 0.02, 16 + spec.relZ);
+        const rivalCar = isHoverbike
+          ? createDetailedHoverbikeModel(spec.accent)
+          : isMoto
+            ? createDetailedSuperbikeModel(spec.color, spec.accent, false, this.contactShadowTex, this.raceWheels)
+            : createDetailedRaceCarModel({
+                style: vStyle,
+                paintHex: spec.color,
+                accentHex: spec.accent,
+                isHero: false,
+                plasmaMat: this.plasmaMat,
+                shadowTex: this.contactShadowTex,
+                wheelRegister: this.raceWheels,
+              });
+        rivalCar.scale.setScalar(isHoverbike ? 1.52 : isMoto ? 1.48 : 1.24);
+        rivalCar.position.set(spec.x, isHoverbike ? 0.35 : 0.02, 16 + spec.relZ);
         rivalCar.userData.rivalIdx = rIdx;
         rivalCar.userData.baseX = spec.x;
         rivalCar.userData.relZ = spec.relZ;
@@ -2394,25 +3365,31 @@ export class GameBenchService {
         coreGroup.add(rivalCar);
       }
 
-      // Hero Player Car
+      // Hero Player Car, Superbike, or Cyber Hoverbike
       const heroPaint =
         gameMeta.layoutMode === 'bugatti_hypercar'
           ? 0x0ea5e9
           : gameMeta.layoutMode === 'snow_rally'
             ? 0xf8fafc
-            : gameMeta.lightPalette[0];
-      const carGroup = createDetailedRaceCarModel({
-        style: vStyle,
-        paintHex: heroPaint,
-        accentHex: gameMeta.lightPalette[1],
-        isHero: true,
-        plasmaMat: this.plasmaMat,
-        shadowTex: this.contactShadowTex,
-        wheelRegister: this.raceWheels,
-        frontSteerRegister: this.raceSteerWheels,
-      });
-      carGroup.scale.setScalar(1.34);
-      carGroup.position.set(0, 0.04, 16.0);
+            : isMoto
+              ? 0xdc2626
+              : gameMeta.lightPalette[0];
+      const carGroup = isHoverbike
+        ? createDetailedHoverbikeModel(gameMeta.lightPalette[0])
+        : isMoto
+          ? createDetailedSuperbikeModel(heroPaint, gameMeta.lightPalette[1], true, this.contactShadowTex, this.raceWheels)
+          : createDetailedRaceCarModel({
+              style: vStyle,
+              paintHex: heroPaint,
+              accentHex: gameMeta.lightPalette[1],
+              isHero: true,
+              plasmaMat: this.plasmaMat,
+              shadowTex: this.contactShadowTex,
+              wheelRegister: this.raceWheels,
+              frontSteerRegister: this.raceSteerWheels,
+            });
+      carGroup.scale.setScalar(isHoverbike ? 1.58 : isMoto ? 1.56 : 1.34);
+      carGroup.position.set(0, isHoverbike ? 0.38 : 0.04, 16.0);
       scene.add(carGroup);
       this.playerCarGroup = carGroup;
       this.playerCarX = 0;
@@ -2420,16 +3397,26 @@ export class GameBenchService {
       this.raceSpeedKmh =
         gameMeta.layoutMode === 'maglev_track'
           ? 840
-          : gameMeta.layoutMode === 'bugatti_hypercar'
-            ? 438
-            : 356;
+          : isHoverbike
+            ? 540
+            : gameMeta.layoutMode === 'bugatti_hypercar'
+              ? 438
+              : isMoto
+                ? 348
+                : 356;
+      this.raceDistanceM = 0;
       this.raceLap = 1;
+      this.raceTotalLaps = 5;
       this.raceNitroPct = 100;
       this.racePosition = 4;
+      this.overtakeScoredIds.clear();
+      this.resetCampaignState(gameMeta.layoutMode);
+      this.spawnBoostGates(scene, gameMeta.layoutMode);
 
       if (this.camera) {
-        this.camera.position.set(0, 2.75, 24.4);
-        this.camera.lookAt(0, 1.18, -14.0);
+        const camY = isHoverbike ? 3.22 : isMoto ? 2.95 : 2.75;
+        this.camera.position.set(0, camY, isHoverbike || isMoto ? 24.8 : 24.4);
+        this.camera.lookAt(0, isHoverbike || isMoto ? 1.05 : 1.18, isHoverbike || isMoto ? -22.0 : -14.0);
       }
     } else if (gameMeta.layoutMode === 'soccer_stadium') {
       // CHAMPIONS STADIUM 3D: Two 3D Goalposts + Nets, 4 Stadium Floodlight Towers, 5v5 Articulated Kit Players + Hero #10 & Playable Soccer Ball
@@ -2570,36 +3557,55 @@ export class GameBenchService {
     } else if (
       gameMeta.layoutMode === 'f22_jet' ||
       gameMeta.layoutMode === 'sr71_plane' ||
-      gameMeta.layoutMode === 'apache_heli'
+      gameMeta.layoutMode === 'apache_heli' ||
+      gameMeta.layoutMode === 'f18_naval' ||
+      gameMeta.layoutMode === 'ac130_gunship' ||
+      gameMeta.layoutMode === 'volcano_heli'
     ) {
-      // 3D SUPERSONIC FIGHTERS & ATTACK HELICOPTER + VOLUMETRIC CLOUD DECK
+      // 3D SUPERSONIC FIGHTERS, AC-130J GUNSHIP, CHINOOK VOLCANO & ATTACK HELICOPTER + VOLUMETRIC CLOUDS + 5-STAGE CAMPAIGN
       coreGroup.position.set(0, 0, 0);
       this.aircraftRotors = [];
-      const fStyle = gameMeta.layoutMode as FlightStyle;
-      const heroAir = createDetailedAircraftModel({
-        style: fStyle,
-        accentHex: gameMeta.lightPalette[0],
-        plasmaMat: this.plasmaMat,
-        rotorRegister: this.aircraftRotors,
-      });
-      heroAir.scale.setScalar(1.38);
+      const buildFlightCraft = (accent: number): THREE.Group => {
+        if (gameMeta.layoutMode === 'ac130_gunship') {
+          return createDetailedGunshipModel(accent, this.aircraftRotors);
+        }
+        if (gameMeta.layoutMode === 'volcano_heli') {
+          return createDetailedChinookModel(accent, this.aircraftRotors);
+        }
+        return createDetailedAircraftModel({
+          style: gameMeta.layoutMode as FlightStyle,
+          accentHex: accent,
+          plasmaMat: this.plasmaMat,
+          rotorRegister: this.aircraftRotors,
+        });
+      };
+
+      const heroAir = buildFlightCraft(gameMeta.lightPalette[0]);
+      heroAir.scale.setScalar(gameMeta.layoutMode === 'ac130_gunship' ? 1.15 : 1.38);
       heroAir.position.set(0, 11.0, 14.0);
       scene.add(heroAir);
       this.playerAircraftGroup = heroAir;
       this.playerCarX = 0;
       this.playerFlightY = 11.0;
       this.playerFlightPitch = 0;
-      this.raceSpeedKmh = fStyle === 'sr71_plane' ? 2850 : fStyle === 'f22_jet' ? 1680 : 325;
+      this.raceSpeedKmh =
+        gameMeta.layoutMode === 'sr71_plane'
+          ? 2850
+          : gameMeta.layoutMode === 'f22_jet'
+            ? 1680
+            : gameMeta.layoutMode === 'f18_naval'
+              ? 1520
+              : gameMeta.layoutMode === 'ac130_gunship'
+                ? 620
+                : gameMeta.layoutMode === 'volcano_heli'
+                  ? 315
+                  : 325;
       this.raceNitroPct = 100;
 
       // 2 Wingman aircraft flying in tactical echelon ahead
-      for (const [wx, wy, wz] of [[-13, 14, -14], [14, 15.5, -24]] as [number, number, number][]) {
-        const wing = createDetailedAircraftModel({
-          style: fStyle,
-          accentHex: gameMeta.lightPalette[1],
-          plasmaMat: this.plasmaMat,
-          rotorRegister: this.aircraftRotors,
-        });
+      for (const [wx, wy, wz] of [[-15, 14.5, -18], [16, 16, -28]] as [number, number, number][]) {
+        const wing = buildFlightCraft(gameMeta.lightPalette[1]);
+        wing.scale.setScalar(gameMeta.layoutMode === 'ac130_gunship' ? 0.85 : 1.0);
         wing.position.set(wx, wy, wz);
         wing.userData.wingX = wx;
         wing.userData.wingY = wy;
@@ -2608,45 +3614,191 @@ export class GameBenchService {
         coreGroup.add(wing);
       }
 
-      // Sculpted volumetric 3D cloud clusters (outside central flight lane)
-      const cloudCount = 46;
-      const cloudGeo = new THREE.IcosahedronGeometry(2.6, 2);
-      const cloudMat = new THREE.MeshStandardMaterial({
-        color: gameMeta.layoutMode === 'f22_jet' ? 0xfed7aa : 0xdbeafe,
-        roughness: 0.95,
-        metalness: 0.02,
+      // Naval Carrier Strike Group cruising on the ocean below for F/A-18 & SR-71 maritime missions
+      if (gameMeta.layoutMode === 'f18_naval' || gameMeta.layoutMode === 'sr71_plane') {
+        const carrier = createAircraftCarrierModel(this.anisotropy);
+        carrier.scale.setScalar(1.65);
+        carrier.position.set(-28, -13.1, -68);
+        carrier.userData.isNavalShip = true;
+        carrier.userData.shipBaseY = -13.1;
+        coreGroup.add(carrier);
+
+        const destroyerR = createNavalDestroyerModel();
+        destroyerR.scale.setScalar(1.42);
+        destroyerR.position.set(34, -13.1, -96);
+        destroyerR.userData.isNavalShip = true;
+        destroyerR.userData.shipBaseY = -13.1;
+        coreGroup.add(destroyerR);
+
+        const destroyerL = createNavalDestroyerModel();
+        destroyerL.scale.setScalar(1.38);
+        destroyerL.position.set(-54, -13.1, -136);
+        destroyerL.userData.isNavalShip = true;
+        destroyerL.userData.shipBaseY = -13.1;
+        coreGroup.add(destroyerL);
+      }
+
+      // Soft feathered volumetric cloud cards placed HIGH or FAR OUTSIDE flight lane (never blocking the aircraft!)
+      const cloudCount = 32;
+      const cloudTex = createSoftCloudTexture();
+      const cloudGeo = new THREE.PlaneGeometry(18, 9);
+      const cloudMat = new THREE.MeshBasicMaterial({
+        map: cloudTex,
+        color:
+          gameMeta.layoutMode === 'volcano_heli'
+            ? 0xff7a2f
+            : gameMeta.layoutMode === 'f18_naval' || gameMeta.layoutMode === 'f22_jet'
+              ? 0xfcd5b0
+              : gameMeta.layoutMode === 'apache_heli' || gameMeta.layoutMode === 'ac130_gunship'
+                ? 0x2a4540
+                : 0x93c5fd,
         transparent: true,
-        opacity: 0.56,
+        opacity: gameMeta.layoutMode === 'apache_heli' || gameMeta.layoutMode === 'ac130_gunship' ? 0.14 : 0.22,
         depthWrite: false,
+        side: THREE.DoubleSide,
       });
       const clouds = new THREE.InstancedMesh(cloudGeo, cloudMat, cloudCount);
+      clouds.frustumCulled = false;
       this.flightCloudMeta = new Float32Array(cloudCount * 5);
       for (let c = 0; c < cloudCount; c++) {
         const side = c % 2 === 0 ? 1 : -1;
-        const cx = side * (16 + (c % 5) * 14 + Math.random() * 12);
-        const cy = (c % 3 === 0 ? -5 : 18) + (c % 7) * 2.4;
-        const cz = -((c * 6.5) % 260) + 40;
-        const scX = 2.4 + (c % 4) * 1.1;
-        const scY = 0.75 + (c % 3) * 0.35;
+        const highOverhead = c % 3 === 0;
+        const cx = highOverhead ? (Math.random() - 0.5) * 110 : side * (44 + (c % 5) * 14);
+        const cy = highOverhead ? 35 + (c % 4) * 5.5 : 22 + (c % 5) * 4.5;
+        const cz = -((c * 8.5) % 270) + 35;
+        const scX = 1.6 + (c % 4) * 0.65;
+        const scY = 1.0 + (c % 3) * 0.35;
         this.flightCloudMeta[c * 5] = cx;
         this.flightCloudMeta[c * 5 + 1] = cy;
         this.flightCloudMeta[c * 5 + 2] = cz;
         this.flightCloudMeta[c * 5 + 3] = scX;
         this.flightCloudMeta[c * 5 + 4] = scY;
         _dummy.position.set(cx, cy, cz);
-        _dummy.rotation.set(0, c * 0.4, 0);
-        _dummy.scale.set(scX, scY, scX * 1.4);
+        _dummy.rotation.set(0, 0, 0);
+        _dummy.scale.set(scX, scY, 1);
         _dummy.updateMatrix();
         clouds.setMatrixAt(c, _dummy.matrix);
       }
       clouds.instanceMatrix.needsUpdate = true;
-      clouds.computeBoundingSphere();
       coreGroup.add(clouds);
       this.flightCloudsMesh = clouds;
+
+      this.muzzleLight = new THREE.PointLight(0xffb74d, 0, 34, 1.4);
+      scene.add(this.muzzleLight);
+      this.resetCampaignState(gameMeta.layoutMode);
+      this.spawnMissionWave(scene, gameMeta.layoutMode, 1);
+      this.spawnBoostGates(scene, gameMeta.layoutMode);
 
       if (this.camera) {
         this.camera.position.set(0, 14.5, 29.0);
         this.camera.lookAt(0, 11.0, -24.0);
+      }
+    } else if (
+      gameMeta.layoutMode === 'tank_blitz' ||
+      gameMeta.layoutMode === 'mech_titan' ||
+      gameMeta.layoutMode === 'submarine_hunt' ||
+      gameMeta.layoutMode === 'starfighter_trench' ||
+      gameMeta.layoutMode === 'battleship_yamato'
+    ) {
+      // PLAYABLE 3D ACTION CAMPAIGNS: M1A2 Tank, Titanium Mech, Abyssal Submarine, X-Foil Starfighter, Yamato Battleship!
+      coreGroup.position.set(0, 0, 0);
+      this.aircraftRotors = [];
+      let heroCombat: THREE.Group;
+      let startY = 0;
+      if (gameMeta.layoutMode === 'tank_blitz') {
+        heroCombat = createDetailedTankModel(gameMeta.lightPalette[0], this.aircraftRotors);
+        heroCombat.scale.setScalar(1.22);
+        startY = 0.04;
+        this.raceSpeedKmh = 92;
+      } else if (gameMeta.layoutMode === 'mech_titan') {
+        heroCombat = createDetailedMechModel(gameMeta.lightPalette[0]);
+        heroCombat.scale.setScalar(1.18);
+        startY = 0.04;
+        this.raceSpeedKmh = 78;
+      } else if (gameMeta.layoutMode === 'submarine_hunt') {
+        heroCombat = createDetailedSubmarineModel(gameMeta.lightPalette[0], this.aircraftRotors);
+        heroCombat.scale.setScalar(1.36);
+        startY = 8.0;
+        this.raceSpeedKmh = 68;
+        // Volumetric Underwater Sunlight God-Rays descending from ocean surface
+        const rayGeo = new THREE.ConeGeometry(4.2, 46, 12, 1, true);
+        const rayMat = new THREE.MeshBasicMaterial({
+          color: 0x38e8d4,
+          transparent: true,
+          opacity: 0.065,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        });
+        for (let r = 0; r < 10; r++) {
+          const ray = new THREE.Mesh(rayGeo, rayMat);
+          const side = r % 2 === 0 ? -1 : 1;
+          ray.position.set(side * (16 + (r % 4) * 14), 16, -24 - r * 22);
+          ray.rotation.z = side * -0.18;
+          ray.rotation.x = 0.12;
+          coreGroup.add(ray);
+        }
+      } else if (gameMeta.layoutMode === 'battleship_yamato') {
+        heroCombat = createDetailedBattleshipModel(gameMeta.lightPalette[0], this.aircraftRotors);
+        heroCombat.scale.setScalar(1.15);
+        startY = 0.05;
+        this.raceSpeedKmh = 54;
+        // Allied escort destroyers flanking the Yamato dreadnought
+        for (const [dx, dz] of [[-32, -36], [34, -54], [-48, -98]] as [number, number][]) {
+          const esc = createNavalDestroyerModel();
+          esc.scale.setScalar(1.25);
+          esc.position.set(dx, -0.15, dz);
+          esc.userData.isNavalShip = true;
+          esc.userData.shipBaseY = -0.15;
+          coreGroup.add(esc);
+        }
+      } else {
+        heroCombat = createDetailedStarfighterModel(gameMeta.lightPalette[0]);
+        heroCombat.scale.setScalar(1.26);
+        startY = 9.5;
+        this.raceSpeedKmh = 1480;
+        // Armored Death-Star style metallic trench walls flanking the starfighter lane
+        const trenchWallMat = new THREE.MeshStandardMaterial({
+          color: 0x1b2434,
+          roughness: 0.42,
+          metalness: 0.82,
+        });
+        const ventGlowMat = new THREE.MeshBasicMaterial({ color: 0xef4444 });
+        for (const sx of [-23, 23]) {
+          const wall = new THREE.Mesh(new THREE.BoxGeometry(5.5, 28, 340), trenchWallMat);
+          wall.position.set(sx, 5, -110);
+          wall.receiveShadow = true;
+          const trim = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.35, 340), ventGlowMat);
+          trim.position.set(sx + (sx > 0 ? -2.9 : 2.9), 4.5, -110);
+          coreGroup.add(wall, trim);
+        }
+      }
+      heroCombat.position.set(0, startY, 15.0);
+      scene.add(heroCombat);
+      this.playerCombatGroup = heroCombat;
+      this.playerCarX = 0;
+      this.playerCarSteer = 0;
+      this.playerFlightY = startY;
+      this.playerFlightPitch = 0;
+      this.raceNitroPct = 100;
+
+      this.muzzleLight = new THREE.PointLight(gameMeta.lightPalette[0], 0, 38, 1.4);
+      scene.add(this.muzzleLight);
+      this.resetCampaignState(gameMeta.layoutMode);
+      this.spawnMissionWave(scene, gameMeta.layoutMode, 1);
+      this.spawnBoostGates(scene, gameMeta.layoutMode);
+
+      if (this.camera) {
+        const camY =
+          gameMeta.layoutMode === 'tank_blitz'
+            ? 5.2
+            : gameMeta.layoutMode === 'mech_titan'
+              ? 7.6
+              : gameMeta.layoutMode === 'battleship_yamato'
+                ? 8.4
+                : startY + 3.2;
+        this.camera.position.set(0, camY, gameMeta.layoutMode === 'battleship_yamato' ? 32.5 : 28.5);
+        this.camera.lookAt(0, startY + 1.5, -24.0);
       }
     } else {
       // GAME 8 (HELIOS SUPERNOVA SHOCKWAVE): Exploding Hypergiant Star with 24 Radial Crystalline Shockwave Spikes & Expanding Blast Shells
@@ -2704,14 +3856,14 @@ export class GameBenchService {
       }
     }
 
-    // 1. World Structures — Distinct geometry and PBR textured architecture per Game!
+    // 1. World Structures — Distinct sculpted geometry and PBR textured architecture per Game!
     let towerGeo: THREE.BufferGeometry;
     if (gameMeta.layoutMode === 'volcanic') {
       // Sharp jagged volcanic basalt spires
-      towerGeo = new THREE.ConeGeometry(1.1, 1, 5);
+      towerGeo = createJaggedRockGeometry(1.15, 2, 0.36, false);
     } else if (gameMeta.layoutMode === 'asteroid') {
-      // Space boulders
-      towerGeo = new THREE.DodecahedronGeometry(1.2, 1);
+      // Angular jagged space boulders
+      towerGeo = createJaggedRockGeometry(1.25, 1, 0.34, false);
     } else if (gameMeta.layoutMode === 'abyss') {
       // Twisted hydrothermal vents & abyssal crystal formations
       towerGeo = new THREE.OctahedronGeometry(0.9, 1);
@@ -2735,8 +3887,8 @@ export class GameBenchService {
       // Suspended temporal cogs & gears
       towerGeo = new THREE.CylinderGeometry(1.2, 1.2, 0.3, 12);
     } else if (gameMeta.layoutMode === 'glacial') {
-      // Sharp hexagonal ice crystals
-      towerGeo = new THREE.CylinderGeometry(0.15, 1.1, 1.4, 6);
+      // Sharp crystalline icebergs
+      towerGeo = createJaggedRockGeometry(1.08, 1, 0.32, false);
     } else if (gameMeta.layoutMode === 'biohive') {
       // Bulbous alien spore pods
       towerGeo = new THREE.SphereGeometry(0.95, 10, 8);
@@ -2755,46 +3907,124 @@ export class GameBenchService {
     } else if (gameMeta.layoutMode === 'soccer_stadium') {
       // Terraced stadium seating blocks cleanly outside the 54x82m pitch perimeter
       towerGeo = new THREE.BoxGeometry(1.4, 1.0, 1.8);
-    } else if (gameMeta.layoutMode === 'dakar_rally' || gameMeta.layoutMode === 'f22_jet') {
-      // Canyon mesas & craggy terraced peaks
-      towerGeo = new THREE.CylinderGeometry(0.82, 1.55, 1.2, 7);
+    } else if (
+      gameMeta.layoutMode === 'dakar_rally' ||
+      gameMeta.layoutMode === 'f22_jet' ||
+      gameMeta.layoutMode === 'tank_blitz' ||
+      gameMeta.layoutMode === 'ac130_gunship'
+    ) {
+      // Sculpted desert sandstone mesas & stratified flat-top canyon cliffs (NO smooth spheres!)
+      towerGeo = createJaggedRockGeometry(1.45, 2, 0.3, true);
     } else if (gameMeta.layoutMode === 'snow_rally') {
-      // Alpine winter pine trees / snowy peaks
-      towerGeo = new THREE.ConeGeometry(1.2, 1.6, 7);
-    } else if (gameMeta.layoutMode === 'sr71_plane' || gameMeta.layoutMode === 'apache_heli') {
-      // Sculpted mountain ridge spires & coastal monoliths (no flat rectangular boxes!)
-      towerGeo = new THREE.CylinderGeometry(0.55, 1.45, 1.35, 6);
+      // Wide-base rugged alpine granite & snow mountain peaks
+      towerGeo = createJaggedRockGeometry(1.42, 2, 0.36, false);
+    } else if (gameMeta.layoutMode === 'submarine_hunt') {
+      // Sculpted organic underwater coral reef seamounts & volcanic rock outcrops
+      towerGeo = createJaggedRockGeometry(1.48, 2, 0.32, false);
+    } else if (
+      gameMeta.layoutMode === 'f18_naval' ||
+      gameMeta.layoutMode === 'sr71_plane' ||
+      gameMeta.layoutMode === 'battleship_yamato' ||
+      gameMeta.layoutMode === 'volcano_heli'
+    ) {
+      // Sculpted volcanic rocky ocean islands / jagged basalt caldera crags
+      towerGeo = createJaggedRockGeometry(1.52, 2, 0.38, false);
     } else {
-      // Illuminated glass-curtain skyscrapers / grandstands
+      // Realistic architectural glass-curtain skyscrapers (clean dark steel & warm windows)
       towerGeo = new THREE.BoxGeometry(1, 1, 1);
     }
 
-    const archPbr = createArchitecturePbrTextures(
-      gameMeta.layoutMode,
-      gameMeta.lightPalette[0],
-      this.anisotropy
-    );
+    const isNavalIslands =
+      gameMeta.layoutMode === 'f18_naval' ||
+      gameMeta.layoutMode === 'sr71_plane' ||
+      gameMeta.layoutMode === 'battleship_yamato';
+    const isCoralReef = gameMeta.layoutMode === 'submarine_hunt';
+    const isDesertMesa =
+      gameMeta.layoutMode === 'dakar_rally' ||
+      gameMeta.layoutMode === 'f22_jet' ||
+      gameMeta.layoutMode === 'tank_blitz' ||
+      gameMeta.layoutMode === 'ac130_gunship';
+    const isAlpineSnow = gameMeta.layoutMode === 'snow_rally';
+    const isVolcanoCrags = gameMeta.layoutMode === 'volcano_heli';
+
+    const islandTex = isNavalIslands ? createVolcanicIslandTexture(this.anisotropy) : null;
+    const basaltPbr = isVolcanoCrags ? createVolcanicBasaltTexture(this.anisotropy) : null;
+    const coralPbr = isCoralReef ? createUnderwaterCoralReefTexture(this.anisotropy) : null;
+    const desertTex = isDesertMesa ? createDesertMesaTexture(this.anisotropy) : null;
+    const alpineTex = isAlpineSnow ? createAlpineSnowPeakTexture(this.anisotropy) : null;
+    const archPbr =
+      islandTex || basaltPbr || coralPbr || desertTex || alpineTex
+        ? null
+        : createArchitecturePbrTextures(
+            gameMeta.layoutMode,
+            gameMeta.lightPalette[0],
+            this.anisotropy
+          );
+    const isNaturalOrCombat =
+      isDesertMesa ||
+      isAlpineSnow ||
+      isNavalIslands ||
+      isCoralReef ||
+      isVolcanoCrags;
+    const isCityFlightOrMech =
+      gameMeta.layoutMode === 'apache_heli' ||
+      gameMeta.layoutMode === 'mech_titan' ||
+      gameMeta.layoutMode === 'motogp_superbike' ||
+      gameMeta.layoutMode === 'cyber_hoverbike' ||
+      gameMeta.layoutMode === 'starfighter_trench';
+
     const towerMat = new THREE.MeshStandardMaterial({
       color:
-        gameMeta.layoutMode === 'dakar_rally'
-          ? 0xd6a488
-          : gameMeta.layoutMode === 'snow_rally'
-            ? 0xeef6ff
+        isNavalIslands || isDesertMesa || isAlpineSnow || isCoralReef || isVolcanoCrags
+          ? 0xffffff
+          : 0xdbe4ef,
+      map: basaltPbr
+        ? basaltPbr.map
+        : coralPbr
+          ? coralPbr.map
+          : desertTex
+            ? desertTex
+            : alpineTex
+              ? alpineTex
+              : islandTex
+                ? islandTex
+                : archPbr!.map,
+      bumpMap: basaltPbr
+        ? basaltPbr.map
+        : coralPbr
+          ? coralPbr.map
+          : desertTex
+            ? desertTex
+            : alpineTex
+              ? alpineTex
+              : islandTex
+                ? islandTex
+                : archPbr!.bumpMap,
+      bumpScale: isNavalIslands || isCoralReef || isDesertMesa || isVolcanoCrags ? 0.22 : 0.05,
+      roughnessMap: archPbr ? archPbr.roughnessMap : undefined,
+      emissiveMap: basaltPbr ? basaltPbr.emissiveMap : coralPbr ? coralPbr.emissiveMap : archPbr ? archPbr.emissiveMap : undefined,
+      metalness: isNaturalOrCombat ? 0.05 : 0.72,
+      roughness: isNaturalOrCombat ? 0.94 : 0.36,
+      flatShading: isNaturalOrCombat || gameMeta.layoutMode === 'asteroid' || gameMeta.layoutMode === 'glacial' || gameMeta.layoutMode === 'volcanic',
+      emissive: isVolcanoCrags
+        ? 0xff5a1f
+        : isCoralReef
+          ? 0x2dd4bf
+          : isNavalIslands || isDesertMesa || isAlpineSnow
+            ? 0x000000
             : 0xffffff,
-      map: archPbr.map,
-      bumpMap: archPbr.bumpMap,
-      bumpScale: 0.045,
-      roughnessMap: archPbr.roughnessMap,
-      emissiveMap: archPbr.emissiveMap,
-      metalness: gameMeta.layoutMode === 'dakar_rally' || gameMeta.layoutMode === 'snow_rally' ? 0.14 : 0.76,
-      roughness: gameMeta.layoutMode === 'dakar_rally' || gameMeta.layoutMode === 'snow_rally' ? 0.82 : 0.34,
-      emissive: 0xffffff,
       emissiveIntensity:
-        gameMeta.layoutMode === 'supernova' || gameMeta.layoutMode === 'dyson'
-          ? 0.9
-          : gameMeta.layoutMode === 'dakar_rally' || gameMeta.layoutMode === 'snow_rally'
-            ? 0.15
-            : 0.72,
+        isCoralReef
+          ? 0.58
+          : isVolcanoCrags
+            ? 0.45
+            : isNavalIslands || isDesertMesa || isAlpineSnow
+              ? 0.0
+              : gameMeta.layoutMode === 'supernova' || gameMeta.layoutMode === 'dyson'
+                ? 0.68
+                : isCityFlightOrMech
+                  ? 0.34
+                  : 0.38,
     });
     const densityFactor = Math.max(0.25, Math.min(1, this.sceneryDensityPct / 100));
     const effectiveTowers = Math.max(24, Math.round(cfg.towers * densityFactor));
@@ -2802,8 +4032,12 @@ export class GameBenchService {
     towers.castShadow = this.shadowsEnabled;
     towers.receiveShadow = true;
 
-    const stripGeo = new THREE.BoxGeometry(1.06, 0.18, 1.06);
-    const stripMat = new THREE.MeshBasicMaterial({ color: gameMeta.lightPalette[0] });
+    const suppressNeonRoofs =
+      isNaturalOrCombat || isCityFlightOrMech || this.isFlightScene(gameMeta.layoutMode) || this.isRacingScene(gameMeta.layoutMode);
+    const stripGeo = suppressNeonRoofs ? new THREE.SphereGeometry(0.18, 6, 6) : new THREE.BoxGeometry(1.02, 0.14, 1.02);
+    const stripMat = new THREE.MeshBasicMaterial({
+      color: suppressNeonRoofs ? 0xef4444 : gameMeta.lightPalette[0],
+    });
     const strips = new THREE.InstancedMesh(stripGeo, stripMat, effectiveTowers);
 
     for (let i = 0; i < effectiveTowers; i++) {
@@ -2825,25 +4059,74 @@ export class GameBenchService {
         gameMeta.layoutMode === 'dakar_rally' ||
         gameMeta.layoutMode === 'bugatti_hypercar' ||
         gameMeta.layoutMode === 'snow_rally' ||
+        gameMeta.layoutMode === 'motogp_superbike' ||
+        gameMeta.layoutMode === 'cyber_hoverbike' ||
         gameMeta.layoutMode === 'f22_jet' ||
         gameMeta.layoutMode === 'sr71_plane' ||
-        gameMeta.layoutMode === 'apache_heli'
+        gameMeta.layoutMode === 'apache_heli' ||
+        gameMeta.layoutMode === 'f18_naval' ||
+        gameMeta.layoutMode === 'ac130_gunship' ||
+        gameMeta.layoutMode === 'volcano_heli' ||
+        gameMeta.layoutMode === 'tank_blitz' ||
+        gameMeta.layoutMode === 'mech_titan' ||
+        gameMeta.layoutMode === 'submarine_hunt' ||
+        gameMeta.layoutMode === 'starfighter_trench' ||
+        gameMeta.layoutMode === 'battleship_yamato'
       ) {
-        // Keep scenery STRICTLY outside road / flight corridor (|x| >= 25) so ZERO clutter blocks track view!
+        // Keep scenery STRICTLY outside road / combat / flight corridor so ZERO clutter blocks gameplay sightline!
         const side = i % 2 === 0 ? 1 : -1;
         const row = Math.floor(i / 2);
-        const laneOffset = 25 + (row % 5) * 9 + Math.random() * 3.0;
+        const minClear =
+          isNavalIslands
+            ? 88
+            : isCoralReef
+              ? 34
+              : isVolcanoCrags
+                ? 44
+                : gameMeta.layoutMode === 'starfighter_trench'
+                  ? 30
+                  : 28;
+        const laneOffset = minClear + (row % 5) * (isNavalIslands ? 18 : isCoralReef || isDesertMesa ? 13 : 10) + Math.random() * 5.0;
         px = side * laneOffset;
-        pz = ((row * 4.2) % 240) - 180;
-        sy = gameMeta.layoutMode === 'dakar_rally' || gameMeta.layoutMode === 'snow_rally'
-          ? 7 + (row % 6) * 4.2
-          : gameMeta.layoutMode === 'f22_jet' || gameMeta.layoutMode === 'apache_heli'
-            ? 16 + (row % 7) * 7
-            : 11 + (row % 6) * 4.5 + Math.random() * 8;
-        sx = gameMeta.layoutMode === 'dakar_rally' || gameMeta.layoutMode === 'f22_jet' ? 4.2 : 2.2;
-        sz = sx;
-        py = gameMeta.layoutMode === 'f22_jet' || gameMeta.layoutMode === 'sr71_plane' ? sy / 2 - 12 : sy / 2;
-        ry = 0;
+        pz = ((row * (isNavalIslands ? 9.5 : isCoralReef ? 7.2 : 4.8)) % 310) - 230;
+        sy =
+          isNavalIslands
+            ? 4.2 + (row % 4) * 2.6
+            : isCoralReef
+              ? 3.2 + (row % 4) * 1.4 + Math.random() * 1.6
+              : isVolcanoCrags
+                ? 7.5 + (row % 5) * 3.8
+                : isDesertMesa
+                  ? 5.8 + (row % 5) * 2.8
+                  : isAlpineSnow
+                    ? 8.5 + (row % 5) * 4.2
+                    : gameMeta.layoutMode === 'apache_heli' || gameMeta.layoutMode === 'mech_titan' || gameMeta.layoutMode === 'cyber_hoverbike'
+                      ? 16 + (row % 7) * 6.8
+                      : 11 + (row % 6) * 4.5 + Math.random() * 7;
+        sx =
+          isNavalIslands
+            ? 9.2 + (row % 3) * 3.4
+            : isCoralReef
+              ? 6.8 + (row % 4) * 2.1
+              : isDesertMesa || isVolcanoCrags
+                ? 7.4 + (row % 4) * 2.4
+                : isAlpineSnow
+                  ? 6.4 + (row % 4) * 1.9
+                  : 3.2;
+        sz = isNavalIslands || isCoralReef || isDesertMesa || isVolcanoCrags ? sx * (0.78 + (row % 3) * 0.14) : sx;
+        py =
+          isNavalIslands
+            ? sy * 0.28 - (gameMeta.layoutMode === 'battleship_yamato' ? 1.4 : 14.5)
+            : isCoralReef
+              ? sy * 0.36 - 10.6
+              : isVolcanoCrags
+                ? sy * 0.42 - 11.8
+                : gameMeta.layoutMode === 'f22_jet' || gameMeta.layoutMode === 'ac130_gunship'
+                  ? sy * 0.42 - 13.5
+                  : gameMeta.layoutMode === 'apache_heli'
+                    ? sy / 2 - 11
+                    : sy * 0.46;
+        ry = isNaturalOrCombat ? (i * 1.37) % (Math.PI * 2) : 0;
       } else if (gameMeta.layoutMode === 'soccer_stadium') {
         // Stadium terraced spectator stands cleanly outside the 54x82m grass field
         const side = i % 2 === 0 ? 1 : -1;
@@ -3030,15 +4313,32 @@ export class GameBenchService {
       _dummy.scale.set(sx, sy, sz);
       _dummy.updateMatrix();
       towers.setMatrixAt(i, _dummy.matrix);
-      _color.setHex(gameMeta.lightPalette[i % 4]).multiplyScalar(0.32);
+      if (isNaturalOrCombat || isCityFlightOrMech) {
+        // Natural slate/sandstone shading variation — NO garish cyan/yellow checkerboard tinting!
+        const shade = 0.72 + ((i * 19) % 28) * 0.01;
+        _color.setRGB(shade, shade, shade);
+      } else {
+        _color.setHex(gameMeta.lightPalette[i % 4]).multiplyScalar(0.32);
+      }
       towers.setColorAt(i, _color);
 
-      _dummy.position.set(px, py + sy * 0.5 + 0.14, pz);
-      _dummy.scale.set(sx * 0.9, 1, sz * 0.9);
-      _dummy.updateMatrix();
-      strips.setMatrixAt(i, _dummy.matrix);
-      _color.setHex(gameMeta.lightPalette[i % 4]);
-      strips.setColorAt(i, _color);
+      if (suppressNeonRoofs) {
+        // Subtle small aviation warning beacon on tall structures only (zero giant neon roof slabs)
+        const showBeacon = !isNaturalOrCombat && i % 3 === 0;
+        _dummy.position.set(px, py + sy * 0.5 + 0.35, pz);
+        _dummy.scale.setScalar(showBeacon ? 1.0 : 0.0001);
+        _dummy.updateMatrix();
+        strips.setMatrixAt(i, _dummy.matrix);
+        _color.setHex(0xdc2626);
+        strips.setColorAt(i, _color);
+      } else {
+        _dummy.position.set(px, py + sy * 0.5 + 0.14, pz);
+        _dummy.scale.set(sx * 0.9, 1, sz * 0.9);
+        _dummy.updateMatrix();
+        strips.setMatrixAt(i, _dummy.matrix);
+        _color.setHex(gameMeta.lightPalette[i % 4]);
+        strips.setColorAt(i, _color);
+      }
     }
     towers.instanceMatrix.needsUpdate = true;
     if (towers.instanceColor) towers.instanceColor.needsUpdate = true;
@@ -3058,10 +4358,20 @@ export class GameBenchService {
       gameMeta.layoutMode === 'dakar_rally' ||
       gameMeta.layoutMode === 'bugatti_hypercar' ||
       gameMeta.layoutMode === 'snow_rally' ||
+      gameMeta.layoutMode === 'motogp_superbike' ||
+      gameMeta.layoutMode === 'cyber_hoverbike' ||
       gameMeta.layoutMode === 'soccer_stadium' ||
       gameMeta.layoutMode === 'f22_jet' ||
       gameMeta.layoutMode === 'sr71_plane' ||
-      gameMeta.layoutMode === 'apache_heli';
+      gameMeta.layoutMode === 'apache_heli' ||
+      gameMeta.layoutMode === 'f18_naval' ||
+      gameMeta.layoutMode === 'ac130_gunship' ||
+      gameMeta.layoutMode === 'volcano_heli' ||
+      gameMeta.layoutMode === 'tank_blitz' ||
+      gameMeta.layoutMode === 'mech_titan' ||
+      gameMeta.layoutMode === 'submarine_hunt' ||
+      gameMeta.layoutMode === 'starfighter_trench' ||
+      gameMeta.layoutMode === 'battleship_yamato';
 
     if (
       gameMeta.layoutMode === 'corridor' ||
@@ -3094,7 +4404,9 @@ export class GameBenchService {
       Math.round(cfg.drones * (isTrackOrField ? Math.min(0.22, densityFactor * 0.25) : densityFactor))
     );
     const drones = new THREE.InstancedMesh(droneGeo, droneMat, effectiveDrones);
-    drones.castShadow = this.shadowsEnabled && effectiveDrones <= 6000;
+    drones.castShadow = !isTrackOrField && this.shadowsEnabled && effectiveDrones <= 6000;
+    // Hide abstract cone swarms on real-world racing, soccer, flight & combat arenas (real rivals/wingmen/enemies populate those scenes cleanly)
+    drones.visible = !isTrackOrField;
     this.droneMeta = new Float32Array(effectiveDrones * 4);
     for (let i = 0; i < effectiveDrones; i++) {
       const rad = 10 + Math.random() * 58;
@@ -3114,16 +4426,16 @@ export class GameBenchService {
     this.updateDrones(0);
     scene.add(drones);
 
-    // 3. Atmospheric Particles / Starfield / Sparks / Ash / Bioluminescence
+    // 3. Atmospheric Particles / Starfield / Sparks / Ash / Bioluminescence (circular bokeh sprites — NEVER square pixels)
     const effectiveParticles = Math.max(600, Math.round(cfg.particles * densityFactor));
     const pPos = new Float32Array(effectiveParticles * 3);
     const pCol = new Float32Array(effectiveParticles * 3);
     for (let i = 0; i < effectiveParticles; i++) {
-      const r = isTrackOrField ? 26 + Math.random() * 68 : 6 + Math.random() * 75;
+      const r = isTrackOrField ? 24 + Math.random() * 96 : 6 + Math.random() * 82;
       const a = Math.random() * Math.PI * 2;
-      pPos[i * 3] = Math.cos(a) * r;
-      pPos[i * 3 + 1] = isTrackOrField ? 10 + Math.random() * 34 : 1.0 + Math.random() * 38;
-      pPos[i * 3 + 2] = Math.sin(a) * r;
+      pPos[i * 3] = Math.cos(a) * r + (Math.random() - 0.5) * 14;
+      pPos[i * 3 + 1] = isTrackOrField ? 6 + Math.random() * 48 : 1.0 + Math.random() * 44;
+      pPos[i * 3 + 2] = Math.sin(a) * r + (Math.random() - 0.5) * 14;
 
       _color.setHex(gameMeta.lightPalette[i % 4]);
       pCol[i * 3] = _color.r;
@@ -3133,11 +4445,15 @@ export class GameBenchService {
     const pGeo = new THREE.BufferGeometry();
     pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
     pGeo.setAttribute('color', new THREE.BufferAttribute(pCol, 3));
+    this.particleTex?.dispose();
+    this.particleTex = createSoftParticleTexture();
     const pMat = new THREE.PointsMaterial({
-      size: gameMeta.layoutMode === 'snow_rally' ? 0.24 : 0.14,
+      size: gameMeta.layoutMode === 'snow_rally' ? 0.36 : 0.24,
+      map: this.particleTex,
+      alphaTest: 0.01,
       vertexColors: true,
       transparent: true,
-      opacity: gameMeta.layoutMode === 'snow_rally' ? 0.72 : 0.44,
+      opacity: gameMeta.layoutMode === 'snow_rally' ? 0.72 : 0.42,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
     });
@@ -3156,19 +4472,43 @@ export class GameBenchService {
   private setupComposer(w: number, h: number): void {
     if (!this.renderer || !this.scene || !this.camera) return;
     this.composer?.dispose();
-    const composer = new EffectComposer(this.renderer);
-    composer.addPass(new RenderPass(this.scene, this.camera));
-    const bloom = new UnrealBloomPass(
-      new THREE.Vector2(w, h),
-      GAME_PRESETS[this.preset].bloomStrength,
-      0.35,
-      0.86
-    );
-    bloom.enabled = this.bloomEnabled;
-    composer.addPass(bloom);
-    composer.addPass(new OutputPass());
-    this.composer = composer;
-    this.bloomPass = bloom;
+    this.composer = null;
+    this.composerRT?.dispose();
+    this.composerRT = null;
+    this.bloomPass = null;
+    const effPixelRatio = Math.max(0.65, Math.min(2.5, (window.devicePixelRatio || 1) * GAME_PRESETS[this.preset].renderScale));
+    const maxSamples = typeof this.renderer.capabilities?.maxSamples === 'number' ? this.renderer.capabilities.maxSamples : 0;
+    const safeSamples = this.isSoftwareRenderer ? 0 : maxSamples >= 2 ? Math.min(4, maxSamples) : 0;
+    try {
+      const composerRT = new THREE.WebGLRenderTarget(
+        Math.max(1, Math.round(w * effPixelRatio)),
+        Math.max(1, Math.round(h * effPixelRatio)),
+        {
+          type: THREE.HalfFloatType,
+          samples: safeSamples,
+        }
+      );
+      this.composerRT = composerRT;
+      const composer = new EffectComposer(this.renderer, composerRT);
+      composer.addPass(new RenderPass(this.scene, this.camera));
+      const bloom = new UnrealBloomPass(
+        new THREE.Vector2(w, h),
+        GAME_PRESETS[this.preset].bloomStrength * 0.65,
+        0.38,
+        0.96
+      );
+      bloom.enabled = this.bloomEnabled;
+      composer.addPass(bloom);
+      composer.addPass(new OutputPass());
+      this.composer = composer;
+      this.bloomPass = bloom;
+    } catch {
+      this.composer?.dispose();
+      this.composer = null;
+      this.composerRT?.dispose();
+      this.composerRT = null;
+      this.bloomPass = null;
+    }
   }
 
   private applyRendererToneMapping(renderer: THREE.WebGLRenderer): void {
@@ -3191,7 +4531,7 @@ export class GameBenchService {
     this.composer?.setPixelRatio(effPixelRatio);
     this.composer?.setSize(w, h);
     if (this.bloomPass) {
-      this.bloomPass.strength = cfg.bloomStrength;
+      this.bloomPass.strength = cfg.bloomStrength * 0.65;
       this.bloomPass.enabled = this.bloomEnabled;
     }
     const drawW = Math.round(w * effPixelRatio);
@@ -3203,12 +4543,32 @@ export class GameBenchService {
 
   private bindInteractiveEvents(canvas: HTMLCanvasElement): void {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space', 'ShiftLeft', 'ShiftRight'].includes(e.code)) {
+      const targetTag = (e.target as HTMLElement | null)?.tagName;
+      if (targetTag === 'INPUT' || targetTag === 'TEXTAREA' || targetTag === 'SELECT') return;
+      if (e.code === 'KeyR' && this.running) {
+        this.restartGameMission();
+        return;
+      }
+      if (
+        [
+          'KeyW',
+          'KeyA',
+          'KeyS',
+          'KeyD',
+          'ArrowLeft',
+          'ArrowRight',
+          'ArrowUp',
+          'ArrowDown',
+          'Space',
+          'ShiftLeft',
+          'ShiftRight',
+        ].includes(e.code)
+      ) {
         this.keysDown.add(e.code);
-        if (e.code === 'Space' && (this.interactiveMode || this.isSoccerScene())) {
+        if (e.code === 'Space' && this.running) {
           e.preventDefault();
           if (this.isSoccerScene()) this.kickSoccerBall();
-          else if (this.interactiveMode) this.fireLaser();
+          else this.firePlayerWeapon();
         }
       }
     };
@@ -3220,12 +4580,14 @@ export class GameBenchService {
         this.kickSoccerBall();
         return;
       }
-      if (!this.interactiveMode) return;
       if (e.button === 0) {
-        this.isDraggingLook = true;
-        this.lastMouseX = e.clientX;
-        this.lastMouseY = e.clientY;
-        this.fireLaser();
+        this.isMouseFireDown = true;
+        if (this.interactiveMode) {
+          this.isDraggingLook = true;
+          this.lastMouseX = e.clientX;
+          this.lastMouseY = e.clientY;
+        }
+        this.firePlayerWeapon();
       }
     };
     const onMouseMove = (e: MouseEvent) => {
@@ -3239,6 +4601,7 @@ export class GameBenchService {
     };
     const onMouseUp = () => {
       this.isDraggingLook = false;
+      this.isMouseFireDown = false;
     };
 
     window.addEventListener('keydown', onKeyDown);
@@ -3256,6 +4619,473 @@ export class GameBenchService {
     };
   }
 
+  public setSfxEnabled(enabled: boolean): void {
+    gameAudioService.setEnabled(enabled);
+    this.metrics.sfxEnabled = enabled;
+    this.emitMetrics();
+  }
+
+  public restartGameMission(): void {
+    const mode = this.getGameCatalogItem().layoutMode;
+    this.resetCampaignState(mode);
+    this.raceDistanceM = 0;
+    this.raceLap = 1;
+    this.raceNitroPct = 100;
+    this.overtakeScoredIds.clear();
+    if (this.scene) {
+      this.clearCombatEntities();
+      if (this.isCombatScene(mode) || this.isFlightScene(mode)) {
+        this.spawnMissionWave(this.scene, mode, 1);
+      }
+      if (this.isCombatScene(mode) || this.isFlightScene(mode) || this.isRacingScene(mode)) {
+        this.spawnBoostGates(this.scene, mode);
+      }
+    }
+    this.showBanner('MISJA ZRESTARTOWANA — ETAP 1/5!', 2200);
+    this.emitMetrics();
+  }
+
+  private resetCampaignState(mode: GameCatalogItem['layoutMode']): void {
+    this.gameScore = 0;
+    this.gameCombo = 1;
+    this.gameComboTimer = 0;
+    this.gameStage = 1;
+    this.gameHealthPct = 100;
+    this.gameTargetsDestroyed = 0;
+    this.gameStageKills = 0;
+    this.gameGatesPassed = 0;
+    this.targetLocked = false;
+    this.shotsFired = 0;
+    this.targetsHit = 0;
+    this.gameMissionText = this.getMissionObjectiveText(mode, 1);
+    this.gameBannerText = '';
+    this.gameBannerUntilTs = 0;
+  }
+
+  private getMissionObjectiveText(mode: GameCatalogItem['layoutMode'], stage: number): string {
+    if (this.isRacingScene(mode)) {
+      return `Wyścig ${this.raceLap}/${this.raceTotalLaps} okrążeń · Łap bramki Nitro i wyprzedzaj rywali!`;
+    }
+    if (mode === 'soccer_stadium') {
+      return 'Mecz 5v5 · WASD ruch, Spacja/Klik mocny strzał do bramki!';
+    }
+    const bossTag = stage === 3 || stage === 5 ? ' + BOSS!' : '';
+    if (mode === 'tank_blitz') return `ETAP ${stage}/${this.gameMaxStage}: Zniszcz cele pancerne${bossTag} (Spacja/Klik)`;
+    if (mode === 'mech_titan') return `ETAP ${stage}/${this.gameMaxStage}: Oczyść sektor metropolii${bossTag}`;
+    if (mode === 'submarine_hunt') return `ETAP ${stage}/${this.gameMaxStage}: Zneutralizuj miny i torpedy${bossTag}`;
+    if (mode === 'battleship_yamato') return `ETAP ${stage}/${this.gameMaxStage}: Salwa 460mm we flotę wroga${bossTag}`;
+    if (mode === 'ac130_gunship') return `ETAP ${stage}/${this.gameMaxStage}: Wsparcie ogniowe 105mm${bossTag}`;
+    if (mode === 'volcano_heli') return `ETAP ${stage}/${this.gameMaxStage}: Zniszcz siły nad kalderą${bossTag}`;
+    if (mode === 'starfighter_trench') return `ETAP ${stage}/${this.gameMaxStage}: Atak na kanion reaktora${bossTag}`;
+    if (this.isFlightScene(mode)) return `ETAP ${stage}/${this.gameMaxStage}: Przechwyć eskadry i cele${bossTag}`;
+    return 'Tryb 3D · Spacja/Klik ogień laserowy · WASD sterowanie';
+  }
+
+  private showBanner(text: string, durationMs = 2400): void {
+    this.gameBannerText = text;
+    this.gameBannerUntilTs = performance.now() + durationMs;
+  }
+
+  private disposeObjectTree(obj: THREE.Object3D): void {
+    obj.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (mesh.geometry) mesh.geometry.dispose();
+      if (Array.isArray(mesh.material)) {
+        mesh.material.forEach((m) => m.dispose());
+      } else if (mesh.material) {
+        mesh.material.dispose();
+      }
+    });
+  }
+
+  private clearCombatEntities(): void {
+    if (!this.scene) return;
+    for (const e of this.combatEnemies) {
+      this.scene.remove(e.group);
+    }
+    this.combatEnemies = [];
+    for (const g of this.boostGates) {
+      this.scene.remove(g.mesh);
+      this.disposeObjectTree(g.mesh);
+    }
+    this.boostGates = [];
+    for (const ex of this.explosions) {
+      this.scene.remove(ex.group);
+      this.disposeObjectTree(ex.group);
+    }
+    this.explosions = [];
+    for (const mf of this.muzzleFlashes) {
+      this.scene.remove(mf.group);
+      this.disposeObjectTree(mf.group);
+    }
+    this.muzzleFlashes = [];
+  }
+
+  private spawnBoostGates(scene: THREE.Scene, mode: GameCatalogItem['layoutMode']): void {
+    for (const g of this.boostGates) {
+      scene.remove(g.mesh);
+      this.disposeObjectTree(g.mesh);
+    }
+    this.boostGates = [];
+    const count = 4;
+    const isGround =
+      this.isRacingScene(mode) ||
+      mode === 'tank_blitz' ||
+      mode === 'mech_titan' ||
+      mode === 'battleship_yamato';
+    const ringRadius = isGround ? 3.5 : 4.3;
+    const gateColor = this.isRacingScene(mode) ? 0x22d3ee : 0x34d399;
+    const accentColor = this.isRacingScene(mode) ? 0xfacc15 : 0x38bdf8;
+    for (let i = 0; i < count; i++) {
+      const gateGrp = new THREE.Group();
+      const outerRing = new THREE.Mesh(
+        new THREE.TorusGeometry(ringRadius, 0.24, 14, 36),
+        new THREE.MeshStandardMaterial({
+          color: 0x0f172a,
+          metalness: 0.85,
+          roughness: 0.2,
+          emissive: gateColor,
+          emissiveIntensity: 0.88,
+        })
+      );
+      const innerRing = new THREE.Mesh(
+        new THREE.TorusGeometry(ringRadius * 0.84, 0.09, 8, 6),
+        new THREE.MeshBasicMaterial({
+          color: accentColor,
+          transparent: true,
+          opacity: 0.88,
+          blending: THREE.AdditiveBlending,
+        })
+      );
+      const holoHalo = new THREE.Mesh(
+        new THREE.RingGeometry(ringRadius * 0.72, ringRadius * 0.96, 32),
+        new THREE.MeshBasicMaterial({
+          color: gateColor,
+          transparent: true,
+          opacity: 0.16,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      );
+      // 4 tactical pylon brackets on cardinal points
+      const bracketGeo = new THREE.BoxGeometry(0.42, 0.72, 0.42);
+      const bracketMat = new THREE.MeshStandardMaterial({
+        color: 0xe2e8f0,
+        metalness: 0.75,
+        roughness: 0.25,
+        emissive: gateColor,
+        emissiveIntensity: 0.45,
+      });
+      for (let b = 0; b < 4; b++) {
+        const ang = (b * Math.PI) / 2;
+        const br = new THREE.Mesh(bracketGeo, bracketMat);
+        br.position.set(Math.cos(ang) * ringRadius, Math.sin(ang) * ringRadius, 0);
+        br.rotation.z = ang;
+        gateGrp.add(br);
+      }
+      gateGrp.add(outerRing, innerRing, holoHalo);
+      const gx = (i % 2 === 0 ? -1 : 1) * (4.5 + (i % 3) * 2.5);
+      const gy = isGround ? ringRadius + 0.15 : mode === 'submarine_hunt' ? 5.5 + (i % 3) * 3.2 : 8.0 + (i % 3) * 3.8;
+      const gz = -48 - i * 54;
+      gateGrp.position.set(gx, gy, gz);
+      scene.add(gateGrp);
+      this.boostGates.push({ mesh: gateGrp, innerRing, passed: false, radius: ringRadius + 1.8 });
+    }
+  }
+
+  private spawnMissionWave(scene: THREE.Scene, mode: GameCatalogItem['layoutMode'], stage: number): void {
+    for (const e of this.combatEnemies) scene.remove(e.group);
+    this.combatEnemies = [];
+
+    const gameMeta = this.getGameCatalogItem();
+    const count = 4 + stage;
+    const enemyKind: EnemyTarget['kind'] =
+      mode === 'tank_blitz'
+        ? 'tank'
+        : mode === 'submarine_hunt' || mode === 'battleship_yamato'
+          ? 'mine'
+          : mode === 'starfighter_trench' || mode === 'ac130_gunship'
+            ? 'turret'
+            : mode === 'mech_titan'
+              ? 'drone'
+              : 'fighter';
+
+    const isGround = mode === 'tank_blitz' || mode === 'mech_titan' || mode === 'battleship_yamato';
+    for (let i = 0; i < count; i++) {
+      const grp = createEnemyTargetModel(enemyKind, gameMeta.lightPalette[1]);
+      const bx = ((i % 2 === 0 ? -1 : 1) * (3.5 + ((i * 3.7) % 10)));
+      const by = isGround
+        ? enemyKind === 'drone'
+          ? 4.2 + (i % 3) * 1.4
+          : mode === 'battleship_yamato'
+            ? 1.4
+            : 0.85
+        : mode === 'submarine_hunt'
+          ? 4.5 + (i % 4) * 2.6
+          : 7.5 + (i % 4) * 3.0;
+      const bz = -36 - i * 24;
+      grp.position.set(bx, by, bz);
+      scene.add(grp);
+      const hp = 2 + Math.floor(stage / 2);
+      this.combatEnemies.push({
+        group: grp,
+        kind: enemyKind,
+        hp,
+        maxHp: hp,
+        radius: 2.8,
+        baseX: bx,
+        baseY: by,
+        speedZ: 14 + stage * 2.6,
+        phase: i * 1.4,
+        isBoss: false,
+        hitFlash: 0,
+      });
+    }
+
+    // Spawn Heavy Boss Dreadnought on Stages 3 & 5!
+    if (stage === 3 || stage === 5) {
+      const bossGrp = createEnemyTargetModel('boss', 0xff2255);
+      const bossY = isGround ? 5.6 : 11.5;
+      bossGrp.position.set(0, bossY, -78);
+      scene.add(bossGrp);
+      const bossHp = stage === 5 ? 16 : 10;
+      this.combatEnemies.push({
+        group: bossGrp,
+        kind: 'boss',
+        hp: bossHp,
+        maxHp: bossHp,
+        radius: 5.8,
+        baseX: 0,
+        baseY: bossY,
+        speedZ: 6,
+        phase: 0,
+        isBoss: true,
+        hitFlash: 0,
+      });
+      this.showBanner(`UWAGA: BOSS ETAPU ${stage} WYKRYTY!`, 2600);
+    }
+    this.gameStageKills = 0;
+    this.gameMissionText = this.getMissionObjectiveText(mode, stage);
+  }
+
+  private spawnExplosion(pos: THREE.Vector3, colorHex: number, maxScale = 3.2): void {
+    if (!this.scene) return;
+    const mode = this.getGameCatalogItem().layoutMode;
+    const isUnderwater = mode === 'submarine_hunt';
+    const isMajor = maxScale >= 2.4;
+    const scaleNorm = maxScale / 3.2;
+
+    const grp = new THREE.Group();
+    grp.position.copy(pos);
+
+    // 1. Dynamic HDR Blast PointLight that genuinely lights up nearby hull armor & terrain
+    let light: THREE.PointLight | undefined;
+    if (isMajor && this.explosions.length < 4) {
+      light = new THREE.PointLight(isUnderwater ? 0x38e8ff : 0xffaa33, maxScale * 22, 48 * scaleNorm, 1.5);
+      grp.add(light);
+    }
+
+    // 2. Blinding White-Hot Initial Detonation Flash Core
+    const core = new THREE.Mesh(
+      new THREE.IcosahedronGeometry(0.95, 2),
+      new THREE.MeshBasicMaterial({
+        color: isUnderwater ? 0xe0ffff : 0xfffce0,
+        transparent: true,
+        opacity: 1.0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+
+    // 3. Primary & Secondary Supersonic Mach Shockwave Rings
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(1.15, 0.22, 10, 32),
+      new THREE.MeshBasicMaterial({
+        color: isUnderwater ? 0x2dd4bf : colorHex,
+        transparent: true,
+        opacity: 0.95,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+    const ring2 = new THREE.Mesh(
+      new THREE.TorusGeometry(0.92, 0.14, 8, 28),
+      new THREE.MeshBasicMaterial({
+        color: isUnderwater ? 0x7dd3fc : 0xffc857,
+        transparent: true,
+        opacity: 0.88,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+    ring2.rotation.x = Math.PI / 2;
+    grp.add(core, ring, ring2);
+
+    // 4. Vertical Blast Column (Water/Bubble Geyser underwater or Flame Plume on land/air)
+    let pillar: THREE.Mesh | undefined;
+    if (isMajor) {
+      pillar = new THREE.Mesh(
+        new THREE.ConeGeometry(0.85, 4.2, 12, 1, true),
+        new THREE.MeshBasicMaterial({
+          color: isUnderwater ? 0x5eead4 : 0xff7b1c,
+          transparent: true,
+          opacity: 0.68,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      );
+      pillar.position.y = 1.6 * scaleNorm;
+      grp.add(pillar);
+    }
+
+    // 5. Volumetric Expanding & Color-Cooling Fireball Plumes (White-Gold -> Orange -> Crimson -> Embers!)
+    const fireballCount = isMajor ? 7 : 3;
+    const fireballs: { mesh: THREE.Mesh; vel: THREE.Vector3; initScale: number }[] = [];
+    const fbGeo = new THREE.DodecahedronGeometry(0.75, 1);
+    for (let f = 0; f < fireballCount; f++) {
+      const fbMat = new THREE.MeshBasicMaterial({
+        color: isUnderwater ? 0x67e8f9 : f === 0 ? 0xfff3b0 : 0xff7a1a,
+        transparent: true,
+        opacity: 0.92,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const fb = new THREE.Mesh(fbGeo, fbMat);
+      const a = (f / fireballCount) * Math.PI * 2 + Math.random() * 0.5;
+      const el = (Math.random() - 0.35) * 1.1;
+      const spd = (f === 0 ? 0.6 : 2.8 + Math.random() * 4.2) * scaleNorm;
+      const initScale = (f === 0 ? 1.05 : 0.55 + Math.random() * 0.55) * scaleNorm;
+      fb.scale.setScalar(initScale * 0.45);
+      grp.add(fb);
+      fireballs.push({
+        mesh: fb,
+        vel: new THREE.Vector3(Math.cos(a) * Math.cos(el) * spd, Math.sin(el) * spd + 1.8 * scaleNorm, Math.sin(a) * Math.cos(el) * spd),
+        initScale,
+      });
+    }
+
+    // 6. Rising Dark Billowing Smoke Cloud (or Dense White-Teal Underwater Cavitation Bubbles)
+    const smokeCount = isMajor ? 6 : 2;
+    const smokePuffs: { mesh: THREE.Mesh; vel: THREE.Vector3; initScale: number }[] = [];
+    const smokeGeo = new THREE.IcosahedronGeometry(0.85, 1);
+    for (let sm = 0; sm < smokeCount; sm++) {
+      const smMat = new THREE.MeshStandardMaterial({
+        color: isUnderwater ? 0xa5f3fc : 0x1c1917,
+        emissive: isUnderwater ? 0x0e7490 : 0x7c2d12,
+        emissiveIntensity: isUnderwater ? 0.35 : 0.42,
+        roughness: 0.96,
+        metalness: 0.0,
+        transparent: true,
+        opacity: isUnderwater ? 0.48 : 0.72,
+        depthWrite: false,
+      });
+      const puff = new THREE.Mesh(smokeGeo, smMat);
+      const a = (sm / smokeCount) * Math.PI * 2 + 0.35;
+      const rSpd = (1.6 + Math.random() * 2.8) * scaleNorm;
+      const initScale = (0.65 + Math.random() * 0.65) * scaleNorm;
+      puff.scale.setScalar(initScale * 0.4);
+      grp.add(puff);
+      smokePuffs.push({
+        mesh: puff,
+        vel: new THREE.Vector3(Math.cos(a) * rSpd, (3.2 + Math.random() * 3.8) * scaleNorm, Math.sin(a) * rSpd),
+        initScale,
+      });
+    }
+
+    // 7. 22 High-Velocity Gravity-Arcing Incandescent Shrapnel & Burning Ember Streaks!
+    const sparkCount = isMajor ? 22 : 10;
+    const sparks: { mesh: THREE.Mesh; vel: THREE.Vector3 }[] = [];
+    const sparkGeo = new THREE.BoxGeometry(0.14, 0.14, 0.72);
+    for (let s = 0; s < sparkCount; s++) {
+      const spMat = new THREE.MeshBasicMaterial({
+        color: isUnderwater ? (s % 2 === 0 ? 0xe0f2fe : 0x2dd4bf) : s % 3 === 0 ? 0xfffbeb : s % 3 === 1 ? 0xfbbf24 : 0xff4500,
+        transparent: true,
+        opacity: 0.98,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const sp = new THREE.Mesh(sparkGeo, spMat);
+      const theta = (s / sparkCount) * Math.PI * 2 + Math.random() * 0.35;
+      const phi = (Math.random() - 0.32) * 1.45;
+      const spd = (12 + Math.random() * 19) * scaleNorm;
+      const vel = new THREE.Vector3(
+        Math.cos(theta) * Math.cos(phi) * spd,
+        Math.sin(phi) * spd + 5.5 * scaleNorm,
+        Math.sin(theta) * Math.cos(phi) * spd
+      );
+      sp.lookAt(vel);
+      grp.add(sp);
+      sparks.push({ mesh: sp, vel });
+    }
+
+    this.scene.add(grp);
+    this.explosions.push({
+      group: grp,
+      light,
+      ring,
+      ring2,
+      core,
+      pillar,
+      fireballs,
+      smokePuffs,
+      sparks,
+      age: 0,
+      maxAge: isMajor ? 1.15 : 0.48,
+      maxScale,
+      isUnderwater,
+    });
+    gameAudioService.playExplosion(maxScale >= 4.5);
+  }
+
+  private spawnMuzzleFlash(pos: THREE.Vector3, dir: THREE.Vector3, colorHex: number, scale = 1.0): void {
+    if (!this.scene) return;
+    const grp = new THREE.Group();
+    grp.position.copy(pos);
+    grp.lookAt(pos.clone().add(dir));
+
+    // Crossed 3D volumetric starburst flame blades
+    const bladeGeo = new THREE.PlaneGeometry(1.45 * scale, 0.52 * scale);
+    const bladeMat = new THREE.MeshBasicMaterial({
+      color: 0xfff8d6,
+      transparent: true,
+      opacity: 0.96,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    for (let b = 0; b < 3; b++) {
+      const blade = new THREE.Mesh(bladeGeo, bladeMat);
+      blade.rotation.z = (b * Math.PI) / 3;
+      blade.position.z = 0.25 * scale;
+      grp.add(blade);
+    }
+    const core = new THREE.Mesh(
+      new THREE.SphereGeometry(0.32 * scale, 10, 10),
+      new THREE.MeshBasicMaterial({
+        color: colorHex,
+        transparent: true,
+        opacity: 0.95,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(0.45 * scale, 0.08 * scale, 8, 20),
+      new THREE.MeshBasicMaterial({
+        color: colorHex,
+        transparent: true,
+        opacity: 0.9,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+    grp.add(core, ring);
+    this.scene.add(grp);
+    this.muzzleFlashes.push({ group: grp, ring, age: 0, maxAge: 0.11 });
+  }
+
   public kickSoccerBall(): void {
     if (!this.isSoccerScene()) return;
     const distToBall = this.soccerPlayerPos.distanceTo(this.soccerBallPos);
@@ -3265,25 +5095,266 @@ export class GameBenchService {
     this.soccerBallVel.copy(_dirVec).multiplyScalar(kickPower);
     this.shotsFired++;
     this.soccerBallSpeedKmh = Math.round(this.soccerBallVel.length() * 3.6);
+    gameAudioService.playWeaponFire('cannon');
+  }
+
+  public firePlayerWeapon(): void {
+    if (!this.scene || !this.camera) return;
+    if (this.fireCooldown > 0) return;
+    const gameMeta = this.getGameCatalogItem();
+    const mode = gameMeta.layoutMode;
+    const isHeavyArtillery = mode === 'tank_blitz' || mode === 'battleship_yamato' || mode === 'ac130_gunship';
+    const isMissileCraft =
+      mode === 'f22_jet' ||
+      mode === 'sr71_plane' ||
+      mode === 'f18_naval' ||
+      mode === 'apache_heli' ||
+      mode === 'volcano_heli';
+    const isSubmarine = mode === 'submarine_hunt';
+
+    this.fireCooldown =
+      mode === 'battleship_yamato'
+        ? 0.34
+        : mode === 'ac130_gunship'
+          ? 0.28
+          : mode === 'tank_blitz'
+            ? 0.24
+            : isSubmarine
+              ? 0.26
+              : 0.14;
+
+    const hero = this.playerAircraftGroup || this.playerCombatGroup || this.playerCarGroup;
+    const sfxKind =
+      isHeavyArtillery
+        ? 'cannon'
+        : mode === 'apache_heli' || mode === 'volcano_heli'
+          ? 'chaingun'
+          : isSubmarine
+            ? 'torpedo'
+            : 'plasma';
+    gameAudioService.playWeaponFire(sfxKind);
+
+    const offsets: number[][] =
+      mode === 'tank_blitz'
+        ? [[0, 1.85, -4.6]]
+        : mode === 'battleship_yamato'
+          ? [[-0.55, 2.85, -7.2], [0, 3.05, -7.2], [0.55, 2.85, -7.2]]
+          : mode === 'ac130_gunship'
+            ? [[-2.4, -0.3, -2.5], [2.4, -0.3, -2.5]]
+            : mode === 'mech_titan'
+              ? [[-2.1, 5.4, -2.5], [2.1, 5.4, -2.5]]
+              : mode === 'starfighter_trench'
+                ? [[-3.6, 0.8, -1.8], [3.6, 0.8, -1.8], [-3.6, -0.6, -1.8], [3.6, -0.6, -1.8]]
+                : hero && !this.interactiveMode
+                  ? [[-1.7, -0.15, -2.5], [1.7, -0.15, -2.5]]
+                  : [[0, 0, -2.0]];
+
+    const boltColor =
+      isHeavyArtillery
+        ? 0xffa726
+        : isSubmarine
+          ? 0x2dd4bf
+          : mode === 'starfighter_trench'
+            ? 0xff3b30
+            : isMissileCraft
+              ? 0xff6b2b
+              : gameMeta.lightPalette[0];
+
+    const boltKind: LaserBolt['kind'] = isHeavyArtillery
+      ? 'shell'
+      : isMissileCraft
+        ? 'missile'
+        : isSubmarine
+          ? 'torpedo'
+          : 'laser';
+
+    for (const [ox, oy, oz] of offsets) {
+      const bolt = new THREE.Group();
+
+      if (boltKind === 'shell') {
+        // Heavy 120mm / 460mm / 105mm Incandescent Artillery Shell + Blazing Tracer Wake + Shock Collar
+        const bodyGeo = new THREE.CylinderGeometry(0.14, 0.18, 1.85, 10);
+        bodyGeo.rotateX(Math.PI / 2);
+        const shellBody = new THREE.Mesh(
+          bodyGeo,
+          new THREE.MeshStandardMaterial({
+            color: 0xfef3c7,
+            emissive: 0xff8c00,
+            emissiveIntensity: 2.2,
+            metalness: 0.7,
+            roughness: 0.2,
+          })
+        );
+        const noseGeo = new THREE.ConeGeometry(0.14, 0.65, 10);
+        noseGeo.rotateX(-Math.PI / 2);
+        const nose = new THREE.Mesh(noseGeo, new THREE.MeshBasicMaterial({ color: 0xffffff }));
+        nose.position.z = -1.25;
+        const wakeGeo = new THREE.ConeGeometry(0.32, 4.4, 10, 1, true);
+        wakeGeo.rotateX(Math.PI / 2);
+        const wake = new THREE.Mesh(
+          wakeGeo,
+          new THREE.MeshBasicMaterial({
+            color: 0xff7b00,
+            transparent: true,
+            opacity: 0.72,
+            side: THREE.DoubleSide,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+          })
+        );
+        wake.position.z = 2.6;
+        bolt.add(shellBody, nose, wake);
+      } else if (boltKind === 'missile') {
+        // Sculpted Tactical Sidewinder / Hellfire Missile with Red Warhead, Cruciform Tail Fins & Rocket Flame Plume
+        const mBodyGeo = new THREE.CylinderGeometry(0.11, 0.11, 2.2, 10);
+        mBodyGeo.rotateX(Math.PI / 2);
+        const mBody = new THREE.Mesh(
+          mBodyGeo,
+          new THREE.MeshStandardMaterial({ color: 0xe2e8f0, metalness: 0.55, roughness: 0.25 })
+        );
+        const mNoseGeo = new THREE.ConeGeometry(0.11, 0.45, 10);
+        mNoseGeo.rotateX(-Math.PI / 2);
+        const mNose = new THREE.Mesh(mNoseGeo, new THREE.MeshBasicMaterial({ color: 0xef4444 }));
+        mNose.position.z = -1.32;
+        const finMat = new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.7, roughness: 0.3 });
+        const finH = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.04, 0.38), finMat);
+        finH.position.z = 0.85;
+        const finV = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.62, 0.38), finMat);
+        finV.position.z = 0.85;
+        const plumeGeo = new THREE.ConeGeometry(0.24, 3.6, 10, 1, true);
+        plumeGeo.rotateX(Math.PI / 2);
+        const plume = new THREE.Mesh(
+          plumeGeo,
+          new THREE.MeshBasicMaterial({
+            color: 0xff8c24,
+            transparent: true,
+            opacity: 0.82,
+            side: THREE.DoubleSide,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+          })
+        );
+        plume.position.z = 2.9;
+        const coreFlame = new THREE.Mesh(
+          new THREE.SphereGeometry(0.18, 8, 8),
+          new THREE.MeshBasicMaterial({ color: 0xfff7cc })
+        );
+        coreFlame.position.z = 1.25;
+        bolt.add(mBody, mNose, finH, finV, plume, coreFlame);
+      } else if (boltKind === 'torpedo') {
+        // Heavyweight Acoustic Torpedo with Glowing Cyan Seeker & Cavitation Bubble Trail
+        const tBodyGeo = new THREE.CylinderGeometry(0.16, 0.14, 2.5, 12);
+        tBodyGeo.rotateX(Math.PI / 2);
+        const tBody = new THREE.Mesh(
+          tBodyGeo,
+          new THREE.MeshStandardMaterial({ color: 0x1e293b, metalness: 0.72, roughness: 0.28 })
+        );
+        const seeker = new THREE.Mesh(
+          new THREE.SphereGeometry(0.16, 10, 10),
+          new THREE.MeshBasicMaterial({ color: 0x5eead4 })
+        );
+        seeker.position.z = -1.26;
+        const bubbleWakeGeo = new THREE.ConeGeometry(0.28, 3.8, 10, 1, true);
+        bubbleWakeGeo.rotateX(Math.PI / 2);
+        const bubbleWake = new THREE.Mesh(
+          bubbleWakeGeo,
+          new THREE.MeshBasicMaterial({
+            color: 0x2dd4bf,
+            transparent: true,
+            opacity: 0.56,
+            side: THREE.DoubleSide,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+          })
+        );
+        bubbleWake.position.z = 3.0;
+        bolt.add(tBody, seeker, bubbleWake);
+      } else {
+        // High-Energy Railgun / Quad-Laser Plasma Bolt with Magnetic Containment Rings
+        const boltLen = 5.4;
+        const coreR = 0.085;
+        const coreGeo = new THREE.CylinderGeometry(coreR, coreR, boltLen, 8);
+        coreGeo.rotateX(Math.PI / 2);
+        const coreMesh = new THREE.Mesh(coreGeo, new THREE.MeshBasicMaterial({ color: 0xffffff }));
+        const sheathGeo = new THREE.CylinderGeometry(coreR * 2.7, coreR * 2.7, boltLen * 1.15, 8);
+        sheathGeo.rotateX(Math.PI / 2);
+        const sheathMesh = new THREE.Mesh(
+          sheathGeo,
+          new THREE.MeshBasicMaterial({
+            color: boltColor,
+            transparent: true,
+            opacity: 0.68,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+          })
+        );
+        const ringGeo = new THREE.TorusGeometry(0.26, 0.04, 6, 14);
+        const magRing = new THREE.Mesh(
+          ringGeo,
+          new THREE.MeshBasicMaterial({
+            color: boltColor,
+            transparent: true,
+            opacity: 0.75,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+          })
+        );
+        magRing.position.z = -1.4;
+        bolt.add(coreMesh, sheathMesh, magRing);
+      }
+
+      if (hero && !this.interactiveMode) {
+        bolt.position.set(hero.position.x + ox, hero.position.y + oy, hero.position.z + oz);
+        _dirVec.set(-this.playerCarSteer * 0.14, this.playerFlightPitch * 0.12, -1).normalize();
+        // Soft aim-assist magnet toward nearest enemy aligned in front of player
+        for (const en of this.combatEnemies) {
+          if (en.group.position.z < hero.position.z - 6 && en.group.position.z > hero.position.z - 125) {
+            const dx = en.group.position.x - bolt.position.x;
+            const dy = en.group.position.y - bolt.position.y;
+            const dz = en.group.position.z - bolt.position.z;
+            if (Math.hypot(dx, dy) < 9.5) {
+              _dirVec.set(dx, dy, dz).normalize();
+              break;
+            }
+          }
+        }
+        bolt.lookAt(bolt.position.clone().add(_dirVec));
+      } else {
+        bolt.position.copy(this.camera.position);
+        bolt.quaternion.copy(this.camera.quaternion);
+        _dirVec.set(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
+        bolt.position.addScaledVector(_dirVec, 2.2);
+      }
+
+      this.spawnMuzzleFlash(
+        bolt.position,
+        _dirVec,
+        boltColor,
+        isHeavyArtillery ? 1.75 : isMissileCraft ? 1.15 : 0.95
+      );
+
+      this.scene.add(bolt);
+      this.lasers.push({
+        mesh: bolt,
+        vel: _dirVec.clone().multiplyScalar(isSubmarine ? 80 : isHeavyArtillery ? 148 : 142),
+        life: 1.9,
+        damage: isHeavyArtillery ? 2 : 1,
+        kind: boltKind,
+      });
+    }
+
+    if (this.muzzleLight && hero) {
+      this.muzzleLight.color.setHex(boltColor);
+      this.muzzleLight.position.set(hero.position.x, hero.position.y + 1.8, hero.position.z - 2.6);
+      this.muzzleLight.intensity = isHeavyArtillery ? 68 : 38;
+      this.muzzleFlashTimer = isHeavyArtillery ? 0.11 : 0.08;
+    }
+    this.cameraShake = Math.min(0.6, this.cameraShake + (isHeavyArtillery ? 0.32 : 0.11));
+    this.shotsFired++;
   }
 
   public fireLaser(): void {
-    if (!this.scene || !this.camera) return;
-    const gameMeta = this.getGameCatalogItem();
-    const geo = new THREE.CylinderGeometry(0.07, 0.07, 3.4, 8);
-    geo.rotateX(Math.PI / 2);
-    const mat = new THREE.MeshBasicMaterial({ color: gameMeta.lightPalette[0] });
-    const bolt = new THREE.Mesh(geo, mat);
-    bolt.position.copy(this.camera.position);
-    bolt.quaternion.copy(this.camera.quaternion);
-    _dirVec.set(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
-    bolt.position.addScaledVector(_dirVec, 2.0);
-    this.scene.add(bolt);
-    this.lasers.push({ mesh: bolt, vel: _dirVec.clone().multiplyScalar(85), life: 1.8 });
-    this.shotsFired++;
-    if (bolt.position.distanceTo(_originVec) < 65) {
-      this.targetsHit++;
-    }
+    this.firePlayerWeapon();
   }
 
   public setPreset(preset: GameQualityPreset): void {
@@ -3358,7 +5429,7 @@ export class GameBenchService {
     this.metrics.fogEnabled = enabled;
     if (this.scene) {
       const gameMeta = this.getGameCatalogItem();
-      this.scene.fog = enabled ? new THREE.FogExp2(gameMeta.fogColor, 0.0068) : null;
+      this.scene.fog = enabled ? new THREE.FogExp2(gameMeta.fogColor, this.getFogDensity(gameMeta.layoutMode)) : null;
       if (!this.running) this.renderFrameOnce();
     }
     this.emitMetrics();
@@ -3515,7 +5586,7 @@ export class GameBenchService {
     }
     if (this.scene && this.mountEl) {
       const gameMeta = this.getGameCatalogItem();
-      this.scene.fog = this.fogEnabled ? new THREE.FogExp2(gameMeta.fogColor, 0.0068) : null;
+      this.scene.fog = this.fogEnabled ? new THREE.FogExp2(gameMeta.fogColor, this.getFogDensity(gameMeta.layoutMode)) : null;
       this.scene.environmentIntensity = this.envIntensity;
       this.rebuildHeavyGeometry(this.scene);
       this.applyPresetScale(Math.max(360, this.mountEl.clientWidth), Math.max(280, this.mountEl.clientHeight));
@@ -3612,7 +5683,7 @@ export class GameBenchService {
   }
 
   private updateDrones(t: number): void {
-    if (!this.droneMesh) return;
+    if (!this.droneMesh || !this.droneMesh.visible) return;
     const count = this.droneMesh.count;
     const step = count > 6000 ? 2 : 1;
     const startIdx = count > 6000 ? (this.frameTickCount % 2) : 0;
@@ -3631,12 +5702,14 @@ export class GameBenchService {
         layoutMode === 'maglev_track' ||
         layoutMode === 'dakar_rally' ||
         layoutMode === 'bugatti_hypercar' ||
-        layoutMode === 'snow_rally'
+        layoutMode === 'snow_rally' ||
+        layoutMode === 'motogp_superbike' ||
+        layoutMode === 'cyber_hoverbike'
       ) {
         // High-altitude camera drones & trackside overhead escorts (STRICTLY high above Y>=16 or outside |X|>=25 so road is crystal clear!)
         const side = i % 2 === 0 ? 1 : -1;
         const laneX = side * (25 + (i % 7) * 3.8 + Math.sin(t * 1.4 + i) * 1.6);
-        const speedMult = layoutMode === 'maglev_track' ? 54 : 38;
+        const speedMult = layoutMode === 'maglev_track' || layoutMode === 'cyber_hoverbike' ? 54 : 38;
         const zPos = ((((a0 * 28 + t * Math.abs(spd) * speedMult) % 200) + 200) % 200) - 140;
         const ySky = 11.5 + (i % 8) * 2.2;
         _dummy.position.set(laneX, ySky, zPos);
@@ -3647,13 +5720,25 @@ export class GameBenchService {
         const ringR = 32 + (i % 6) * 5;
         _dummy.position.set(Math.cos(ang) * ringR, 22 + (i % 5) * 3.2, Math.sin(ang) * ringR);
         _dummy.rotation.set(0.15, -ang, 0);
-      } else if (layoutMode === 'f22_jet' || layoutMode === 'sr71_plane' || layoutMode === 'apache_heli') {
-        // Outer escort squadron flanking the canyon well outside player sightline
+      } else if (
+        layoutMode === 'f22_jet' ||
+        layoutMode === 'sr71_plane' ||
+        layoutMode === 'apache_heli' ||
+        layoutMode === 'f18_naval' ||
+        layoutMode === 'ac130_gunship' ||
+        layoutMode === 'volcano_heli' ||
+        layoutMode === 'tank_blitz' ||
+        layoutMode === 'mech_titan' ||
+        layoutMode === 'submarine_hunt' ||
+        layoutMode === 'starfighter_trench' ||
+        layoutMode === 'battleship_yamato'
+      ) {
+        // Keep distant ambient fleet specks far outside playable combat sightline so sky stays clean & cinematic
         const side = i % 2 === 0 ? 1 : -1;
-        const flankX = side * (28 + (i % 8) * 4.5);
-        const zFlight = ((((a0 * 28 + t * 55) % 220) + 220) % 220) - 160;
-        _dummy.position.set(flankX, 12 + (i % 7) * 3.5, zFlight);
-        _dummy.rotation.set(0, Math.PI, side * 0.25);
+        const flankX = side * (98 + (i % 8) * 9.0);
+        const zFlight = ((((a0 * 28 + t * 44) % 260) + 260) % 260) - 200;
+        _dummy.position.set(flankX, 34 + (i % 6) * 4.5, zFlight);
+        _dummy.rotation.set(0, Math.PI, side * 0.22);
       } else if (layoutMode === 'volcanic') {
         // Rising volcanic embers and diving strike craft
         const ang = a0 + t * spd * 0.35;
@@ -3749,9 +5834,26 @@ export class GameBenchService {
     if (!this.renderer || !this.scene || !this.camera) return;
     this.renderer.info.reset();
     if (this.bloomEnabled && this.composer) {
-      this.composer.render();
+      try {
+        this.composer.render();
+      } catch {
+        this.composer?.dispose();
+        this.composer = null;
+        this.composerRT?.dispose();
+        this.composerRT = null;
+        this.bloomPass = null;
+        try {
+          this.renderer.render(this.scene, this.camera);
+        } catch {
+          this.stop();
+        }
+      }
     } else {
-      this.renderer.render(this.scene, this.camera);
+      try {
+        this.renderer.render(this.scene, this.camera);
+      } catch {
+        this.stop();
+      }
     }
     this.lastTriangles = this.renderer.info.render.triangles;
     this.lastDrawCalls = this.renderer.info.render.calls;
@@ -3766,7 +5868,25 @@ export class GameBenchService {
     this.simTime += dt;
 
     if (this.skyMat) this.skyMat.uniforms.uTime.value = this.simTime;
+    if (this.oceanMat) this.oceanMat.uniforms.uTime.value = this.simTime;
+    if (this.causticMat) this.causticMat.uniforms.uTime.value = this.simTime;
+    if (this.lavaMat) this.lavaMat.uniforms.uTime.value = this.simTime;
     if (this.plasmaMat) this.plasmaMat.uniforms.uTime.value = this.simTime;
+
+    this.fireCooldown = Math.max(0, this.fireCooldown - dt);
+    this.cameraShake = Math.max(0, this.cameraShake - dt * 1.4);
+    if (this.muzzleFlashTimer > 0) {
+      this.muzzleFlashTimer -= dt;
+      if (this.muzzleFlashTimer <= 0 && this.muzzleLight) this.muzzleLight.intensity = 0;
+    }
+    if (this.gameComboTimer > 0) {
+      this.gameComboTimer -= dt;
+      if (this.gameComboTimer <= 0) this.gameCombo = 1;
+    }
+    if ((this.keysDown.has('Space') || this.isMouseFireDown) && !this.isSoccerScene() && !this.isRacingScene()) {
+      this.firePlayerWeapon();
+    }
+
     if (this.coreGroup) {
       if (this.coreGroup.userData.isFlagship) {
         this.coreGroup.position.y = 11.5 + Math.sin(this.simTime * 1.2) * 1.2;
@@ -3792,15 +5912,164 @@ export class GameBenchService {
       this.particlePoints.rotation.y = this.simTime * 0.06;
     }
 
+    // Update projectiles & check enemy hit collisions
+    const activeLayoutMode = this.getGameCatalogItem().layoutMode;
     for (let i = this.lasers.length - 1; i >= 0; i--) {
       const b = this.lasers[i];
       b.mesh.position.addScaledVector(b.vel, dt);
       b.life -= dt;
-      if (b.life <= 0) {
+      let hit = false;
+      for (let eIdx = this.combatEnemies.length - 1; eIdx >= 0; eIdx--) {
+        const enemy = this.combatEnemies[eIdx];
+        if (b.mesh.position.distanceTo(enemy.group.position) < enemy.radius + 1.1) {
+          enemy.hp -= b.damage;
+          enemy.hitFlash = 0.12;
+          this.targetsHit++;
+          hit = true;
+          if (enemy.hp <= 0) {
+            this.spawnExplosion(enemy.group.position, enemy.isBoss ? 0xff2255 : 0xff5a1f, enemy.isBoss ? 7.2 : 3.8);
+            this.scene.remove(enemy.group);
+            this.combatEnemies.splice(eIdx, 1);
+            this.gameTargetsDestroyed++;
+            this.gameStageKills++;
+            this.gameCombo = Math.min(8, this.gameCombo + 1);
+            this.gameComboTimer = 4.5;
+            const pts = (enemy.isBoss ? 1500 : 250) * this.gameCombo;
+            this.gameScore += pts;
+            this.cameraShake = Math.min(0.85, this.cameraShake + (enemy.isBoss ? 0.65 : 0.28));
+            if (enemy.isBoss) {
+              this.showBanner(`BOSS ZNISZCZONY! +${pts} PKT`, 2600);
+            }
+          } else {
+            this.spawnExplosion(b.mesh.position, 0xffaa22, 1.55);
+          }
+          break;
+        }
+      }
+      if (hit || b.life <= 0) {
         this.scene.remove(b.mesh);
-        b.mesh.geometry.dispose();
-        (b.mesh.material as THREE.Material).dispose();
+        this.disposeObjectTree(b.mesh);
         this.lasers.splice(i, 1);
+      }
+    }
+
+    // Update 3D Muzzle Flash Starbursts & Expanding Blast Rings
+    for (let i = this.muzzleFlashes.length - 1; i >= 0; i--) {
+      const mf = this.muzzleFlashes[i];
+      mf.age += dt;
+      const p = Math.min(1, mf.age / mf.maxAge);
+      const flashScale = 1.0 + p * 0.65;
+      mf.group.scale.setScalar(flashScale);
+      mf.ring.scale.setScalar(1.0 + p * 2.2);
+      mf.group.traverse((child) => {
+        const m = (child as THREE.Mesh).material as THREE.MeshBasicMaterial | undefined;
+        if (m && 'opacity' in m) m.opacity = Math.max(0, 1 - p);
+      });
+      if (mf.age >= mf.maxAge) {
+        this.scene.remove(mf.group);
+        this.disposeObjectTree(mf.group);
+        this.muzzleFlashes.splice(i, 1);
+      }
+    }
+
+    // Update multi-stage Volumetric 3D Explosions (Fireballs, Cooling Embers, Rising Smoke, Blast Light, Gravity Shrapnel!)
+    for (let i = this.explosions.length - 1; i >= 0; i--) {
+      const ex = this.explosions[i];
+      ex.age += dt;
+      const p = Math.min(1, ex.age / ex.maxAge);
+      const easeOut = 1 - Math.pow(1 - p, 2.6);
+      const sc = 0.45 + easeOut * ex.maxScale;
+
+      // Dynamic HDR explosion point-light flash decay
+      if (ex.light) {
+        ex.light.intensity = Math.max(0, ex.maxScale * 22 * Math.pow(1 - p, 2.2));
+      }
+
+      // Blinding flash core (fast peak, quick fade)
+      const coreP = Math.min(1, p * 2.6);
+      ex.core.scale.setScalar(sc * (1.25 - coreP * 0.55));
+      (ex.core.material as THREE.MeshBasicMaterial).opacity = Math.max(0, 1 - coreP);
+
+      // Supersonic dual shockwave rings
+      ex.ring.scale.setScalar(sc * 1.95);
+      ex.ring.rotation.x += dt * 3.8;
+      ex.ring2.scale.setScalar(sc * 1.58);
+      ex.ring2.rotation.y -= dt * 4.6;
+      (ex.ring.material as THREE.MeshBasicMaterial).opacity = Math.max(0, 0.94 * (1 - p * 1.25));
+      (ex.ring2.material as THREE.MeshBasicMaterial).opacity = Math.max(0, 0.85 * (1 - p * 1.18));
+
+      // Vertical blast / water geyser column
+      if (ex.pillar) {
+        const pilScale = 0.65 + easeOut * 1.65;
+        ex.pillar.scale.set(pilScale * 0.85, pilScale * 1.45, pilScale * 0.85);
+        ex.pillar.position.y += dt * 4.2;
+        (ex.pillar.material as THREE.MeshBasicMaterial).opacity = Math.max(0, 0.68 * (1 - p * 1.1));
+      }
+
+      // Volumetric fireballs expanding & cooling from white-gold -> bright orange -> deep crimson
+      for (const fb of ex.fireballs) {
+        fb.mesh.position.addScaledVector(fb.vel, dt);
+        fb.vel.multiplyScalar(Math.max(0, 1 - dt * 1.9));
+        fb.vel.y += dt * 2.2;
+        fb.mesh.rotation.x += dt * 2.2;
+        fb.mesh.rotation.y += dt * 2.8;
+        const fbScale = fb.initScale * (0.55 + easeOut * 2.15);
+        fb.mesh.scale.setScalar(fbScale);
+        const fbMat = fb.mesh.material as THREE.MeshBasicMaterial;
+        if (!ex.isUnderwater) {
+          if (p < 0.22) fbMat.color.setHex(0xfff5c0);
+          else if (p < 0.52) fbMat.color.setHex(0xff7718);
+          else fbMat.color.setHex(0xd92616);
+        }
+        fbMat.opacity = Math.max(0, 0.92 * (1 - Math.pow(p, 1.35)));
+      }
+
+      // Billowing dark smoke cloud rising & dissipating slowly
+      for (const sm of ex.smokePuffs) {
+        sm.mesh.position.addScaledVector(sm.vel, dt);
+        sm.vel.multiplyScalar(Math.max(0, 1 - dt * 1.2));
+        sm.mesh.rotation.y += dt * 1.4;
+        const smScale = sm.initScale * (0.65 + easeOut * 2.8);
+        sm.mesh.scale.setScalar(smScale);
+        const smMat = sm.mesh.material as THREE.MeshStandardMaterial;
+        smMat.emissiveIntensity = Math.max(0, (1 - p * 2.2) * 0.45);
+        smMat.opacity = Math.max(0, (ex.isUnderwater ? 0.5 : 0.72) * (1 - Math.pow(p, 1.6)));
+      }
+
+      // Ballistic gravity-arcing incandescent shrapnel & sparks
+      for (const sp of ex.sparks) {
+        sp.mesh.position.addScaledVector(sp.vel, dt);
+        if (!ex.isUnderwater) sp.vel.y -= 24.0 * dt;
+        else sp.vel.y += 4.5 * dt;
+        sp.vel.multiplyScalar(Math.max(0, 1 - dt * 1.5));
+        sp.mesh.rotation.x += dt * 9;
+        sp.mesh.rotation.y += dt * 7;
+        sp.mesh.scale.setScalar(Math.max(0.08, 1.0 - p * 0.92));
+        (sp.mesh.material as THREE.MeshBasicMaterial).opacity = Math.max(0, 1 - p * 1.08);
+      }
+
+      if (ex.age >= ex.maxAge) {
+        this.scene.remove(ex.group);
+        this.disposeObjectTree(ex.group);
+        this.explosions.splice(i, 1);
+      }
+    }
+
+    // Check stage progression in Flight & Combat 5-Stage Campaigns
+    if ((this.isFlightScene(activeLayoutMode) || this.isCombatScene(activeLayoutMode)) && this.combatEnemies.length === 0) {
+      gameAudioService.playStageClear();
+      if (this.gameStage < this.gameMaxStage) {
+        this.gameStage++;
+        this.gameHealthPct = Math.min(100, this.gameHealthPct + 25);
+        this.gameScore += 500 * this.gameStage;
+        this.showBanner(`ETAP ${this.gameStage}/${this.gameMaxStage} — NOWA FALA!`, 2600);
+        this.spawnMissionWave(this.scene, activeLayoutMode, this.gameStage);
+      } else {
+        this.gameScore += 2500;
+        this.gameStage = 1;
+        this.gameHealthPct = 100;
+        this.showBanner('KAMPANIA 5/5 UKOŃCZONA! +2500 PKT · NOWA RUNDA!', 3200);
+        this.spawnMissionWave(this.scene, activeLayoutMode, 1);
       }
     }
 
@@ -3816,16 +6085,18 @@ export class GameBenchService {
       if (this.keysDown.has('KeyA')) this.camera.position.addScaledVector(_vRight, -speed * dt);
       this.camera.position.y = Math.max(2.2, Math.min(54, this.camera.position.y));
     } else {
-      const layoutMode = this.getGameCatalogItem().layoutMode;
+      const layoutMode = activeLayoutMode;
       if (
         layoutMode === 'formula_gp' ||
         layoutMode === 'drift_touge' ||
         layoutMode === 'maglev_track' ||
         layoutMode === 'dakar_rally' ||
         layoutMode === 'bugatti_hypercar' ||
-        layoutMode === 'snow_rally'
+        layoutMode === 'snow_rally' ||
+        layoutMode === 'motogp_superbike' ||
+        layoutMode === 'cyber_hoverbike'
       ) {
-        // Playable 3D Racing Chase Camera + Player Steering (A/D or Left/Right) + Nitro Boost (Shift/W/Space)
+        // Longer 5-Lap Playable 3D Racing Chase Camera + Boost Gates + Overtake Combo
         const nitroActive =
           this.keysDown.has('ShiftLeft') ||
           this.keysDown.has('ShiftRight') ||
@@ -3839,11 +6110,15 @@ export class GameBenchService {
         const baseSpeed =
           layoutMode === 'maglev_track'
             ? 880
-            : layoutMode === 'bugatti_hypercar'
-              ? 438
-              : layoutMode === 'formula_gp'
-                ? 372
-                : 318;
+            : layoutMode === 'cyber_hoverbike'
+              ? 540
+              : layoutMode === 'bugatti_hypercar'
+                ? 438
+                : layoutMode === 'formula_gp'
+                  ? 372
+                  : layoutMode === 'motogp_superbike'
+                    ? 352
+                    : 318;
         const targetSpeed = nitroActive && this.raceNitroPct > 2
           ? baseSpeed * 1.44
           : brakeActive
@@ -3851,17 +6126,30 @@ export class GameBenchService {
             : baseSpeed + Math.sin(this.simTime * 1.4) * 26;
         this.raceSpeedKmh = Math.round(this.raceSpeedKmh + (targetSpeed - this.raceSpeedKmh) * Math.min(1, dt * 6));
         if (nitroActive && this.raceNitroPct > 0) {
-          this.raceNitroPct = Math.max(0, Number((this.raceNitroPct - dt * 22).toFixed(0)));
+          this.raceNitroPct = Math.max(0, Number((this.raceNitroPct - dt * 20).toFixed(0)));
         } else {
           this.raceNitroPct = Math.min(100, Number((this.raceNitroPct + dt * 15).toFixed(0)));
         }
         const mps = this.raceSpeedKmh / 3.6;
         this.raceDistanceM += mps * dt;
-        this.raceLap = 1 + Math.floor(this.raceDistanceM / 1200);
+        const newLap = 1 + Math.floor(this.raceDistanceM / 2200);
+        if (newLap > this.raceLap) {
+          this.raceLap = newLap;
+          gameAudioService.playStageClear();
+          this.gameScore += 1000;
+          if (this.raceLap > this.raceTotalLaps) {
+            this.showBanner(`META! WYŚCIG 5/5 UKOŃCZONY — POZYCJA P${this.racePosition}!`, 3200);
+            this.raceDistanceM = 0;
+            this.raceLap = 1;
+          } else {
+            this.showBanner(`OKRĄŻENIE ${this.raceLap}/${this.raceTotalLaps} · +1000 PKT!`, 2200);
+          }
+        }
+        this.gameMissionText = this.getMissionObjectiveText(layoutMode, this.raceLap);
 
         const targetSteer = steerLeft ? -1 : steerRight ? 1 : Math.sin(this.simTime * 1.15) * 0.48;
         this.playerCarSteer += (targetSteer - this.playerCarSteer) * Math.min(1, dt * 9);
-        this.playerCarX = Math.max(-13.8, Math.min(13.8, this.playerCarX + this.playerCarSteer * dt * 17));
+        this.playerCarX = Math.max(-13.8, Math.min(13.8, this.playerCarX + this.playerCarSteer * dt * 17.5));
 
         if (this.raceRoadTexture) {
           this.raceRoadTexture.offset.y = (this.raceRoadTexture.offset.y + (mps * dt) / 14) % 1;
@@ -3877,10 +6165,36 @@ export class GameBenchService {
           sw.rotation.y = -this.playerCarSteer * 0.34;
         }
 
+        // Scroll Racing Nitro Boost Rings
+        for (const gate of this.boostGates) {
+          gate.mesh.position.z += mps * dt * 0.72;
+          gate.mesh.rotation.z += dt * 1.4;
+          gate.innerRing.rotation.z -= dt * 3.6;
+          if (!gate.passed && Math.abs(gate.mesh.position.z - 16.0) < 3.6 && Math.abs(gate.mesh.position.x - this.playerCarX) < gate.radius) {
+            gate.passed = true;
+            this.gameGatesPassed++;
+            this.raceNitroPct = Math.min(100, this.raceNitroPct + 32);
+            this.gameScore += 250;
+            gameAudioService.playGateChime();
+            this.showBanner('BRAMKA NITRO! +32% NITRO · +250 PKT', 1400);
+          }
+          if (gate.mesh.position.z > 32) {
+            gate.mesh.position.z -= 220;
+            gate.mesh.position.x = (Math.random() - 0.5) * 20;
+            gate.passed = false;
+          }
+        }
+
         if (this.playerCarGroup) {
-          const hoverY = layoutMode === 'maglev_track' ? 0.55 + Math.sin(this.simTime * 6) * 0.1 : 0.04;
+          const hoverY =
+            layoutMode === 'maglev_track' || layoutMode === 'cyber_hoverbike'
+              ? 0.45 + Math.sin(this.simTime * 6.5) * 0.1
+              : 0.04;
           this.playerCarGroup.position.set(this.playerCarX, hoverY, 16.0);
-          this.playerCarGroup.rotation.z = -this.playerCarSteer * 0.11;
+          this.playerCarGroup.rotation.z =
+            layoutMode === 'motogp_superbike' || layoutMode === 'cyber_hoverbike'
+              ? -this.playerCarSteer * 0.52
+              : -this.playerCarSteer * 0.11;
           this.playerCarGroup.rotation.y = -this.playerCarSteer * (layoutMode === 'drift_touge' ? 0.36 : 0.14);
           const flames = this.playerCarGroup.userData.flames as THREE.Mesh[] | undefined;
           if (flames) {
@@ -3897,14 +6211,26 @@ export class GameBenchService {
               const baseX = Number(child.userData.baseX) || 0;
               const speedMult = Number(child.userData.speedMult) || 1.0;
               const weaveX = Math.max(-13.5, Math.min(13.5, baseX + Math.sin(this.simTime * (1.0 + rIdx * 0.2) + rIdx * 1.7) * 4.2));
-              let relZ = Number(child.userData.relZ) || -25;
-              const rivalDeltaSpeed = (speedMult * 355 - this.raceSpeedKmh) * 0.08 * dt;
-              relZ += -rivalDeltaSpeed;
-              if (relZ > 18) relZ -= 160;
+              const prevRelZ = Number(child.userData.relZ) || -25;
+              let relZ = prevRelZ + -((speedMult * 355 - this.raceSpeedKmh) * 0.08 * dt);
+              if (prevRelZ < 0 && relZ >= 0 && !this.overtakeScoredIds.has(rIdx)) {
+                this.overtakeScoredIds.add(rIdx);
+                this.gameScore += 200;
+                gameAudioService.playGateChime();
+                this.showBanner('WYPRZEDZANIE! +200 PKT', 1200);
+              }
+              if (relZ > 18) {
+                relZ -= 160;
+                this.overtakeScoredIds.delete(rIdx);
+              }
               if (relZ < -145) relZ += 160;
               child.userData.relZ = relZ;
               child.position.set(weaveX, 0.03, 16.0 + relZ);
-              child.rotation.y = Math.cos(this.simTime * (1.0 + rIdx * 0.2) + rIdx * 1.7) * -0.1;
+              const rivalSteer = Math.cos(this.simTime * (1.0 + rIdx * 0.2) + rIdx * 1.7);
+              child.rotation.y = rivalSteer * -0.1;
+              if (layoutMode === 'motogp_superbike' || layoutMode === 'cyber_hoverbike') {
+                child.rotation.z = -rivalSteer * 0.36;
+              }
               if (relZ < 0) carsAhead++;
             }
           });
@@ -3916,32 +6242,66 @@ export class GameBenchService {
           this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 6);
           this.camera.updateProjectionMatrix();
         }
+        const isBikeCam = layoutMode === 'motogp_superbike' || layoutMode === 'cyber_hoverbike';
         this.camera.position.set(
           this.playerCarX * 0.82,
-          2.72,
-          24.2 + (nitroActive && this.raceNitroPct > 2 ? 0.65 : 0)
+          layoutMode === 'cyber_hoverbike' ? 3.22 : layoutMode === 'motogp_superbike' ? 2.95 : 2.72,
+          (isBikeCam ? 24.8 : 24.2) + (nitroActive && this.raceNitroPct > 2 ? 0.65 : 0)
         );
-        this.camera.lookAt(this.playerCarX * 0.92, 1.15, -18.0);
+        this.camera.lookAt(
+          this.playerCarX * 0.88,
+          isBikeCam ? 1.05 : 1.15,
+          isBikeCam ? -22.0 : -18.0
+        );
       } else if (
         layoutMode === 'f22_jet' ||
         layoutMode === 'sr71_plane' ||
-        layoutMode === 'apache_heli'
+        layoutMode === 'apache_heli' ||
+        layoutMode === 'f18_naval' ||
+        layoutMode === 'ac130_gunship' ||
+        layoutMode === 'volcano_heli' ||
+        layoutMode === 'tank_blitz' ||
+        layoutMode === 'mech_titan' ||
+        layoutMode === 'submarine_hunt' ||
+        layoutMode === 'starfighter_trench' ||
+        layoutMode === 'battleship_yamato'
       ) {
-        // Playable Supersonic Flight / Gunship Simulation: A/D Roll & Bank, W/S Pitch & Altitude, Shift/Space Afterburner
-        const boostActive =
-          this.keysDown.has('ShiftLeft') ||
-          this.keysDown.has('ShiftRight') ||
-          this.keysDown.has('Space');
+        // Unified Playable 5-Stage Flight & Combat Simulation (WASD/Arrows + Shift Boost + Space/Click Weapons)
+        const boostActive = this.keysDown.has('ShiftLeft') || this.keysDown.has('ShiftRight');
         const rollLeft = this.keysDown.has('KeyA') || this.keysDown.has('ArrowLeft');
         const rollRight = this.keysDown.has('KeyD') || this.keysDown.has('ArrowRight');
         const climbUp = this.keysDown.has('KeyW') || this.keysDown.has('ArrowUp');
         const diveDown = this.keysDown.has('KeyS') || this.keysDown.has('ArrowDown');
 
+        const isGroundVehicle =
+          layoutMode === 'tank_blitz' ||
+          layoutMode === 'mech_titan' ||
+          layoutMode === 'battleship_yamato';
         const baseAirSpeed =
-          layoutMode === 'sr71_plane' ? 2850 : layoutMode === 'f22_jet' ? 1680 : 325;
+          layoutMode === 'sr71_plane'
+            ? 2850
+            : layoutMode === 'f22_jet'
+              ? 1680
+              : layoutMode === 'f18_naval'
+                ? 1520
+                : layoutMode === 'starfighter_trench'
+                  ? 1480
+                  : layoutMode === 'ac130_gunship'
+                    ? 620
+                    : layoutMode === 'apache_heli'
+                      ? 325
+                      : layoutMode === 'volcano_heli'
+                        ? 315
+                        : layoutMode === 'tank_blitz'
+                          ? 92
+                          : layoutMode === 'mech_titan'
+                            ? 78
+                            : layoutMode === 'battleship_yamato'
+                              ? 54
+                              : 68;
         const targetAirSpeed = boostActive && this.raceNitroPct > 2
           ? baseAirSpeed * 1.42
-          : baseAirSpeed + Math.sin(this.simTime * 0.9) * (baseAirSpeed * 0.06);
+          : baseAirSpeed + Math.sin(this.simTime * 0.9) * (baseAirSpeed * 0.05);
         this.raceSpeedKmh = Math.round(this.raceSpeedKmh + (targetAirSpeed - this.raceSpeedKmh) * Math.min(1, dt * 5));
         if (boostActive && this.raceNitroPct > 0) {
           this.raceNitroPct = Math.max(0, Number((this.raceNitroPct - dt * 18).toFixed(0)));
@@ -3949,52 +6309,71 @@ export class GameBenchService {
           this.raceNitroPct = Math.min(100, Number((this.raceNitroPct + dt * 12).toFixed(0)));
         }
 
-        const targetBank = rollLeft ? -1 : rollRight ? 1 : Math.sin(this.simTime * 0.72) * 0.42;
-        this.playerCarSteer += (targetBank - this.playerCarSteer) * Math.min(1, dt * 6);
-        this.playerCarX = Math.max(-13.5, Math.min(13.5, this.playerCarX + this.playerCarSteer * dt * 16));
+        const targetBank = rollLeft ? -1 : rollRight ? 1 : Math.sin(this.simTime * 0.65) * 0.34;
+        this.playerCarSteer += (targetBank - this.playerCarSteer) * Math.min(1, dt * 7);
+        const maxLateral = layoutMode === 'starfighter_trench' ? 14.5 : 15.5;
+        this.playerCarX = Math.max(-maxLateral, Math.min(maxLateral, this.playerCarX + this.playerCarSteer * dt * 17.5));
 
-        const targetPitch = climbUp ? 1 : diveDown ? -1 : Math.cos(this.simTime * 0.85) * 0.28;
-        this.playerFlightPitch += (targetPitch - this.playerFlightPitch) * Math.min(1, dt * 5);
-        this.playerFlightY = Math.max(4.5, Math.min(20.5, this.playerFlightY + this.playerFlightPitch * dt * 8));
+        if (!isGroundVehicle) {
+          const targetPitch = climbUp ? 1 : diveDown ? -1 : Math.cos(this.simTime * 0.78) * 0.22;
+          this.playerFlightPitch += (targetPitch - this.playerFlightPitch) * Math.min(1, dt * 5.5);
+          const minY = layoutMode === 'submarine_hunt' ? 2.5 : 4.5;
+          const maxY = layoutMode === 'submarine_hunt' ? 15.5 : 20.5;
+          this.playerFlightY = Math.max(minY, Math.min(maxY, this.playerFlightY + this.playerFlightPitch * dt * 9));
+        } else {
+          this.playerFlightPitch = 0;
+          this.playerFlightY = 0.04;
+        }
 
-        // Scroll ground terrain texture & drifting 3D volumetric cloud clusters
+        // Scroll ground terrain texture & soft high-altitude cloud cards
         if (this.flightGroundTex) {
-          this.flightGroundTex.offset.y = (this.flightGroundTex.offset.y + dt * (layoutMode === 'sr71_plane' ? 2.4 : layoutMode === 'f22_jet' ? 1.8 : 0.75)) % 1;
+          const texSpd =
+            layoutMode === 'sr71_plane'
+              ? 2.2
+              : layoutMode === 'f22_jet' || layoutMode === 'starfighter_trench'
+                ? 1.7
+                : layoutMode === 'apache_heli'
+                  ? 0.55
+                  : 0.45;
+          this.flightGroundTex.offset.y = (this.flightGroundTex.offset.y + dt * texSpd * (boostActive ? 1.4 : 1.0)) % 1;
         }
         if (this.flightCloudsMesh) {
-          const cloudSpeed = layoutMode === 'sr71_plane' ? 92 : layoutMode === 'f22_jet' ? 68 : 26;
+          const cloudSpeed = layoutMode === 'sr71_plane' ? 88 : layoutMode === 'f22_jet' || layoutMode === 'f18_naval' ? 62 : 22;
           const cnt = this.flightCloudsMesh.count;
           for (let c = 0; c < cnt; c++) {
             const cx = this.flightCloudMeta[c * 5];
             const cy = this.flightCloudMeta[c * 5 + 1];
-            let cz = this.flightCloudMeta[c * 5 + 2] + cloudSpeed * dt * (boostActive ? 1.45 : 1.0);
-            if (cz > 56) cz -= 260;
+            let cz = this.flightCloudMeta[c * 5 + 2] + cloudSpeed * dt * (boostActive ? 1.4 : 1.0);
+            if (cz > 56) cz -= 270;
             this.flightCloudMeta[c * 5 + 2] = cz;
             const scX = this.flightCloudMeta[c * 5 + 3];
             const scY = this.flightCloudMeta[c * 5 + 4];
             _dummy.position.set(cx, cy, cz);
-            _dummy.rotation.set(0, c * 0.4, 0);
-            _dummy.scale.set(scX, scY, scX * 1.4);
+            _dummy.rotation.set(0, 0, 0);
+            _dummy.scale.set(scX, scY, 1);
             _dummy.updateMatrix();
             this.flightCloudsMesh.setMatrixAt(c, _dummy.matrix);
           }
           this.flightCloudsMesh.instanceMatrix.needsUpdate = true;
         }
 
-        // Spin Apache main & tail rotors
+        // Spin rotors / submarine prop / tank road wheels
         for (const rotor of this.aircraftRotors) {
           if (rotor.userData.axis === 'x') rotor.rotation.x += dt * 42;
-          else rotor.rotation.y += dt * 32;
+          else if (rotor.userData.axis === 'z') rotor.rotation.z += dt * 24;
+          else rotor.rotation.y += dt * 32 * (Number(rotor.userData.dir) || 1);
         }
 
+        // Update Hero Aircraft or Hero Combat Vehicle
+        const heroPosZ = this.playerAircraftGroup ? 14.0 : 15.0;
         if (this.playerAircraftGroup) {
-          this.playerAircraftGroup.position.set(this.playerCarX, this.playerFlightY, 14.0);
-          if (layoutMode === 'apache_heli') {
+          this.playerAircraftGroup.position.set(this.playerCarX, this.playerFlightY, heroPosZ);
+          if (layoutMode === 'apache_heli' || layoutMode === 'volcano_heli') {
             this.playerAircraftGroup.rotation.z = -this.playerCarSteer * 0.28;
             this.playerAircraftGroup.rotation.x = -0.09 + this.playerFlightPitch * 0.14;
             this.playerAircraftGroup.rotation.y = -this.playerCarSteer * 0.18;
           } else {
-            this.playerAircraftGroup.rotation.z = -this.playerCarSteer * 0.56;
+            this.playerAircraftGroup.rotation.z = -this.playerCarSteer * (layoutMode === 'ac130_gunship' ? 0.34 : 0.56);
             this.playerAircraftGroup.rotation.x = this.playerFlightPitch * 0.22;
             this.playerAircraftGroup.rotation.y = -this.playerCarSteer * 0.14;
           }
@@ -4005,9 +6384,115 @@ export class GameBenchService {
               : 0.9 + Math.sin(this.simTime * 24) * 0.14;
             flames.forEach((f) => f.scale.set(1, flameScale, 1));
           }
+        } else if (this.playerCombatGroup) {
+          this.playerCombatGroup.position.set(this.playerCarX, this.playerFlightY, heroPosZ);
+          if (layoutMode === 'tank_blitz') {
+            this.playerCombatGroup.rotation.y = -this.playerCarSteer * 0.22;
+            const turret = this.playerCombatGroup.userData.turret as THREE.Group | undefined;
+            if (turret) turret.rotation.y = -this.playerCarSteer * 0.18;
+          } else if (layoutMode === 'battleship_yamato') {
+            this.playerCombatGroup.position.y = 0.05 + Math.sin(this.simTime * 1.45) * 0.22;
+            this.playerCombatGroup.rotation.y = -this.playerCarSteer * 0.14;
+            this.playerCombatGroup.rotation.z = -this.playerCarSteer * 0.06 + Math.sin(this.simTime * 0.95) * 0.025;
+            const turrets = this.playerCombatGroup.userData.turrets as THREE.Group[] | undefined;
+            if (turrets) turrets.forEach((t) => (t.rotation.y = -this.playerCarSteer * 0.25));
+          } else if (layoutMode === 'mech_titan') {
+            this.playerCombatGroup.rotation.y = -this.playerCarSteer * 0.18;
+            const legs = this.playerCombatGroup.userData.legs as THREE.Group[] | undefined;
+            if (legs && legs.length === 2) {
+              const stride = Math.sin(this.simTime * (boostActive ? 11 : 7.5)) * 0.42;
+              legs[0].rotation.x = stride;
+              legs[1].rotation.x = -stride;
+              this.playerCombatGroup.position.y = Math.abs(Math.sin(this.simTime * (boostActive ? 11 : 7.5))) * 0.28;
+            }
+          } else {
+            this.playerCombatGroup.rotation.z = -this.playerCarSteer * (layoutMode === 'starfighter_trench' ? 0.58 : 0.26);
+            this.playerCombatGroup.rotation.x = this.playerFlightPitch * 0.22;
+            this.playerCombatGroup.rotation.y = -this.playerCarSteer * 0.15;
+            const flames = this.playerCombatGroup.userData.flames as THREE.Mesh[] | undefined;
+            if (flames) {
+              const sc = boostActive && this.raceNitroPct > 2 ? 1.85 : 0.95;
+              flames.forEach((f) => f.scale.set(1, sc + Math.sin(this.simTime * 36) * 0.18, 1));
+            }
+          }
         }
 
-        // Wingmen gentle formation bobbing
+        // Update 3D Enemy Targets, Lock-On Cone & Boost Checkpoint Rings
+        let lockedAny = false;
+        const heroYCenter = isGroundVehicle ? 2.5 : this.playerFlightY;
+        for (const en of this.combatEnemies) {
+          const sway = en.isBoss ? 11.5 : 5.5;
+          en.group.position.x = en.baseX + Math.sin(this.simTime * (en.isBoss ? 0.9 : 1.35) + en.phase) * sway;
+          if (!isGroundVehicle) {
+            en.group.position.y = en.baseY + Math.cos(this.simTime * 1.1 + en.phase) * 1.8;
+          }
+          if (en.isBoss) {
+            en.group.position.z = Math.min(-34, en.group.position.z + dt * 10);
+            en.group.rotation.y += dt * 0.65;
+          } else {
+            en.group.position.z += en.speedZ * dt;
+            if (en.group.position.z > 24) {
+              en.group.position.z = -125 - Math.random() * 40;
+              en.baseX = (Math.random() - 0.5) * 20;
+            }
+          }
+          // Check proximity collision with player (mild hull hit)
+          const distToHero = Math.hypot(
+            en.group.position.x - this.playerCarX,
+            en.group.position.y - heroYCenter,
+            en.group.position.z - heroPosZ
+          );
+          if (distToHero < en.radius + 1.8) {
+            this.gameHealthPct = Math.max(15, this.gameHealthPct - 12);
+            this.cameraShake = 0.5;
+            if (!en.isBoss) en.group.position.z = -120;
+          }
+          // Target Lock-On check for tactical HUD crosshair
+          if (
+            en.group.position.z < heroPosZ - 5 &&
+            en.group.position.z > heroPosZ - 115 &&
+            Math.hypot(en.group.position.x - this.playerCarX, en.group.position.y - heroYCenter) < (en.isBoss ? 9.5 : 6.2)
+          ) {
+            lockedAny = true;
+          }
+          const lockRing = en.group.userData.lockRing as THREE.Mesh | undefined;
+          if (lockRing) lockRing.rotation.z += dt * 2.4;
+          if (en.hitFlash > 0) {
+            en.hitFlash -= dt;
+            en.group.scale.setScalar(1.12);
+          } else {
+            en.group.scale.setScalar(1.0);
+          }
+        }
+        this.targetLocked = lockedAny;
+        this.gameHealthPct = Math.min(100, this.gameHealthPct + dt * 1.2);
+
+        // Update 3D Mission Boost/Repair Rings
+        for (const gate of this.boostGates) {
+          gate.mesh.position.z += (boostActive ? 46 : 32) * dt;
+          gate.mesh.rotation.z += dt * 1.1;
+          gate.innerRing.rotation.z -= dt * 3.4;
+          if (
+            !gate.passed &&
+            Math.abs(gate.mesh.position.z - heroPosZ) < 4.0 &&
+            Math.hypot(gate.mesh.position.x - this.playerCarX, gate.mesh.position.y - heroYCenter) < gate.radius + 1.4
+          ) {
+            gate.passed = true;
+            this.gameGatesPassed++;
+            this.gameScore += 150 * this.gameCombo;
+            this.raceNitroPct = Math.min(100, this.raceNitroPct + 28);
+            this.gameHealthPct = Math.min(100, this.gameHealthPct + 10);
+            gameAudioService.playGateChime();
+            this.showBanner(`CHECKPOINT! +${150 * this.gameCombo} PKT · +28% DOPALACZ`, 1400);
+          }
+          if (gate.mesh.position.z > 28) {
+            gate.mesh.position.z -= 220;
+            gate.mesh.position.x = (Math.random() - 0.5) * 18;
+            gate.passed = false;
+          }
+        }
+
+        // Wingmen gentle formation bobbing & Naval Strike Group ocean swell heave
         if (this.coreGroup) {
           this.coreGroup.children.forEach((child, idx) => {
             if (child.userData.isWingman) {
@@ -4020,21 +6505,41 @@ export class GameBenchService {
                 wz
               );
               child.rotation.z = -Math.cos(this.simTime * 0.8 + idx * 2) * 0.22;
+            } else if (child.userData.isNavalShip) {
+              const baseY = Number(child.userData.shipBaseY) || -13.1;
+              child.position.y = baseY + Math.sin(this.simTime * 1.3 + idx * 1.7) * 0.22;
+              child.rotation.z = Math.sin(this.simTime * 0.9 + idx) * 0.025;
+              child.position.z += dt * 4.5;
+              if (child.position.z > 42) child.position.z -= 220;
             }
           });
         }
 
-        const targetFov = boostActive && this.raceNitroPct > 2 ? 72 : 60;
+        const targetFov = boostActive && this.raceNitroPct > 2 ? 71 : 60;
         if (Math.abs(this.camera.fov - targetFov) > 0.2) {
           this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 6);
           this.camera.updateProjectionMatrix();
         }
+        const shakeX = (Math.random() - 0.5) * this.cameraShake * 0.9;
+        const shakeY = (Math.random() - 0.5) * this.cameraShake * 0.7;
+        const camBaseY =
+          layoutMode === 'tank_blitz'
+            ? 5.2
+            : layoutMode === 'mech_titan'
+              ? 7.6
+              : layoutMode === 'battleship_yamato'
+                ? 8.4
+                : this.playerFlightY + 3.2;
         this.camera.position.set(
-          this.playerCarX * 0.78,
-          this.playerFlightY + 3.2,
-          28.5 + (boostActive && this.raceNitroPct > 2 ? 0.9 : 0)
+          this.playerCarX * 0.78 + shakeX,
+          camBaseY + shakeY,
+          (layoutMode === 'battleship_yamato' ? 32.5 : 28.5) + (boostActive && this.raceNitroPct > 2 ? 0.9 : 0)
         );
-        this.camera.lookAt(this.playerCarX * 0.92, this.playerFlightY - 0.3, -24.0);
+        this.camera.lookAt(
+          this.playerCarX * 0.92,
+          isGroundVehicle ? (layoutMode === 'battleship_yamato' ? 3.0 : 2.4) : this.playerFlightY - 0.3,
+          -26.0
+        );
       } else if (layoutMode === 'soccer_stadium') {
         // Playable 5v5 Arcade Soccer Stadium: WASD/Arrows move hero #10, Space/Click kicks ball toward goal
         this.soccerMatchSec += dt;
@@ -4291,10 +6796,24 @@ export class GameBenchService {
         shotsFired: this.shotsFired,
         targetsHit: this.targetsHit,
         isRacingMode: this.isRacingScene(gameMeta.layoutMode) || this.isFlightScene(gameMeta.layoutMode),
+        isCombatMode: this.isCombatScene(gameMeta.layoutMode) || this.isFlightScene(gameMeta.layoutMode),
         isSoccerMode: this.isSoccerScene(gameMeta.layoutMode),
         raceSpeedKmh: this.raceSpeedKmh,
         raceLap: this.raceLap,
+        raceTotalLaps: this.raceTotalLaps,
         raceNitroPct: this.raceNitroPct,
+        racePosition: this.racePosition,
+        gameScore: this.gameScore,
+        gameCombo: this.gameCombo,
+        gameStage: this.gameStage,
+        gameMaxStage: this.gameMaxStage,
+        gameHealthPct: Math.round(this.gameHealthPct),
+        gameMissionText: this.gameMissionText,
+        gameBannerText: performance.now() < this.gameBannerUntilTs ? this.gameBannerText : '',
+        gameTargetsDestroyed: this.gameTargetsDestroyed,
+        gameGatesPassed: this.gameGatesPassed,
+        targetLocked: this.targetLocked,
+        sfxEnabled: gameAudioService.isEnabled(),
         soccerScoreHome: this.soccerScoreHome,
         soccerScoreAway: this.soccerScoreAway,
         soccerBallSpeedKmh: this.soccerBallSpeedKmh,
@@ -4340,6 +6859,8 @@ export class GameBenchService {
     }
     this.composer?.dispose();
     this.composer = null;
+    this.composerRT?.dispose();
+    this.composerRT = null;
     this.bloomPass = null;
     this.envRT?.dispose();
     this.envRT = null;
