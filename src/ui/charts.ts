@@ -1,0 +1,689 @@
+import { BatteryHistoryPoint, BatteryPowerCycleEntry } from '../types';
+
+export interface LineSeries {
+  label: string;
+  color: string;
+  values: number[];
+  unit: string;
+  min?: number;
+  max?: number;
+  dashed?: boolean;
+}
+
+function escapeAttr(val: string): string {
+  return val
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+export function renderDualLineChart(
+  seriesList: LineSeries[],
+  xLabels: string[],
+  height = 175
+): string {
+  const width = 680;
+  const padL = 44;
+  const padR = 44;
+  const padT = 18;
+  const padB = 26;
+  const plotW = width - padL - padR;
+  const plotH = height - padT - padB;
+
+  const primary = seriesList[0];
+  const secondary = seriesList[1];
+  const count = Math.max(primary?.values.length ?? 0, secondary?.values.length ?? 0);
+
+  if (count < 2) {
+    return `
+      <div class="chart-box" style="height:${height}px;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:12px;">
+        Uruchom test, aby zarejestrować przebieg telemetrii w czasie rzeczywistym.
+      </div>
+    `;
+  }
+
+  const getBounds = (s: LineSeries) => {
+    const min = s.min ?? Math.floor(Math.min(...s.values) * 0.9);
+    const max = s.max ?? Math.ceil(Math.max(...s.values, min + 1) * 1.08);
+    return { min, max: Math.max(max, min + 1) };
+  };
+
+  const buildPath = (s: LineSeries, bounds: { min: number; max: number }) => {
+    return s.values
+      .map((val, i) => {
+        const x = padL + (i / Math.max(1, s.values.length - 1)) * plotW;
+        const norm = (val - bounds.min) / (bounds.max - bounds.min);
+        const y = padT + plotH - Math.max(0, Math.min(1, norm)) * plotH;
+        return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(' ');
+  };
+
+  const b0 = getBounds(primary);
+  const path0 = buildPath(primary, b0);
+  const b1 = secondary ? getBounds(secondary) : null;
+  const path1 = secondary && b1 ? buildPath(secondary, b1) : '';
+
+  const gridLines = [0, 0.25, 0.5, 0.75, 1]
+    .map((f) => {
+      const y = padT + plotH * (1 - f);
+      const valL = (b0.min + (b0.max - b0.min) * f).toFixed(0);
+      const valR = b1 ? (b1.min + (b1.max - b1.min) * f).toFixed(0) : '';
+      return `
+        <line x1="${padL}" y1="${y.toFixed(1)}" x2="${width - padR}" y2="${y.toFixed(1)}" stroke="var(--border-hairline)" stroke-width="1" />
+        <text x="${padL - 8}" y="${(y + 4).toFixed(1)}" text-anchor="end" fill="var(--text-muted)" font-size="10" font-family="JetBrains Mono, monospace">${valL}</text>
+        ${
+          b1
+            ? `<text x="${width - padR + 8}" y="${(y + 4).toFixed(1)}" text-anchor="start" fill="var(--text-muted)" font-size="10" font-family="JetBrains Mono, monospace">${valR}</text>`
+            : ''
+        }
+      `;
+    })
+    .join('');
+
+  const lastLabel = xLabels[xLabels.length - 1] || '';
+  const firstLabel = xLabels[0] || '';
+  const midLabel = xLabels[Math.floor(xLabels.length / 2)] || '';
+
+  return `
+    <div class="chart-box">
+      <div class="row-between" style="margin-bottom:8px;font-size:12px;">
+        <div class="row-wrap" style="gap:16px;">
+          ${seriesList
+            .map(
+              (s) => `
+              <span style="display:inline-flex;align-items:center;gap:6px;color:var(--text-secondary);">
+                <span style="display:inline-block;width:14px;height:2px;background:${s.color};"></span>
+                ${s.label} (${s.unit})
+              </span>`
+            )
+            .join('')}
+        </div>
+        <span class="font-mono" style="color:var(--text-muted);font-size:11px;">${count} próbek</span>
+      </div>
+      <svg viewBox="0 0 ${width} ${height}" style="width:100%;height:${height}px;display:block;">
+        ${gridLines}
+        <path d="${path0}" fill="none" stroke="${primary.color}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+        ${
+          path1 && secondary
+            ? `<path d="${path1}" fill="none" stroke="${secondary.color}" stroke-width="2" ${secondary.dashed ? 'stroke-dasharray="5 4"' : ''} stroke-linejoin="round" stroke-linecap="round" />`
+            : ''
+        }
+        <text x="${padL}" y="${height - 6}" text-anchor="start" fill="var(--text-muted)" font-size="10" font-family="JetBrains Mono, monospace">${firstLabel}</text>
+        <text x="${padL + plotW / 2}" y="${height - 6}" text-anchor="middle" fill="var(--text-muted)" font-size="10" font-family="JetBrains Mono, monospace">${midLabel}</text>
+        <text x="${width - padR}" y="${height - 6}" text-anchor="end" fill="var(--text-muted)" font-size="10" font-family="JetBrains Mono, monospace">${lastLabel}</text>
+      </svg>
+    </div>
+  `;
+}
+
+export function renderBatteryHistoryChart(
+  history: BatteryHistoryPoint[],
+  height = 190
+): string {
+  const width = 680;
+  const padL = 44;
+  const padR = 44;
+  const padT = 18;
+  const padB = 26;
+  const plotW = width - padL - padR;
+  const plotH = height - padT - padB;
+
+  if (history.length < 2) {
+    return `
+      <div class="chart-box" style="height:${height}px;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:12px;">
+        Zbieranie próbek historii baterii...
+      </div>
+    `;
+  }
+
+  const maxPower = Math.max(45, ...history.map((h) => h.powerW));
+  const powerCeiling = Math.ceil((maxPower * 1.2) / 10) * 10;
+  const count = history.length;
+
+  const coords = history.map((pt, i) => {
+    const x = padL + (i / Math.max(1, count - 1)) * plotW;
+    const normLevel = Math.max(0, Math.min(1, pt.levelPct / 100));
+    const normPower = Math.max(0, Math.min(1, pt.powerW / Math.max(1, powerCeiling)));
+    const yLevel = padT + plotH - normLevel * plotH;
+    const yPower = padT + plotH - normPower * plotH;
+    const exactDate =
+      pt.dateTimeLabel ||
+      (pt.timestamp
+        ? new Date(pt.timestamp).toLocaleString('pl-PL', {
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          })
+        : pt.timeLabel);
+    return { i, x, yLevel, yPower, pt, exactDate };
+  });
+
+  const levelPath = coords
+    .map((c, idx) => `${idx === 0 ? 'M' : 'L'}${c.x.toFixed(1)},${c.yLevel.toFixed(1)}`)
+    .join(' ');
+  const powerPath = coords
+    .map((c, idx) => `${idx === 0 ? 'M' : 'L'}${c.x.toFixed(1)},${c.yPower.toFixed(1)}`)
+    .join(' ');
+
+  const gridLines = [0, 0.25, 0.5, 0.75, 1]
+    .map((f) => {
+      const y = padT + plotH * (1 - f);
+      const valL = (100 * f).toFixed(0);
+      const valR = (powerCeiling * f).toFixed(0);
+      return `
+        <line x1="${padL}" y1="${y.toFixed(1)}" x2="${width - padR}" y2="${y.toFixed(1)}" stroke="var(--border-hairline)" stroke-width="1" />
+        <text x="${padL - 8}" y="${(y + 4).toFixed(1)}" text-anchor="end" fill="var(--text-muted)" font-size="10" font-family="JetBrains Mono, monospace">${valL}</text>
+        <text x="${width - padR + 8}" y="${(y + 4).toFixed(1)}" text-anchor="start" fill="var(--text-muted)" font-size="10" font-family="JetBrains Mono, monospace">${valR}</text>
+      `;
+    })
+    .join('');
+
+  const stepW = plotW / Math.max(1, count - 1);
+  const hitColumns = coords
+    .map((c) => {
+      const rx = Math.max(padL, c.x - stepW / 2);
+      const rw = Math.min(width - padR, c.x + stepW / 2) - rx;
+      return `
+        <circle cx="${c.x.toFixed(1)}" cy="${c.yLevel.toFixed(1)}" r="2.6" fill="#10b981" opacity="0.85" pointer-events="none" />
+        <circle cx="${c.x.toFixed(1)}" cy="${c.yPower.toFixed(1)}" r="2.4" fill="#f59e0b" opacity="0.85" pointer-events="none" />
+        <rect
+          class="chart-hit-col"
+          x="${rx.toFixed(1)}"
+          y="${padT}"
+          width="${Math.max(4, rw).toFixed(1)}"
+          height="${plotH}"
+          fill="transparent"
+          data-point-idx="${c.i}"
+          data-date="${escapeAttr(c.exactDate)}"
+          data-level="${c.pt.levelPct}"
+          data-power="${c.pt.powerW.toFixed(1)}"
+          data-x="${c.x.toFixed(1)}"
+          data-y-level="${c.yLevel.toFixed(1)}"
+          data-y-power="${c.yPower.toFixed(1)}"
+        />
+      `;
+    })
+    .join('');
+
+  const firstLabel = history[0]?.timeLabel || '';
+  const midLabel = history[Math.floor(count / 2)]?.timeLabel || '';
+  const lastLabel = history[count - 1]?.timeLabel || '';
+
+  return `
+    <div class="chart-box chart-interactive-wrap" data-battery-chart-wrap="true">
+      <div class="row-between" style="margin-bottom:8px;font-size:12px;">
+        <div class="row-wrap" style="gap:16px;">
+          <span style="display:inline-flex;align-items:center;gap:6px;color:var(--text-secondary);">
+            <span style="display:inline-block;width:14px;height:2px;background:#10b981;"></span>
+            Poziom naładowania (%)
+          </span>
+          <span style="display:inline-flex;align-items:center;gap:6px;color:var(--text-secondary);">
+            <span style="display:inline-block;width:14px;height:2px;background:#f59e0b;"></span>
+            Pobór mocy (W)
+          </span>
+        </div>
+        <span class="font-mono" style="color:var(--text-muted);font-size:11px;">${count} próbek · najedź na punkt</span>
+      </div>
+      <div style="position:relative;">
+        <svg viewBox="0 0 ${width} ${height}" data-battery-chart-svg="true" style="width:100%;height:${height}px;display:block;overflow:visible;">
+          ${gridLines}
+          <path d="${levelPath}" fill="none" stroke="#10b981" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+          <path d="${powerPath}" fill="none" stroke="#f59e0b" stroke-width="2" stroke-dasharray="5 4" stroke-linejoin="round" stroke-linecap="round" />
+          <line data-chart-crosshair="true" x1="0" y1="${padT}" x2="0" y2="${padT + plotH}" stroke="var(--accent-cyan)" stroke-width="1.2" stroke-dasharray="3 3" opacity="0" pointer-events="none" />
+          <circle data-chart-active-level="true" cx="0" cy="0" r="5" fill="#10b981" stroke="var(--bg-canvas)" stroke-width="2" opacity="0" pointer-events="none" />
+          <circle data-chart-active-power="true" cx="0" cy="0" r="5" fill="#f59e0b" stroke="var(--bg-canvas)" stroke-width="2" opacity="0" pointer-events="none" />
+          ${hitColumns}
+          <text x="${padL}" y="${height - 6}" text-anchor="start" fill="var(--text-muted)" font-size="10" font-family="JetBrains Mono, monospace">${escapeAttr(firstLabel)}</text>
+          <text x="${padL + plotW / 2}" y="${height - 6}" text-anchor="middle" fill="var(--text-muted)" font-size="10" font-family="JetBrains Mono, monospace">${escapeAttr(midLabel)}</text>
+          <text x="${width - padR}" y="${height - 6}" text-anchor="end" fill="var(--text-muted)" font-size="10" font-family="JetBrains Mono, monospace">${escapeAttr(lastLabel)}</text>
+        </svg>
+        <div class="chart-tooltip" data-chart-tooltip="true" role="tooltip" hidden></div>
+      </div>
+    </div>
+  `;
+}
+
+export function bindBatteryHistoryChartTooltip(container: HTMLElement): void {
+  const hideTooltip = () => {
+    const tooltip = container.querySelector<HTMLElement>('[data-chart-tooltip]');
+    const crosshair = container.querySelector<SVGLineElement>('[data-chart-crosshair]');
+    const dotLevel = container.querySelector<SVGCircleElement>('[data-chart-active-level]');
+    const dotPower = container.querySelector<SVGCircleElement>('[data-chart-active-power]');
+    if (tooltip) tooltip.hidden = true;
+    if (crosshair) crosshair.setAttribute('opacity', '0');
+    if (dotLevel) dotLevel.setAttribute('opacity', '0');
+    if (dotPower) dotPower.setAttribute('opacity', '0');
+  };
+
+  const showForHit = (hit: Element) => {
+    const tooltip = container.querySelector<HTMLElement>('[data-chart-tooltip]');
+    const crosshair = container.querySelector<SVGLineElement>('[data-chart-crosshair]');
+    const dotLevel = container.querySelector<SVGCircleElement>('[data-chart-active-level]');
+    const dotPower = container.querySelector<SVGCircleElement>('[data-chart-active-power]');
+    if (!tooltip) return;
+
+    const dateStr = hit.getAttribute('data-date') || '';
+    const levelStr = hit.getAttribute('data-level') || '0';
+    const powerStr = hit.getAttribute('data-power') || '0.0';
+    const xVal = Number(hit.getAttribute('data-x') || '0');
+    const yLevelVal = Number(hit.getAttribute('data-y-level') || '0');
+    const yPowerVal = Number(hit.getAttribute('data-y-power') || '0');
+
+    if (crosshair) {
+      crosshair.setAttribute('x1', String(xVal));
+      crosshair.setAttribute('x2', String(xVal));
+      crosshair.setAttribute('opacity', '0.85');
+    }
+    if (dotLevel) {
+      dotLevel.setAttribute('cx', String(xVal));
+      dotLevel.setAttribute('cy', String(yLevelVal));
+      dotLevel.setAttribute('opacity', '1');
+    }
+    if (dotPower) {
+      dotPower.setAttribute('cx', String(xVal));
+      dotPower.setAttribute('cy', String(yPowerVal));
+      dotPower.setAttribute('opacity', '1');
+    }
+
+    tooltip.innerHTML = `
+      <div class="chart-tooltip-date">${escapeAttr(dateStr)}</div>
+      <div class="chart-tooltip-row">
+        <span class="chart-tooltip-label"><span class="chart-tooltip-swatch" style="background:#10b981;"></span>Naładowanie</span>
+        <strong class="font-mono status-ok">${escapeAttr(levelStr)}%</strong>
+      </div>
+      <div class="chart-tooltip-row">
+        <span class="chart-tooltip-label"><span class="chart-tooltip-swatch" style="background:#f59e0b;"></span>Pobór mocy</span>
+        <strong class="font-mono status-warn">${escapeAttr(powerStr)} W</strong>
+      </div>
+    `;
+
+    const pctX = (xVal / 680) * 100;
+    tooltip.hidden = false;
+    if (pctX > 66) {
+      tooltip.style.left = 'auto';
+      tooltip.style.right = `${Math.max(2, 100 - pctX + 2).toFixed(1)}%`;
+    } else {
+      tooltip.style.right = 'auto';
+      tooltip.style.left = `${Math.min(72, Math.max(2, pctX + 2)).toFixed(1)}%`;
+    }
+    tooltip.style.top = '8px';
+  };
+
+  container.addEventListener('mousemove', (ev) => {
+    const target = ev.target as Element | null;
+    const hit = target?.closest?.('[data-point-idx]');
+    if (hit) {
+      showForHit(hit);
+    }
+  });
+
+  container.addEventListener('mouseleave', hideTooltip);
+}
+
+export interface LinearTrendResult {
+  slope: number;
+  intercept: number;
+  predict: (x: number) => number;
+}
+
+export function computeLinearTrend(points: Array<{ x: number; y: number }>): LinearTrendResult {
+  const n = points.length;
+  if (n === 0) {
+    return { slope: 0, intercept: 0, predict: () => 0 };
+  }
+  if (n === 1) {
+    const y0 = points[0].y;
+    return { slope: 0, intercept: y0, predict: () => y0 };
+  }
+
+  let sumX = 0;
+  let sumY = 0;
+  for (const p of points) {
+    sumX += p.x;
+    sumY += p.y;
+  }
+  const meanX = sumX / n;
+  const meanY = sumY / n;
+
+  let num = 0;
+  let den = 0;
+  for (const p of points) {
+    const dx = p.x - meanX;
+    num += dx * (p.y - meanY);
+    den += dx * dx;
+  }
+
+  const slope = den > 1e-9 ? num / den : 0;
+  const intercept = meanY - slope * meanX;
+  return {
+    slope,
+    intercept,
+    predict: (x: number) => slope * x + intercept,
+  };
+}
+
+export function renderBatteryDegradationTrendChart(
+  powerCycles: BatteryPowerCycleEntry[],
+  designCapacityMWh: number,
+  height = 215
+): string {
+  const width = 680;
+  const padL = 56;
+  const padR = 26;
+  const padT = 20;
+  const padB = 28;
+  const plotW = width - padL - padR;
+  const plotH = height - padT - padB;
+
+  if (powerCycles.length === 0) {
+    return `
+      <div class="chart-box" style="height:${height}px;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:12px;">
+        Brak zarejestrowanych cykli ładowania do wyznaczenia wykresu degradacji pojemności (mWh).
+      </div>
+    `;
+  }
+
+  const sorted = [...powerCycles].sort(
+    (a, b) => a.timestamp - b.timestamp || a.cycleNumber - b.cycleNumber
+  );
+  const count = sorted.length;
+  const minTs = sorted[0].timestamp;
+  const maxTs = sorted[count - 1].timestamp;
+  const tsSpan = maxTs - minTs;
+
+  const xFractions = sorted.map((entry, idx) => {
+    if (count === 1) return 0.5;
+    if (tsSpan > 0) return (entry.timestamp - minTs) / tsSpan;
+    return idx / (count - 1);
+  });
+
+  const trendOverNormX = computeLinearTrend(
+    sorted.map((entry, idx) => ({ x: xFractions[idx], y: entry.fullChargeCapacityMWh }))
+  );
+  const trendOverCycle = computeLinearTrend(
+    sorted.map((entry, idx) => ({ x: idx, y: entry.fullChargeCapacityMWh }))
+  );
+
+  const designCap = Math.max(1000, designCapacityMWh || sorted[0].designCapacityMWh || 60000);
+  const threshold80 = Math.round(designCap * 0.8);
+
+  const capacities = sorted.map((c) => c.fullChargeCapacityMWh);
+  const trendStartYVal = trendOverNormX.predict(xFractions[0]);
+  const trendEndYVal = trendOverNormX.predict(xFractions[count - 1]);
+
+  const rawMin = Math.min(...capacities, threshold80, trendStartYVal, trendEndYVal);
+  const rawMax = Math.max(...capacities, designCap, trendStartYVal, trendEndYVal);
+  const minBound = Math.max(0, Math.floor((rawMin * 0.96) / 1000) * 1000);
+  const maxBound = Math.max(minBound + 2000, Math.ceil((rawMax * 1.02) / 1000) * 1000);
+  const spanY = Math.max(1, maxBound - minBound);
+
+  const mapY = (capMWh: number) => {
+    const norm = (capMWh - minBound) / spanY;
+    return padT + plotH - Math.max(0, Math.min(1, norm)) * plotH;
+  };
+
+  const coords = sorted.map((entry, idx) => {
+    const x = padL + xFractions[idx] * plotW;
+    const y = mapY(entry.fullChargeCapacityMWh);
+    const trendVal = Math.round(trendOverNormX.predict(xFractions[idx]));
+    const yTrend = mapY(trendVal);
+    return { idx, x, y, yTrend, trendVal, entry };
+  });
+
+  const capPath = coords
+    .map((c, i) => `${i === 0 ? 'M' : 'L'}${c.x.toFixed(1)},${c.y.toFixed(1)}`)
+    .join(' ');
+  const areaPath =
+    count >= 2
+      ? `${capPath} L${coords[count - 1].x.toFixed(1)},${(padT + plotH).toFixed(1)} L${coords[0].x.toFixed(1)},${(padT + plotH).toFixed(1)} Z`
+      : '';
+
+  const trendLineX1 = coords[0].x;
+  const trendLineY1 = mapY(trendStartYVal);
+  const trendLineX2 = coords[count - 1].x;
+  const trendLineY2 = mapY(trendEndYVal);
+  const isDegrading = trendOverCycle.slope < -1;
+  const trendColor = isDegrading ? '#f43f5e' : '#10b981';
+  const slopeLabel = `${trendOverCycle.slope >= 0 ? '+' : ''}${Math.round(trendOverCycle.slope)} mWh/cykl`;
+
+  const yDesign = mapY(designCap);
+  const yThresh80 = mapY(threshold80);
+
+  const gridLines = [0, 0.25, 0.5, 0.75, 1]
+    .map((f) => {
+      const y = padT + plotH * (1 - f);
+      const val = Math.round(minBound + spanY * f);
+      return `
+        <line x1="${padL}" y1="${y.toFixed(1)}" x2="${width - padR}" y2="${y.toFixed(1)}" stroke="var(--border-hairline)" stroke-width="1" />
+        <text x="${padL - 8}" y="${(y + 4).toFixed(1)}" text-anchor="end" fill="var(--text-muted)" font-size="10" font-family="JetBrains Mono, monospace">${val.toLocaleString('pl-PL')}</text>
+      `;
+    })
+    .join('');
+
+  const hitColumns = coords
+    .map((c, idx) => {
+      const prevX = idx > 0 ? (coords[idx - 1].x + c.x) / 2 : padL;
+      const nextX = idx < count - 1 ? (c.x + coords[idx + 1].x) / 2 : width - padR;
+      const rx = Math.max(padL, prevX);
+      const rw = Math.max(10, Math.min(width - padR, nextX) - rx);
+      return `
+        <circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="3.8" fill="#06b6d4" stroke="var(--bg-canvas)" stroke-width="1.5" pointer-events="none" />
+        <rect
+          class="chart-hit-col"
+          x="${rx.toFixed(1)}"
+          y="${padT}"
+          width="${rw.toFixed(1)}"
+          height="${plotH}"
+          fill="transparent"
+          data-deg-idx="${c.idx}"
+          data-cycle="#${c.entry.cycleNumber}"
+          data-date="${escapeAttr(c.entry.dateLabel)}"
+          data-full-cap="${c.entry.fullChargeCapacityMWh}"
+          data-trend-cap="${c.trendVal}"
+          data-wear="${c.entry.cumulativeWearPct.toFixed(1)}"
+          data-delta="${c.entry.degradationFromPrevMWh}"
+          data-x="${c.x.toFixed(1)}"
+          data-y="${c.y.toFixed(1)}"
+        />
+      `;
+    })
+    .join('');
+
+  const firstLbl = `${sorted[0].dateLabel} (#${sorted[0].cycleNumber})`;
+  const midIdx = Math.floor(count / 2);
+  const midLbl = count >= 3 ? `${sorted[midIdx].dateLabel} (#${sorted[midIdx].cycleNumber})` : '';
+  const lastLbl =
+    count >= 2 ? `${sorted[count - 1].dateLabel} (#${sorted[count - 1].cycleNumber})` : '';
+
+  return `
+    <div class="chart-box chart-interactive-wrap" data-degradation-chart-wrap="true">
+      <div class="row-between" style="margin-bottom:8px;font-size:12px;flex-wrap:wrap;gap:8px;">
+        <div class="row-wrap" style="gap:14px;">
+          <span style="display:inline-flex;align-items:center;gap:6px;color:var(--text-secondary);">
+            <span style="display:inline-block;width:14px;height:2.5px;background:#06b6d4;"></span>
+            Pełna pojemność (mWh)
+          </span>
+          <span style="display:inline-flex;align-items:center;gap:6px;color:var(--text-secondary);">
+            <span style="display:inline-block;width:14px;height:0;border-top:2px dashed ${trendColor};"></span>
+            Linia trendu (<strong class="font-mono" style="color:${trendColor};">${slopeLabel}</strong>)
+          </span>
+          <span style="display:inline-flex;align-items:center;gap:6px;color:var(--text-muted);font-size:11px;">
+            <span style="display:inline-block;width:12px;height:0;border-top:1.5px dashed #f59e0b;"></span>
+            Próg 80% (${threshold80.toLocaleString('pl-PL')} mWh)
+          </span>
+        </div>
+        <span class="font-mono" style="color:var(--text-muted);font-size:11px;">${count} cykli · najedź na punkt</span>
+      </div>
+      <div style="position:relative;">
+        <svg viewBox="0 0 ${width} ${height}" data-degradation-chart-svg="true" style="width:100%;height:${height}px;display:block;overflow:visible;">
+          ${gridLines}
+          <line x1="${padL}" y1="${yDesign.toFixed(1)}" x2="${width - padR}" y2="${yDesign.toFixed(1)}" stroke="var(--text-muted)" stroke-width="1" stroke-dasharray="2 4" opacity="0.55" />
+          <text x="${width - padR - 4}" y="${Math.max(padT + 10, yDesign - 4).toFixed(1)}" text-anchor="end" fill="var(--text-muted)" font-size="9.5" font-family="JetBrains Mono, monospace">Fabr. ${designCap.toLocaleString('pl-PL')} mWh</text>
+          <line x1="${padL}" y1="${yThresh80.toFixed(1)}" x2="${width - padR}" y2="${yThresh80.toFixed(1)}" stroke="#f59e0b" stroke-width="1.2" stroke-dasharray="4 4" opacity="0.7" />
+          <text x="${width - padR - 4}" y="${Math.max(padT + 10, yThresh80 - 4).toFixed(1)}" text-anchor="end" fill="#f59e0b" font-size="9.5" font-family="JetBrains Mono, monospace">Próg 80%</text>
+          ${areaPath ? `<path d="${areaPath}" fill="rgba(6, 182, 212, 0.11)" />` : ''}
+          ${count >= 2 ? `<path d="${capPath}" fill="none" stroke="#06b6d4" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" />` : ''}
+          ${
+            count >= 2
+              ? `<line data-deg-trend-line="true" x1="${trendLineX1.toFixed(1)}" y1="${trendLineY1.toFixed(1)}" x2="${trendLineX2.toFixed(1)}" y2="${trendLineY2.toFixed(1)}" stroke="${trendColor}" stroke-width="2" stroke-dasharray="6 4" opacity="0.92" />`
+              : ''
+          }
+          <line data-deg-crosshair="true" x1="0" y1="${padT}" x2="0" y2="${padT + plotH}" stroke="var(--accent-cyan)" stroke-width="1.2" stroke-dasharray="3 3" opacity="0" pointer-events="none" />
+          <circle data-deg-active-dot="true" cx="0" cy="0" r="5.5" fill="#06b6d4" stroke="var(--bg-canvas)" stroke-width="2" opacity="0" pointer-events="none" />
+          ${hitColumns}
+          <text x="${padL}" y="${height - 6}" text-anchor="start" fill="var(--text-muted)" font-size="10" font-family="JetBrains Mono, monospace">${escapeAttr(firstLbl)}</text>
+          ${midLbl ? `<text x="${padL + plotW / 2}" y="${height - 6}" text-anchor="middle" fill="var(--text-muted)" font-size="10" font-family="JetBrains Mono, monospace">${escapeAttr(midLbl)}</text>` : ''}
+          ${lastLbl ? `<text x="${width - padR}" y="${height - 6}" text-anchor="end" fill="var(--text-muted)" font-size="10" font-family="JetBrains Mono, monospace">${escapeAttr(lastLbl)}</text>` : ''}
+        </svg>
+        <div class="chart-tooltip" data-deg-tooltip="true" role="tooltip" hidden></div>
+      </div>
+    </div>
+  `;
+}
+
+export function bindBatteryDegradationChartTooltip(container: HTMLElement): void {
+  const hideTooltip = () => {
+    const tooltip = container.querySelector<HTMLElement>('[data-deg-tooltip]');
+    const crosshair = container.querySelector<SVGLineElement>('[data-deg-crosshair]');
+    const activeDot = container.querySelector<SVGCircleElement>('[data-deg-active-dot]');
+    if (tooltip) tooltip.hidden = true;
+    if (crosshair) crosshair.setAttribute('opacity', '0');
+    if (activeDot) activeDot.setAttribute('opacity', '0');
+  };
+
+  const showForHit = (hit: Element) => {
+    const tooltip = container.querySelector<HTMLElement>('[data-deg-tooltip]');
+    const crosshair = container.querySelector<SVGLineElement>('[data-deg-crosshair]');
+    const activeDot = container.querySelector<SVGCircleElement>('[data-deg-active-dot]');
+    if (!tooltip) return;
+
+    const cycleStr = hit.getAttribute('data-cycle') || '';
+    const dateStr = hit.getAttribute('data-date') || '';
+    const fullCap = Number(hit.getAttribute('data-full-cap') || '0');
+    const trendCap = Number(hit.getAttribute('data-trend-cap') || '0');
+    const wearStr = hit.getAttribute('data-wear') || '0.0';
+    const deltaVal = Number(hit.getAttribute('data-delta') || '0');
+    const xVal = Number(hit.getAttribute('data-x') || '0');
+    const yVal = Number(hit.getAttribute('data-y') || '0');
+
+    if (crosshair) {
+      crosshair.setAttribute('x1', String(xVal));
+      crosshair.setAttribute('x2', String(xVal));
+      crosshair.setAttribute('opacity', '0.85');
+    }
+    if (activeDot) {
+      activeDot.setAttribute('cx', String(xVal));
+      activeDot.setAttribute('cy', String(yVal));
+      activeDot.setAttribute('opacity', '1');
+    }
+
+    const deltaSign = deltaVal > 0 ? '+' : '';
+    const deltaCls = deltaVal < -350 ? 'status-err' : deltaVal < 0 ? 'status-warn' : 'status-ok';
+
+    tooltip.innerHTML = `
+      <div class="chart-tooltip-date">Cykl ${escapeAttr(cycleStr)} · ${escapeAttr(dateStr)}</div>
+      <div class="chart-tooltip-row">
+        <span class="chart-tooltip-label"><span class="chart-tooltip-swatch" style="background:#06b6d4;"></span>Pełna pojemność</span>
+        <strong class="font-mono status-cyan">${fullCap.toLocaleString('pl-PL')} mWh</strong>
+      </div>
+      <div class="chart-tooltip-row">
+        <span class="chart-tooltip-label"><span class="chart-tooltip-swatch" style="background:#f43f5e;"></span>Trend (regresja)</span>
+        <strong class="font-mono">${trendCap.toLocaleString('pl-PL')} mWh</strong>
+      </div>
+      <div class="chart-tooltip-row">
+        <span class="chart-tooltip-label">Zużycie (Wear)</span>
+        <strong class="font-mono">${escapeAttr(wearStr)}%</strong>
+      </div>
+      <div class="chart-tooltip-row">
+        <span class="chart-tooltip-label">Zmiana vs poprz.</span>
+        <strong class="font-mono ${deltaCls}">${deltaSign}${deltaVal.toLocaleString('pl-PL')} mWh</strong>
+      </div>
+    `;
+
+    const pctX = (xVal / 680) * 100;
+    tooltip.hidden = false;
+    if (pctX > 64) {
+      tooltip.style.left = 'auto';
+      tooltip.style.right = `${Math.max(2, 100 - pctX + 2).toFixed(1)}%`;
+    } else {
+      tooltip.style.right = 'auto';
+      tooltip.style.left = `${Math.min(70, Math.max(2, pctX + 2)).toFixed(1)}%`;
+    }
+    tooltip.style.top = '8px';
+  };
+
+  container.addEventListener('mousemove', (ev) => {
+    const target = ev.target as Element | null;
+    const hit = target?.closest?.('[data-deg-idx]');
+    if (hit) {
+      showForHit(hit);
+    }
+  });
+
+  container.addEventListener('mouseleave', hideTooltip);
+}
+
+export function renderRadarChart(axes: Array<{ label: string; value: number }>): string {
+  const size = 270;
+  const cx = size / 2;
+  const cy = size / 2;
+  const maxR = 92;
+  const n = axes.length;
+
+  const pointAt = (i: number, ratio: number) => {
+    const angle = -Math.PI / 2 + (i * Math.PI * 2) / n;
+    return {
+      x: cx + Math.cos(angle) * maxR * ratio,
+      y: cy + Math.sin(angle) * maxR * ratio,
+    };
+  };
+
+  const rings = [0.25, 0.5, 0.75, 1]
+    .map((r) => {
+      const pts = axes.map((_, i) => {
+        const p = pointAt(i, r);
+        return `${p.x.toFixed(1)},${p.y.toFixed(1)}`;
+      });
+      return `<polygon points="${pts.join(' ')}" fill="none" stroke="var(--border-hairline)" stroke-width="1" />`;
+    })
+    .join('');
+
+  const spokes = axes
+    .map((a, i) => {
+      const outer = pointAt(i, 1);
+      const lbl = pointAt(i, 1.24);
+      return `
+        <line x1="${cx}" y1="${cy}" x2="${outer.x.toFixed(1)}" y2="${outer.y.toFixed(1)}" stroke="var(--border-hairline)" stroke-width="1" />
+        <text x="${lbl.x.toFixed(1)}" y="${(lbl.y + 4).toFixed(1)}" text-anchor="middle" fill="var(--text-secondary)" font-size="11" font-family="JetBrains Mono, monospace">${a.label} (${a.value})</text>
+      `;
+    })
+    .join('');
+
+  const dataPts = axes
+    .map((a, i) => {
+      const p = pointAt(i, Math.max(0.08, Math.min(1, a.value / 100)));
+      return `${p.x.toFixed(1)},${p.y.toFixed(1)}`;
+    })
+    .join(' ');
+
+  const dots = axes
+    .map((a, i) => {
+      const p = pointAt(i, Math.max(0.08, Math.min(1, a.value / 100)));
+      return `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3.5" fill="var(--accent-cyan)" />`;
+    })
+    .join('');
+
+  return `
+    <svg viewBox="0 0 ${size} ${size}" style="width:100%;max-width:290px;height:auto;margin:0 auto;display:block;">
+      ${rings}
+      ${spokes}
+      <polygon points="${dataPts}" fill="var(--accent-cyan-dim)" stroke="var(--accent-cyan)" stroke-width="2" />
+      ${dots}
+    </svg>
+  `;
+}
