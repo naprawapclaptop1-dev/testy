@@ -18,6 +18,8 @@ export interface PcSuitabilityInputContext {
   game: GameBenchMetrics;
 }
 
+export type GamePlayabilityTier = 'ultra' | 'smooth' | 'playable' | 'low';
+
 export interface GameFpsPrediction {
   id: string;
   title: string;
@@ -28,6 +30,10 @@ export interface GameFpsPrediction {
   fps1440pQuality: number;
   fpsDlssFg: number;
   recommendedSetting: string;
+  tier: GamePlayabilityTier;
+  tierLabel: string;
+  canRunSmoothly: boolean;
+  vramWarning: string | null;
 }
 
 export interface PcSuitabilityCategory {
@@ -37,9 +43,42 @@ export interface PcSuitabilityCategory {
   score: number;
   verdict: 'IDEALNY (90-100%)' | 'BARDZO DOBRY (75-89%)' | 'DOBRY (55-74%)' | 'PODSTAWOWY (<55%)';
   badgeClass: string;
+  fillClass: string;
   summary: string;
   bottleneckNote: string;
 }
+
+export interface HardwarePowerIndex {
+  cpuScore: number;
+  gpuScore: number;
+  ramScore: number;
+  diskScore: number;
+  vramEstGb: number;
+  isHighEndGpu: boolean;
+  gpuLabel: string;
+  cpuCores: number;
+  cpuTested: boolean;
+  gpuTested: boolean;
+  ramTested: boolean;
+  diskTested: boolean;
+  testedCount: number;
+  benchGpuFps: number;
+  benchGpuScore: number;
+  perfFactor: number;
+  baselinePerfFactor: number;
+  calibrationDeltaPct: number;
+}
+
+export interface GamePlayabilitySummary {
+  total: number;
+  ultraCount: number;
+  smoothCount: number;
+  playableCount: number;
+  lowCount: number;
+  smoothOrBetterCount: number;
+}
+
+type GameFilterMode = 'all' | 'smooth60' | 'ultra120' | 'esport' | 'ue5_rt';
 
 interface OptimizerState {
   gpuTier: string;
@@ -48,8 +87,10 @@ interface OptimizerState {
   refreshHz: 60 | 120 | 144 | 165 | 240;
   gameProfile: 'esport' | 'ue5_single' | 'aaa_rt';
   selectedTrendGameId: string;
+  gameFilter: GameFilterMode;
   targetFps: number;
   appliedFeedback: string | null;
+  userCustomizedTier: boolean;
 }
 
 const optimizerState: OptimizerState = {
@@ -59,73 +100,176 @@ const optimizerState: OptimizerState = {
   refreshHz: 144,
   gameProfile: 'ue5_single',
   selectedTrendGameId: 'cs2',
+  gameFilter: 'all',
   targetFps: 144,
   appliedFeedback: null,
+  userCustomizedTier: false,
 };
 
-function computeHardwarePowerIndex(ctx: PcSuitabilityInputContext): {
-  cpuScore: number;
-  gpuScore: number;
-  ramScore: number;
-  diskScore: number;
+function escHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function detectGpuClass(rendererRaw: string): {
+  gpuBase: number;
   vramEstGb: number;
-  isHighEndGpu: boolean;
-  gpuLabel: string;
-  cpuCores: number;
+  defaultTier: string;
+  defaultVramOption: number;
 } {
-  const gpuLabel = ctx.specs?.gpuRenderer || ctx.gpu.rendererName || 'Akcelerator 3D WebGL2';
-  const renderer = gpuLabel.toLowerCase();
-  const cores = ctx.specs?.cpuCores || ctx.cpu.coresUsed || 8;
+  const renderer = rendererRaw.toLowerCase();
+  if (/5090|4090|7900\s*xtx|3090\s*ti|3090/.test(renderer)) {
+    return { gpuBase: 94, vramEstGb: 24, defaultTier: 'rtx4090_7900xtx', defaultVramOption: 16 };
+  }
+  if (/5080|4080|7900\s*xt|9070\s*xt|6950|6900/.test(renderer)) {
+    return { gpuBase: 90, vramEstGb: 16, defaultTier: 'rtx4090_7900xtx', defaultVramOption: 16 };
+  }
+  if (/5070|4070|7800|7900\s*gre|9070|6800|3080/.test(renderer)) {
+    return { gpuBase: 80, vramEstGb: 12, defaultTier: 'rtx4070_7800xt', defaultVramOption: 12 };
+  }
+  if (/4060\s*ti|3070|7700|6750|6700|2080/.test(renderer)) {
+    return { gpuBase: 72, vramEstGb: 12, defaultTier: 'rtx4070_7800xt', defaultVramOption: 12 };
+  }
+  if (/4060|3060|7600|6650|6600|2070|arc\s*a7|arc\s*b5/.test(renderer)) {
+    return { gpuBase: 64, vramEstGb: 8, defaultTier: 'rtx4060_7600', defaultVramOption: 8 };
+  }
+  if (/4050|3050|2060|1660|1650|1080|1070|1060|rx\s*580|rx\s*570|6500|5600|5500/.test(renderer)) {
+    return { gpuBase: 48, vramEstGb: 6, defaultTier: 'gtx1650_igpu', defaultVramOption: 6 };
+  }
+  if (/780m|680m|890m|apple\s*m[1-4]|arc\s*graphics/.test(renderer)) {
+    return { gpuBase: 42, vramEstGb: 6, defaultTier: 'gtx1650_igpu', defaultVramOption: 6 };
+  }
+  if (/intel|uhd|iris|hd\s*graphics|vega|radeon\(tm\)\s*graphics|swiftshader|llvmpipe|microsoft\s*basic/.test(renderer)) {
+    return { gpuBase: 28, vramEstGb: 4, defaultTier: 'gtx1650_igpu', defaultVramOption: 6 };
+  }
+  return { gpuBase: 68, vramEstGb: 8, defaultTier: 'rtx4060_7600', defaultVramOption: 8 };
+}
+
+export function hasAnyBenchmarkResults(ctx: PcSuitabilityInputContext): boolean {
+  const cpuTested = (ctx.cpu?.multiCoreScore ?? 0) > 0 || (ctx.cpu?.overallScore ?? 0) > 0;
+  const ramTested = (ctx.ram?.overallScore ?? 0) > 0 || (ctx.ram?.bandwidthReadMBs ?? 0) > 0;
+  const diskTested = (ctx.disk?.overallScore ?? 0) > 0 || (ctx.disk?.seqReadMBs ?? 0) > 0;
+  const gpuTested =
+    (ctx.gpu?.avgFps ?? 0) > 0 ||
+    (ctx.gpu?.overallScore ?? 0) > 0 ||
+    (ctx.game?.avgFps ?? 0) > 0 ||
+    (ctx.game?.overallScore ?? 0) > 0;
+  return cpuTested || ramTested || diskTested || gpuTested;
+}
+
+export function computeHardwarePowerIndex(ctx: PcSuitabilityInputContext): HardwarePowerIndex {
+  const gpuLabel = ctx.specs?.gpuRenderer || ctx.gpu?.rendererName || 'Akcelerator 3D WebGL2';
+  const cores = ctx.specs?.cpuCores || ctx.cpu?.coresUsed || 8;
   const memGb = typeof ctx.specs?.deviceMemory === 'number' ? ctx.specs.deviceMemory : 16;
 
-  let gpuBase = 76;
-  let vramEstGb = 12;
-  if (/7900|4090|4080|5090|5080|6950|3090/.test(renderer)) {
-    gpuBase = 98;
-    vramEstGb = 24;
-  } else if (/4070|7800|3080|6800|7700|4060 ti/.test(renderer)) {
-    gpuBase = 86;
-    vramEstGb = 16;
-  } else if (/4060|3060|7600|6600|2070|arc a7/.test(renderer)) {
-    gpuBase = 74;
-    vramEstGb = 8;
-  } else if (/intel|uhd|iris|vega|radeon\(tm\) graphics|apple m/.test(renderer)) {
-    gpuBase = 50;
-    vramEstGb = 6;
+  const gpuClass = detectGpuClass(gpuLabel);
+  if (!optimizerState.userCustomizedTier) {
+    optimizerState.gpuTier = gpuClass.defaultTier;
+    optimizerState.vramGb = gpuClass.defaultVramOption;
   }
 
-  const benchGpuFps = ctx.gpu.avgFps || ctx.game.avgFps || ctx.game.fps || 0;
-  const gpuScore = benchGpuFps > 20
-    ? Math.min(100, Math.round(gpuBase * 0.65 + Math.min(100, (benchGpuFps / 140) * 100) * 0.35))
-    : gpuBase;
+  const cpuTested = (ctx.cpu?.multiCoreScore ?? 0) > 0 || (ctx.cpu?.overallScore ?? 0) > 0;
+  const ramTested = (ctx.ram?.overallScore ?? 0) > 0 || (ctx.ram?.bandwidthReadMBs ?? 0) > 0;
+  const diskTested = (ctx.disk?.overallScore ?? 0) > 0 || (ctx.disk?.seqReadMBs ?? 0) > 0;
 
-  const cpuBenchScore = ctx.cpu.multiCoreScore > 0
-    ? Math.min(100, Math.round(ctx.cpu.multiCoreScore / 110))
-    : Math.min(96, 48 + cores * 3);
+  const benchGpuFps = Math.max(
+    ctx.gpu?.avgFps || 0,
+    ctx.game?.avgFps || 0,
+    ctx.gpu?.fps || 0,
+    ctx.game?.fps || 0
+  );
+  const benchGpuScore = Math.max(ctx.gpu?.overallScore || 0, ctx.game?.overallScore || 0);
+  const gpuTested = benchGpuFps > 0 || benchGpuScore > 0;
 
-  const ramBenchScore = ctx.ram.overallScore > 0
-    ? ctx.ram.overallScore
-    : Math.min(95, 55 + Math.min(32, memGb) * 1.2);
+  // Conservative uncalibrated baseline (used before each subsystem is actually tested)
+  const baselineGpuScore = Math.max(22, Math.round(gpuClass.gpuBase * 0.84));
+  const baselineCpuScore = Math.max(30, Math.min(78, Math.round(36 + cores * 1.8)));
+  const baselineRamScore = Math.max(40, Math.min(76, Math.round(50 + Math.min(32, memGb) * 0.8)));
+  const baselineDiskScore = 66;
 
-  const diskBenchScore = ctx.disk.overallScore > 0
-    ? ctx.disk.overallScore
-    : 82;
+  // Real benchmark-calibrated GPU score (can reach up to 122 on flagship GPUs with high uncapped FPS/score,
+  // or drop sharply if the GPU actually struggles in the WebGL2 3D test)
+  let gpuScore = baselineGpuScore;
+  if (gpuTested) {
+    const isUncapped = ctx.gpu?.fpsMode === 'uncapped' || ctx.game?.fpsMode === 'uncapped';
+    const stabilityFactor =
+      (ctx.gpu?.stabilityPct || ctx.game?.stabilityPct || 90) >= 85
+        ? 1.03
+        : (ctx.gpu?.stabilityPct || ctx.game?.stabilityPct || 90) < 65
+          ? 0.88
+          : 0.96;
+
+    // Normalize FPS against realistic WebGL2 stress workload (uncapped high-end reaches 140-300+ FPS; VSync caps at monitor Hz)
+    const fpsNorm = isUncapped
+      ? Math.min(126, Math.max(18, (benchGpuFps / 120) * 86))
+      : Math.min(108, Math.max(18, (benchGpuFps / 60) * 74));
+
+    const scoreNorm = benchGpuScore > 0 ? Math.min(118, benchGpuScore * 1.08) : fpsNorm;
+    const measuredComposite = (fpsNorm * 0.52 + scoreNorm * 0.48) * stabilityFactor;
+
+    // Weight 65% real measured benchmark + 35% detected GPU class so actual test results clearly drive predictions
+    gpuScore = Math.max(18, Math.min(124, Math.round(measuredComposite * 0.65 + gpuClass.gpuBase * 0.35)));
+  }
+
+  // Real benchmark-calibrated CPU score
+  let cpuScore = baselineCpuScore;
+  if (cpuTested) {
+    const mcNorm =
+      (ctx.cpu?.multiCoreScore ?? 0) > 0
+        ? Math.min(115, Math.max(22, Math.round((ctx.cpu.multiCoreScore / 95) * 1.0)))
+        : baselineCpuScore;
+    const overallNorm = (ctx.cpu?.overallScore ?? 0) > 0 ? Math.min(110, Math.round(ctx.cpu.overallScore * 1.05)) : mcNorm;
+    cpuScore = Math.max(22, Math.min(115, Math.round(mcNorm * 0.55 + overallNorm * 0.45)));
+  }
+
+  // Real benchmark-calibrated RAM score
+  let ramScore = baselineRamScore;
+  if (ramTested) {
+    const bwBonus = (ctx.ram?.bandwidthReadMBs ?? 0) > 0 ? Math.min(105, Math.round((ctx.ram.bandwidthReadMBs / 2400) * 88)) : 75;
+    const baseRam = (ctx.ram?.overallScore ?? 0) > 0 ? ctx.ram.overallScore : bwBonus;
+    ramScore = Math.max(25, Math.min(108, Math.round(baseRam * 0.75 + bwBonus * 0.25)));
+  }
+
+  // Real benchmark-calibrated Disk score
+  let diskScore = baselineDiskScore;
+  if (diskTested) {
+    const seqNorm = (ctx.disk?.seqReadMBs ?? 0) > 0 ? Math.min(105, Math.round((ctx.disk.seqReadMBs / 1400) * 90)) : 75;
+    diskScore = Math.max(30, Math.min(105, Math.round(((ctx.disk?.overallScore ?? seqNorm) * 0.7 + seqNorm * 0.3))));
+  }
+
+  const testedCount = [cpuTested, gpuTested, ramTested, diskTested].filter(Boolean).length;
+  const baselinePerfFactor = (baselineGpuScore * 0.68 + baselineCpuScore * 0.22 + baselineRamScore * 0.1) / 85;
+  const perfFactor = (gpuScore * 0.68 + cpuScore * 0.22 + ramScore * 0.1) / 85;
+  const calibrationDeltaPct =
+    baselinePerfFactor > 0 ? Math.round(((perfFactor - baselinePerfFactor) / baselinePerfFactor) * 100) : 0;
 
   return {
-    cpuScore: Math.max(35, Math.min(100, cpuBenchScore)),
-    gpuScore: Math.max(30, Math.min(100, gpuScore)),
-    ramScore: Math.max(40, Math.min(100, ramBenchScore)),
-    diskScore: Math.max(45, Math.min(100, diskBenchScore)),
-    vramEstGb,
+    cpuScore,
+    gpuScore,
+    ramScore,
+    diskScore,
+    vramEstGb: gpuClass.vramEstGb,
     isHighEndGpu: gpuScore >= 82,
     gpuLabel,
     cpuCores: cores,
+    cpuTested,
+    gpuTested,
+    ramTested,
+    diskTested,
+    testedCount,
+    benchGpuFps: Math.round(benchGpuFps),
+    benchGpuScore: Math.round(benchGpuScore),
+    perfFactor,
+    baselinePerfFactor,
+    calibrationDeltaPct,
   };
 }
 
 export function predictPlayableGames(ctx: PcSuitabilityInputContext): GameFpsPrediction[] {
   const hw = computeHardwarePowerIndex(ctx);
-  const perfFactor = (hw.gpuScore * 0.68 + hw.cpuScore * 0.22 + hw.ramScore * 0.10) / 85;
 
   const catalog: Array<{
     id: string;
@@ -137,6 +281,7 @@ export function predictPlayableGames(ctx: PcSuitabilityInputContext): GameFpsPre
     base1440: number;
     dlssFgMult: number;
     recommendedSetting: string;
+    cpuHeavy?: boolean;
   }> = [
     {
       id: 'cs2',
@@ -144,10 +289,11 @@ export function predictPlayableGames(ctx: PcSuitabilityInputContext): GameFpsPre
       engine: 'Source 2 · DX11/Vulkan',
       genre: 'E-Sport / Shooter',
       vramRecommendedGb: 6,
-      base1080: 310,
-      base1440: 235,
-      dlssFgMult: 1.18,
+      base1080: 300,
+      base1440: 228,
+      dlssFgMult: 1.16,
       recommendedSetting: 'Natywne + Reflex Boost · FG Wył. · Cienie High · Limit 3 kl. poniżej Hz',
+      cpuHeavy: true,
     },
     {
       id: 'valorant',
@@ -155,10 +301,11 @@ export function predictPlayableGames(ctx: PcSuitabilityInputContext): GameFpsPre
       engine: 'UE4 Esports / Custom',
       genre: 'E-Sport / Shooter',
       vramRecommendedGb: 4,
-      base1080: 380,
-      base1440: 295,
+      base1080: 365,
+      base1440: 280,
       dlssFgMult: 1.12,
       recommendedSetting: 'Natywne 100% · NVIDIA Reflex ON + Boost · Motion Blur Wył.',
+      cpuHeavy: true,
     },
     {
       id: 'forza5',
@@ -166,9 +313,9 @@ export function predictPlayableGames(ctx: PcSuitabilityInputContext): GameFpsPre
       engine: 'ForzaTech · DX12',
       genre: 'Symulator / Open-World',
       vramRecommendedGb: 8,
-      base1080: 155,
-      base1440: 124,
-      dlssFgMult: 1.55,
+      base1080: 150,
+      base1440: 118,
+      dlssFgMult: 1.52,
       recommendedSetting: 'DLAA / FSR Native · Tekstury Ultra · AF x16 · Odbicia High',
     },
     {
@@ -177,9 +324,9 @@ export function predictPlayableGames(ctx: PcSuitabilityInputContext): GameFpsPre
       engine: 'RAGE Next-Gen · Ray Tracing',
       genre: 'Symulator / Open-World',
       vramRecommendedGb: 10,
-      base1080: 122,
-      base1440: 94,
-      dlssFgMult: 1.72,
+      base1080: 118,
+      base1440: 90,
+      dlssFgMult: 1.68,
       recommendedSetting: 'DLSS/FSR Quality (67%) · Cienie High · Zasięg LOD High · AF x16',
     },
     {
@@ -188,9 +335,9 @@ export function predictPlayableGames(ctx: PcSuitabilityInputContext): GameFpsPre
       engine: 'REDengine 4 · DX12 RTGI',
       genre: 'AAA Singleplayer',
       vramRecommendedGb: 10,
-      base1080: 104,
-      base1440: 78,
-      dlssFgMult: 1.85,
+      base1080: 100,
+      base1440: 74,
+      dlssFgMult: 1.82,
       recommendedSetting: 'DLSS/FSR Quality + Frame Gen x2 · RTGI Medium/High · Roślinność High',
     },
     {
@@ -199,9 +346,9 @@ export function predictPlayableGames(ctx: PcSuitabilityInputContext): GameFpsPre
       engine: 'Frostbite / Ego · DX12',
       genre: 'E-Sport / Shooter',
       vramRecommendedGb: 8,
-      base1080: 175,
-      base1440: 138,
-      dlssFgMult: 1.35,
+      base1080: 170,
+      base1440: 132,
+      dlssFgMult: 1.32,
       recommendedSetting: 'Natywne / Quality · V-Sync Sterownik + G-Sync/FreeSync · Ultra Tekstury',
     },
     {
@@ -210,9 +357,9 @@ export function predictPlayableGames(ctx: PcSuitabilityInputContext): GameFpsPre
       engine: 'REDengine 4 · Ray/Path Tracing',
       genre: 'UE5 / Path Tracing',
       vramRecommendedGb: 12,
-      base1080: 86,
-      base1440: 62,
-      dlssFgMult: 2.15,
+      base1080: 84,
+      base1440: 60,
+      dlssFgMult: 2.1,
       recommendedSetting: 'DLSS 4.5 / FSR 4 Quality + FG x2/x3 · Reflex ON · Wolumetryczna Mgła High',
     },
     {
@@ -221,9 +368,9 @@ export function predictPlayableGames(ctx: PcSuitabilityInputContext): GameFpsPre
       engine: 'UE5 · Lumen GI + Nanite',
       genre: 'UE5 / Path Tracing',
       vramRecommendedGb: 12,
-      base1080: 92,
-      base1440: 68,
-      dlssFgMult: 2.05,
+      base1080: 90,
+      base1440: 66,
+      dlssFgMult: 2.0,
       recommendedSetting: 'Skalowanie 58-67% + Frame Gen · Lumen GI High (zamiast Epic) · Cienie High',
     },
     {
@@ -232,9 +379,9 @@ export function predictPlayableGames(ctx: PcSuitabilityInputContext): GameFpsPre
       engine: 'Northlight · Full Path Tracing',
       genre: 'UE5 / Path Tracing',
       vramRecommendedGb: 12,
-      base1080: 76,
-      base1440: 54,
-      dlssFgMult: 2.25,
+      base1080: 72,
+      base1440: 50,
+      dlssFgMult: 2.18,
       recommendedSetting: 'DLSS/FSR Balanced-Quality + FG x2 · Path Tracing Medium/High · Post-FX Ograniczone',
     },
     {
@@ -243,10 +390,11 @@ export function predictPlayableGames(ctx: PcSuitabilityInputContext): GameFpsPre
       engine: 'Asobo Engine · DirectStorage + Photogrammetry',
       genre: 'Symulator / Open-World',
       vramRecommendedGb: 12,
-      base1080: 88,
-      base1440: 66,
-      dlssFgMult: 1.9,
+      base1080: 84,
+      base1440: 62,
+      dlssFgMult: 1.85,
       recommendedSetting: 'TAA / DLSS Quality + Frame Gen · LOD Terenu 150 · Chmury Wolumetryczne High',
+      cpuHeavy: true,
     },
     {
       id: 'horizon_forbidden_west',
@@ -254,9 +402,9 @@ export function predictPlayableGames(ctx: PcSuitabilityInputContext): GameFpsPre
       engine: 'Decima Engine · DirectStorage + DLSS 3',
       genre: 'AAA Singleplayer',
       vramRecommendedGb: 10,
-      base1080: 112,
-      base1440: 84,
-      dlssFgMult: 1.85,
+      base1080: 108,
+      base1440: 80,
+      dlssFgMult: 1.8,
       recommendedSetting: 'DLSS / FSR Quality + Frame Gen · Tekstury High · Jakość Obrazu TAA',
     },
     {
@@ -265,9 +413,9 @@ export function predictPlayableGames(ctx: PcSuitabilityInputContext): GameFpsPre
       engine: 'Decima Engine · Enhanced Lighting & Assets',
       genre: 'AAA Singleplayer',
       vramRecommendedGb: 8,
-      base1080: 135,
-      base1440: 102,
-      dlssFgMult: 1.75,
+      base1080: 132,
+      base1440: 98,
+      dlssFgMult: 1.72,
       recommendedSetting: 'DLAA / DLSS Quality · Cienie High · Roślinność Ultra · LOD High',
     },
     {
@@ -276,17 +424,44 @@ export function predictPlayableGames(ctx: PcSuitabilityInputContext): GameFpsPre
       engine: 'RE Engine · Seamless Open World',
       genre: 'Symulator / Open-World',
       vramRecommendedGb: 12,
-      base1080: 94,
-      base1440: 71,
-      dlssFgMult: 1.95,
-      recommendedSetting: 'DLSS / FSR Upscaling + Frame Gen · Detale Detektorów High · Wolumetria Medium',
+      base1080: 90,
+      base1440: 68,
+      dlssFgMult: 1.9,
+      recommendedSetting: 'DLSS / FSR Upscaling + Frame Gen · Detale High · Wolumetria Medium',
+      cpuHeavy: true,
     },
   ];
 
   return catalog.map((g) => {
-    const f1080 = Math.max(24, Math.round(g.base1080 * perfFactor));
-    const f1440 = Math.max(18, Math.round(g.base1440 * perfFactor));
-    const fDlssFg = Math.max(35, Math.round(f1440 * g.dlssFgMult));
+    const genreFactor = g.cpuHeavy
+      ? (hw.gpuScore * 0.54 + hw.cpuScore * 0.36 + hw.ramScore * 0.1) / 85
+      : hw.perfFactor;
+
+    const vramDeficit = hw.vramEstGb < g.vramRecommendedGb;
+    const vramPenalty1080 = vramDeficit ? Math.max(0.62, hw.vramEstGb / g.vramRecommendedGb) : 1;
+    const vramPenalty1440 = vramDeficit ? Math.max(0.5, (hw.vramEstGb / g.vramRecommendedGb) * 0.9) : 1;
+
+    const f1080 = Math.max(12, Math.round(g.base1080 * genreFactor * vramPenalty1080));
+    const f1440 = Math.max(10, Math.round(g.base1440 * genreFactor * vramPenalty1440));
+    const fDlssFg = Math.max(18, Math.round(f1440 * g.dlssFgMult));
+
+    let tier: GamePlayabilityTier = 'low';
+    let tierLabel = 'NISKIE / ZA SŁABY PC (<35 FPS)';
+    if (f1080 >= 120 && f1440 >= 85) {
+      tier = 'ultra';
+      tierLabel = 'OBSŁUŻY ULTRA · 120+ FPS';
+    } else if (f1080 >= 60) {
+      tier = 'smooth';
+      tierLabel = 'OBSŁUŻY WYSOKIE · 60+ FPS';
+    } else if (f1080 >= 35 || fDlssFg >= 45) {
+      tier = 'playable';
+      tierLabel = 'OBSŁUŻY ŚREDNIE · 35–59 FPS';
+    }
+
+    const vramWarning = vramDeficit
+      ? `Zalecane ${g.vramRecommendedGb} GB VRAM (wykryto klasę ~${hw.vramEstGb} GB — obniż Tekstury na Medium/High)`
+      : null;
+
     return {
       id: g.id,
       title: g.title,
@@ -297,12 +472,32 @@ export function predictPlayableGames(ctx: PcSuitabilityInputContext): GameFpsPre
       fps1440pQuality: f1440,
       fpsDlssFg: fDlssFg,
       recommendedSetting: g.recommendedSetting,
+      tier,
+      tierLabel,
+      canRunSmoothly: tier === 'ultra' || tier === 'smooth',
+      vramWarning,
     };
   });
 }
 
+export function evaluateGamePlayabilitySummary(games: GameFpsPrediction[]): GamePlayabilitySummary {
+  const ultraCount = games.filter((g) => g.tier === 'ultra').length;
+  const smoothCount = games.filter((g) => g.tier === 'smooth').length;
+  const playableCount = games.filter((g) => g.tier === 'playable').length;
+  const lowCount = games.filter((g) => g.tier === 'low').length;
+  return {
+    total: games.length,
+    ultraCount,
+    smoothCount,
+    playableCount,
+    lowCount,
+    smoothOrBetterCount: ultraCount + smoothCount,
+  };
+}
+
 export function evaluatePcSuitability(ctx: PcSuitabilityInputContext): PcSuitabilityCategory[] {
   const hw = computeHardwarePowerIndex(ctx);
+  const clamp100 = (v: number) => Math.max(15, Math.min(100, Math.round(v)));
 
   const rawCategories: Array<{
     id: string;
@@ -316,7 +511,7 @@ export function evaluatePcSuitability(ctx: PcSuitabilityInputContext): PcSuitabi
       id: 'esport',
       title: 'E-Sport i Strzelanki Sieciowe (144Hz / 240Hz+)',
       icon: '🎯',
-      score: Math.min(100, Math.round(hw.cpuScore * 0.45 + hw.gpuScore * 0.45 + hw.ramScore * 0.10)),
+      score: clamp100(hw.cpuScore * 0.45 + hw.gpuScore * 0.45 + hw.ramScore * 0.1),
       summary: 'CS2, Valorant, Overwatch 2, Apex Legends, EA FC 25 z niskim opóźnieniem NVIDIA Reflex / Anti-Lag.',
       bottleneckNote: 'Zalecane: Wyłącz Frame Generation i Motion Blur, ustaw limit klatek 3 FPS poniżej Hz monitora.',
     },
@@ -324,17 +519,18 @@ export function evaluatePcSuitability(ctx: PcSuitabilityInputContext): PcSuitabi
       id: 'aaa_ue5',
       title: 'Gry AAA Singleplayer & Unreal Engine 5 (1440p / 4K)',
       icon: '🎮',
-      score: Math.min(100, Math.round(hw.gpuScore * 0.65 + hw.cpuScore * 0.20 + hw.diskScore * 0.15)),
+      score: clamp100(hw.gpuScore * 0.65 + hw.cpuScore * 0.2 + hw.diskScore * 0.15),
       summary: 'Cyberpunk 2077 RT, Black Myth: Wukong, Wiedźmin 3 Next-Gen, Alan Wake 2 z DLSS/FSR + Frame Gen.',
-      bottleneckNote: hw.vramEstGb >= 12
-        ? `Szacowane ${hw.vramEstGb} GB+ VRAM pozwala na Tekstury Ultra i filtrowanie Anizotropowe x16 bez spadku FPS.`
-        : 'Przy 8 GB VRAM ustaw Tekstury na High i zejdź z Lumen GI / Cieni z Epic na High.',
+      bottleneckNote:
+        hw.vramEstGb >= 12
+          ? `Szacowane ${hw.vramEstGb} GB+ VRAM pozwala na Tekstury Ultra i filtrowanie Anizotropowe x16 bez spadku FPS.`
+          : `Przy klasie ~${hw.vramEstGb} GB VRAM ustaw Tekstury na High/Medium i zejdź z Lumen GI / Cieni z Epic na High.`,
     },
     {
       id: 'streaming_obs',
       title: 'Streaming LIVE & Nagrywanie OBS (AV1 / NVENC / AMF)',
       icon: '📡',
-      score: Math.min(100, Math.round(hw.cpuScore * 0.42 + hw.gpuScore * 0.43 + hw.ramScore * 0.15)),
+      score: clamp100(hw.cpuScore * 0.42 + hw.gpuScore * 0.43 + hw.ramScore * 0.15),
       summary: 'Jednoczesna rozgrywka 3D i kodowanie strumienia 1440p60 HDR na Twitch / YouTube bez gubienia klatek.',
       bottleneckNote: 'Sprzętowy enkoder GPU odciąża procesor; stabilny frametime gwarantuje płynny obraz VOD.',
     },
@@ -342,7 +538,7 @@ export function evaluatePcSuitability(ctx: PcSuitabilityInputContext): PcSuitabi
       id: 'video_3d',
       title: 'Montaż Wideo 4K/8K, CAD & Renderowanie 3D (Blender / DaVinci)',
       icon: '🎬',
-      score: Math.min(100, Math.round(hw.gpuScore * 0.42 + hw.cpuScore * 0.35 + hw.ramScore * 0.13 + hw.diskScore * 0.10)),
+      score: clamp100(hw.gpuScore * 0.42 + hw.cpuScore * 0.35 + hw.ramScore * 0.13 + hw.diskScore * 0.1),
       summary: 'Renderowanie scen Cycles/Octane, korekcja barwna HDR, oś czasu 4K ProRes/RAW i symulacje fizyki.',
       bottleneckNote: 'Wysoka przepustowość pamięci RAM i szybki odczyt NVMe przyspieszają scrubbing osi czasu 4K.',
     },
@@ -350,7 +546,7 @@ export function evaluatePcSuitability(ctx: PcSuitabilityInputContext): PcSuitabi
       id: 'local_ai',
       title: 'Lokalne AI / Modele LLM, DeepSeek & Generowanie Obrazu (SDXL/Flux)',
       icon: '🧠',
-      score: Math.min(100, Math.round(hw.gpuScore * 0.62 + hw.ramScore * 0.25 + hw.cpuScore * 0.13)),
+      score: clamp100(hw.gpuScore * 0.62 + hw.ramScore * 0.25 + hw.cpuScore * 0.13),
       summary: 'Uruchamianie lokalnych modeli językowych (Ollama / LM Studio) oraz akceleracja Tensor / WebGPU.',
       bottleneckNote: `Przepustowość VRAM (${hw.vramEstGb} GB klasy GPU) decyduje o liczbie tokenów/s i wielkości kwantyzacji Q4/Q8.`,
     },
@@ -358,7 +554,7 @@ export function evaluatePcSuitability(ctx: PcSuitabilityInputContext): PcSuitabi
       id: 'dev_vm',
       title: 'Programowanie, Kompilacja Kodu, Docker & Maszyny Wirtualne',
       icon: '💻',
-      score: Math.min(100, Math.round(hw.cpuScore * 0.48 + hw.ramScore * 0.32 + hw.diskScore * 0.20)),
+      score: clamp100(hw.cpuScore * 0.48 + hw.ramScore * 0.32 + hw.diskScore * 0.2),
       summary: 'Wielowątkowa kompilacja C++/Rust/TypeScript, kontenery Docker, WSL2 i bazy danych o niskim opóźnieniu IOPS.',
       bottleneckNote: `${hw.cpuCores} wątków logicznych CPU oraz szybki czas dostępu 4K QD1 dysku skracają czas buildów.`,
     },
@@ -366,7 +562,7 @@ export function evaluatePcSuitability(ctx: PcSuitabilityInputContext): PcSuitabi
       id: 'office_finance',
       title: 'Praca Biurowa, Wielozadaniowość, Trading & Analiza Danych (Excel/BI)',
       icon: '📊',
-      score: Math.min(100, Math.round(hw.cpuScore * 0.35 + hw.ramScore * 0.40 + hw.diskScore * 0.25)),
+      score: clamp100(hw.cpuScore * 0.35 + hw.ramScore * 0.4 + hw.diskScore * 0.25),
       summary: 'Dziesiątki kart przeglądarki, arkusze kalkulacyjne z milionami wierszy, wielomonitorowe stanowisko pracy.',
       bottleneckNote: 'Zapas wydajności pozwala na bezgłośną pracę półpasywną przy minimalnym poborze mocy.',
     },
@@ -374,7 +570,7 @@ export function evaluatePcSuitability(ctx: PcSuitabilityInputContext): PcSuitabi
       id: 'mobility_acoustics',
       title: 'Efektywność Energetyczna, Kultura Pracy Chłodzenia & Stabilność 24/7',
       icon: '❄️',
-      score: Math.min(100, Math.round((hw.cpuScore + hw.gpuScore + hw.ramScore) / 3)),
+      score: clamp100((hw.cpuScore + hw.gpuScore + hw.ramScore) / 3),
       summary: 'Stabilność pod długotrwałym obciążeniem (brak thermal-throttlingu), zdrowie łożysk PWM i spójność zasilania.',
       bottleneckNote: 'Zablokowanie FPS (Max Frame Rate) 3 klatki poniżej Hz monitora obniża pobór prądu i hałas wentylatorów.',
     },
@@ -383,20 +579,25 @@ export function evaluatePcSuitability(ctx: PcSuitabilityInputContext): PcSuitabi
   return rawCategories.map((c) => {
     let verdict: PcSuitabilityCategory['verdict'] = 'IDEALNY (90-100%)';
     let badgeClass = 'sp-suit-badge--ideal';
+    let fillClass = 'sp-suit-bar-fill--ideal';
     if (c.score < 55) {
       verdict = 'PODSTAWOWY (<55%)';
       badgeClass = 'sp-suit-badge--basic';
+      fillClass = 'sp-suit-bar-fill--basic';
     } else if (c.score < 75) {
       verdict = 'DOBRY (55-74%)';
       badgeClass = 'sp-suit-badge--good';
+      fillClass = 'sp-suit-bar-fill--good';
     } else if (c.score < 90) {
       verdict = 'BARDZO DOBRY (75-89%)';
       badgeClass = 'sp-suit-badge--vgood';
+      fillClass = 'sp-suit-bar-fill--vgood';
     }
     return {
       ...c,
       verdict,
       badgeClass,
+      fillClass,
     };
   });
 }
@@ -419,9 +620,10 @@ function buildOptimalSchemeRecommendation(state: OptimizerState): {
     return {
       title: `Schemat E-Sport Pro (${state.resolution.toUpperCase()} @ ${state.refreshHz} Hz · Minimalny Input Lag)`,
       fpsLimitRule: `Max Frame Rate: ${recommendedCap} FPS (dokładnie 3 kl. poniżej ${state.refreshHz} Hz monitora dla zerowego tearingu G-Sync/FreeSync)`,
-      upscalingRule: state.gpuTier === 'gtx1650_igpu'
-        ? 'DLSS / FSR: Quality (67% skali) + Image Sharpening 35%'
-        : 'Rozdzielczość Natywna + DLAA / TAA lub skalowanie ~85-100% dla maksymalnej ostrości celownika',
+      upscalingRule:
+        state.gpuTier === 'gtx1650_igpu'
+          ? 'DLSS / FSR: Quality (67% skali) + Image Sharpening 35%'
+          : 'Rozdzielczość Natywna + DLAA / TAA lub skalowanie ~85-100% dla maksymalnej ostrości celownika',
       frameGenRule: 'Frame Generation (FG / Smooth Motion / AFMF): WYŁĄCZONE (unikamy dodatkowych ms opóźnienia w grach sieciowych)',
       latencySyncRule: 'NVIDIA Reflex: WŁ. + Boost (lub AMD Anti-Lag 2) · V-Sync: WŁ. w sterowniku, WYŁ. w menu gry',
       lightingShadowsRule: 'Ray Tracing: WYŁ. · Global Illumination: Medium · Cienie: Medium/High (widoczność sylwetek) · Wolumetryczna Mgła: Low',
@@ -435,12 +637,14 @@ function buildOptimalSchemeRecommendation(state: OptimizerState): {
     return {
       title: `Schemat Ray / Path Tracing Showcase (${state.resolution.toUpperCase()} @ ${state.refreshHz} Hz)`,
       fpsLimitRule: 'Bez ręcznego limitu FPS przy włączonym Frame Generation (NVIDIA Reflex automatycznie kontroluje kolejkę klatek)',
-      upscalingRule: state.resolution === '4k'
-        ? 'DLSS 4.5 / FSR 4 / XeSS: Balanced (58%) lub własna skala 42-50% w NVIDIA App + Wyostrzanie 30%'
-        : 'DLSS 4.5 / FSR 4 / XeSS: Quality (67% skali renderowania) – ostrość często lepsza niż natywne TAA',
-      frameGenRule: state.gpuTier === 'rtx4090_7900xtx' || state.gpuTier === 'rtx4070_7800xt'
-        ? 'Frame Generation: WŁĄCZONE (FG x2 / Multi Frame Gen x3 przy bazowych 55-65 FPS)'
-        : 'Frame Generation / AFMF: WŁĄCZONE tylko jeśli bazowy FPS przekracza 50 kl./s',
+      upscalingRule:
+        state.resolution === '4k'
+          ? 'DLSS 4.5 / FSR 4 / XeSS: Balanced (58%) lub własna skala 42-50% w NVIDIA App + Wyostrzanie 30%'
+          : 'DLSS 4.5 / FSR 4 / XeSS: Quality (67% skali renderowania) – ostrość często lepsza niż natywne TAA',
+      frameGenRule:
+        state.gpuTier === 'rtx4090_7900xtx' || state.gpuTier === 'rtx4070_7800xt'
+          ? 'Frame Generation: WŁĄCZONE (FG x2 / Multi Frame Gen x3 przy bazowych 55-65 FPS)'
+          : 'Frame Generation / AFMF: WŁĄCZONE tylko jeśli bazowy FPS przekracza 50 kl./s',
       latencySyncRule: 'Low Latency (Reflex / Anti-Lag): OBOWIĄZKOWO WŁĄCZONE · V-Sync w sterowniku + G-Sync/FreeSync + HDR ON',
       lightingShadowsRule: 'Ray Tracing: High (odbicia + RTGI) · Cienie: High (zamiast Ultra) · Wolumetryczna Mgła: Medium (-2 poziomy = duży skok FPS)',
       texturesGeometryRule: `Tekstury: ${has12GbPlus ? 'ULTRA (pełny bufor 12GB+ VRAM)' : 'HIGH (ochrona przed przepełnieniem 8GB VRAM)'} · Anisotropic Filtering: x16 · Subsurface Scattering: WŁ.`,
@@ -449,13 +653,13 @@ function buildOptimalSchemeRecommendation(state: OptimizerState): {
     };
   }
 
-  // Default: Unreal Engine 5 / Modern Singleplayer
   return {
     title: `Schemat Unreal Engine 5 Singleplayer (${state.resolution.toUpperCase()} @ ${state.refreshHz} Hz · Max Jakość / FPS)`,
     fpsLimitRule: `Z włączonym FG: automatyczny limit Reflex. Bez FG: zablokuj na ${recommendedCap} FPS (3 kl. poniżej ${state.refreshHz} Hz).`,
-    upscalingRule: state.resolution === '4k'
-      ? 'DLSS / FSR Super Resolution: Balanced (58%) lub własna skala 40-45% w NVIDIA App'
-      : 'DLSS / FSR / XeSS: Tryb Quality (67%) – bardzo wysoki zysk klatek bez utraty detali',
+    upscalingRule:
+      state.resolution === '4k'
+        ? 'DLSS / FSR Super Resolution: Balanced (58%) lub własna skala 40-45% w NVIDIA App'
+        : 'DLSS / FSR / XeSS: Tryb Quality (67%) – bardzo wysoki zysk klatek bez utraty detali',
     frameGenRule: 'Frame Generation (FG x2) + Smooth Motion: WŁĄCZONE (idealne do single-player przy stabilnej bazie ~55-60 FPS)',
     latencySyncRule: 'NVIDIA Reflex / AMD Anti-Lag: WŁĄCZONE · V-Sync w sterowniku WŁ. · HDR: WŁ. (koszt tylko 1-3% FPS)',
     lightingShadowsRule: 'Lumen Global Illumination: HIGH lub MEDIUM (zejście z Epic daje ogromny skok FPS!) · Cienie: High · Odbicia: SSR / Hybrid · Mgła Wolumetryczna: Medium',
@@ -465,34 +669,60 @@ function buildOptimalSchemeRecommendation(state: OptimizerState): {
   };
 }
 
-export function renderPcSuitabilityAndGamesReport(ctx: PcSuitabilityInputContext): string {
-  const hasTested =
-    (ctx.cpu?.multiCoreScore && ctx.cpu.multiCoreScore > 0) ||
-    (ctx.ram?.overallScore && ctx.ram.overallScore > 0) ||
-    (ctx.disk?.seqReadMBs && ctx.disk.seqReadMBs > 0) ||
-    (ctx.gpu?.avgFps && ctx.gpu.avgFps > 0);
+function filterGames(games: GameFpsPrediction[], mode: GameFilterMode): GameFpsPrediction[] {
+  if (mode === 'smooth60') return games.filter((g) => g.canRunSmoothly);
+  if (mode === 'ultra120') return games.filter((g) => g.tier === 'ultra');
+  if (mode === 'esport') return games.filter((g) => g.genre === 'E-Sport / Shooter');
+  if (mode === 'ue5_rt') return games.filter((g) => g.genre === 'UE5 / Path Tracing' || g.genre === 'AAA Singleplayer');
+  return games;
+}
 
-  if (!hasTested) {
+export function renderPcSuitabilityAndGamesReport(ctx: PcSuitabilityInputContext): string {
+  const hw = computeHardwarePowerIndex(ctx);
+
+  if (!hasAnyBenchmarkResults(ctx)) {
     return `
       <section class="sp-games-suitability-wrap" id="sp-games-suitability-report">
-        <div class="sp-panel" style="background:linear-gradient(135deg, rgba(6,182,212,0.12), rgba(15,23,42,0.96));border:1px solid rgba(6,182,212,0.35);padding:24px;border-radius:14px;text-align:center;">
+        <div class="sp-panel sp-games-untested-card">
           <div style="font-size:32px;margin-bottom:8px;">🎮📊</div>
-          <h3 style="margin:0 0 8px;font-size:18px;color:#f8fafc;">Wykres Gier oraz Ocena Przydatności PC / Laptopa</h3>
-          <p style="margin:0 auto 16px;max-width:640px;color:#94a3b8;font-size:13.5px;line-height:1.5;">
-            Uruchom pełne testy diagnostyczne podzespołów (CPU, RAM, Dysk NVMe oraz testy GPU 3D), aby wygenerować dokładny ranking płynności w grach (CS2, Cyberpunk 2077, Wukong, Wiedźmin 3, Forza 5) oraz szczegółową ocenę w 8 zastosowaniach (AI, Montaż 4K, Streaming, Gaming).
+          <h3 style="margin:0 0 8px;font-size:18px;color:#f8fafc;">Jakie gry obsłuży ten PC / Laptop? — Wymagany pomiar</h3>
+          <p style="margin:0 auto 12px;max-width:680px;color:#94a3b8;font-size:13px;line-height:1.55;">
+            Wykryto sprzęt: <strong style="color:#e2e8f0;">${escHtml(hw.gpuLabel)}</strong> · <strong style="color:#e2e8f0;">${hw.cpuCores} wątków CPU</strong> (klasa ~${hw.vramEstGb} GB VRAM).
+            Aby uniknąć sztywnych zgadywanek i wyliczyć <strong style="color:#38bdf8;">rzeczywiste FPS dla 13 popularnych gier</strong> (CS2, Cyberpunk 2077 RT, Wukong, Wiedźmin 3, Alan Wake 2, Forza 5), uruchom najpierw test wydajności podzespołów.
           </p>
-          <div style="display:flex;justify-content:center;gap:12px;flex-wrap:wrap;">
-            <button type="button" class="btn btn-primary" data-open-mod="gpu" style="padding:10px 20px;font-weight:700;">🚀 Uruchom Testy 3D &amp; Benchmarki</button>
+          <div class="sp-calibration-pills" style="justify-content:center;margin-bottom:16px;">
+            <button type="button" class="sp-cal-pill sp-cal-pill--pending" data-open-mod="cpu">○ CPU: brak testu</button>
+            <button type="button" class="sp-cal-pill sp-cal-pill--pending" data-open-mod="gpu">○ GPU 3D: brak testu</button>
+            <button type="button" class="sp-cal-pill sp-cal-pill--pending" data-open-mod="ram">○ RAM: brak testu</button>
+            <button type="button" class="sp-cal-pill sp-cal-pill--pending" data-open-mod="disk">○ Dysk: brak testu</button>
+          </div>
+          <div style="display:flex;justify-content:center;gap:10px;flex-wrap:wrap;">
+            <button type="button" class="btn btn-primary" data-run-full-suite="true" style="padding:10px 20px;font-weight:700;">🚀 Uruchom Pełny Test PC (CPU + RAM + Dysk + GPU)</button>
+            <button type="button" class="btn btn-secondary" data-open-mod="gpu" style="padding:10px 18px;font-weight:600;">🎮 Tylko Test GPU 3D</button>
           </div>
         </div>
       </section>
     `;
   }
 
-  const games = predictPlayableGames(ctx);
+  const allGames = predictPlayableGames(ctx);
+  const visibleGames = filterGames(allGames, optimizerState.gameFilter);
+  const summary = evaluateGamePlayabilitySummary(allGames);
   const suitability = evaluatePcSuitability(ctx);
-  const hw = computeHardwarePowerIndex(ctx);
   const scheme = buildOptimalSchemeRecommendation(optimizerState);
+
+  const calibrationLabel =
+    hw.testedCount === 4
+      ? 'PEŁNA KALIBRACJA BENCHMARKOWA (4/4 TESTY ✓)'
+      : hw.gpuTested
+        ? `SKALIBROWANO Z GPU 3D (${hw.testedCount}/4 TESTY)`
+        : `KALIBRACJA CZĘŚCIOWA (${hw.testedCount}/4 · URUCHOM TEST GPU 3D DLA PEŁNEJ DOKŁADNOŚCI)`;
+
+  const deltaSign = hw.calibrationDeltaPct > 0 ? '+' : '';
+  const deltaBadgeText =
+    hw.calibrationDeltaPct === 0
+      ? 'Zgodne z profilem bazowym (0%)'
+      : `Korekta po testach: ${deltaSign}${hw.calibrationDeltaPct}% vs profil bazowy`;
 
   return `
     <section class="sp-games-suitability-wrap" id="sp-games-suitability-report">
@@ -500,85 +730,133 @@ export function renderPcSuitabilityAndGamesReport(ctx: PcSuitabilityInputContext
       <div class="sp-panel sp-games-chart-panel">
         <div class="sp-panel-head">
           <div>
-            <span class="sp-eyebrow">ANALIZA WYDAJNOŚCI W GRACH 3D · 1080P / 1440P / DLSS 4.5 &amp; FRAME GEN</span>
-            <h3>🎮 Wykres Gier, w jakie można grać na tym PC / Laptopie</h3>
-            <p class="sp-muted">Szacowana liczba klatek na sekundę (FPS) wyliczona na podstawie profilu GPU (<strong>${hw.gpuLabel}</strong>), wielowątkowości CPU (${hw.cpuCores} wątków), przepustowości RAM i testów 3D.</p>
+            <span class="sp-eyebrow">${calibrationLabel} · ${deltaBadgeText}</span>
+            <h3>🎮 Jakie gry obsłuży ten PC / Laptop? (${summary.smoothOrBetterCount}/${summary.total} płynnie 60+ FPS)</h3>
+            <p class="sp-muted">
+              Wyniki wyliczone z rzeczywistych pomiarów tego komputera: GPU <strong>${escHtml(hw.gpuLabel)}</strong>
+              (${hw.gpuTested ? `zmierzono ${hw.benchGpuFps} FPS · Wynik ${hw.benchGpuScore > 0 ? `${hw.benchGpuScore}/100` : `${hw.gpuScore}/100`}` : `szacunek ${hw.gpuScore}/100 — uruchom test GPU 3D`}),
+              CPU ${hw.cpuCores} wątków (${hw.cpuTested ? `zmierzono ${hw.cpuScore}/100` : 'brak testu'}),
+              RAM (${hw.ramTested ? `zmierzono ${hw.ramScore}/100` : 'brak testu'}).
+            </p>
           </div>
-          <div class="sp-games-legend">
-            <span class="sp-legend-dot sp-legend-dot--1080"><i></i> 1080p Natywne</span>
-            <span class="sp-legend-dot sp-legend-dot--1440"><i></i> 1440p Quality</span>
-            <span class="sp-legend-dot sp-legend-dot--fg"><i></i> DLSS/FSR + Frame Gen</span>
+          <div class="sp-games-head-right">
+            <div class="sp-games-legend">
+              <span class="sp-legend-dot sp-legend-dot--1080"><i></i> 1080p Natywne</span>
+              <span class="sp-legend-dot sp-legend-dot--1440"><i></i> 1440p Quality</span>
+              <span class="sp-legend-dot sp-legend-dot--fg"><i></i> DLSS/FSR + Frame Gen</span>
+            </div>
+            <button type="button" class="btn btn-secondary btn-sm" data-run-full-suite="true">
+              🔄 Przelicz (Pełny Test)
+            </button>
+          </div>
+        </div>
+
+        <!-- Pasek statusu kalibracji (co było realnie zmierzone) -->
+        <div class="sp-calibration-pills">
+          <button type="button" class="sp-cal-pill ${hw.cpuTested ? 'sp-cal-pill--ok' : 'sp-cal-pill--pending'}" data-open-mod="cpu">
+            ${hw.cpuTested ? `✓ CPU: ${ctx.cpu.multiCoreScore.toLocaleString('pl-PL')} pkt (${hw.cpuScore}/100)` : '○ CPU: brak testu (kliknij)'}
+          </button>
+          <button type="button" class="sp-cal-pill ${hw.gpuTested ? 'sp-cal-pill--ok' : 'sp-cal-pill--pending'}" data-open-mod="gpu">
+            ${hw.gpuTested ? `✓ GPU 3D: ${hw.benchGpuFps} FPS · Wynik ${hw.benchGpuScore > 0 ? hw.benchGpuScore : hw.gpuScore}/100` : '○ GPU 3D: brak testu (kliknij)'}
+          </button>
+          <button type="button" class="sp-cal-pill ${hw.ramTested ? 'sp-cal-pill--ok' : 'sp-cal-pill--pending'}" data-open-mod="ram">
+            ${hw.ramTested ? `✓ RAM: ${hw.ramScore}/100` : '○ RAM: brak testu (kliknij)'}
+          </button>
+          <button type="button" class="sp-cal-pill ${hw.diskTested ? 'sp-cal-pill--ok' : 'sp-cal-pill--pending'}" data-open-mod="disk">
+            ${hw.diskTested ? `✓ Dysk: ${hw.diskScore}/100` : '○ Dysk: brak testu (kliknij)'}
+          </button>
+        </div>
+
+        <!-- Podsumowanie kompatybilności gier + Filtry -->
+        <div class="sp-games-summary-strip">
+          <div class="sp-games-summary-counts">
+            <span class="sp-summary-chip sp-summary-chip--ultra">Ultra 120+ FPS: <strong>${summary.ultraCount}</strong></span>
+            <span class="sp-summary-chip sp-summary-chip--smooth">Wysokie 60+ FPS: <strong>${summary.smoothCount}</strong></span>
+            <span class="sp-summary-chip sp-summary-chip--playable">Średnie 35–59 FPS: <strong>${summary.playableCount}</strong></span>
+            <span class="sp-summary-chip sp-summary-chip--low">Niskie / Słabe (&lt;35): <strong>${summary.lowCount}</strong></span>
+          </div>
+          <div class="sp-games-filter-bar">
+            <button type="button" class="sp-filter-btn ${optimizerState.gameFilter === 'all' ? 'active' : ''}" data-game-filter="all">Wszystkie (${summary.total})</button>
+            <button type="button" class="sp-filter-btn ${optimizerState.gameFilter === 'smooth60' ? 'active' : ''}" data-game-filter="smooth60">Płynne 60+ (${summary.smoothOrBetterCount})</button>
+            <button type="button" class="sp-filter-btn ${optimizerState.gameFilter === 'ultra120' ? 'active' : ''}" data-game-filter="ultra120">Ultra 120+ (${summary.ultraCount})</button>
+            <button type="button" class="sp-filter-btn ${optimizerState.gameFilter === 'esport' ? 'active' : ''}" data-game-filter="esport">E-Sport</button>
+            <button type="button" class="sp-filter-btn ${optimizerState.gameFilter === 'ue5_rt' ? 'active' : ''}" data-game-filter="ue5_rt">AAA / UE5 / RT</button>
           </div>
         </div>
 
         <div class="sp-games-chart-grid">
-          ${games.map((g) => {
-            const w1080 = Math.min(100, Math.round((g.fps1080pNative / 360) * 100));
-            const w1440 = Math.min(100, Math.round((g.fps1440pQuality / 360) * 100));
-            const wFg = Math.min(100, Math.round((g.fpsDlssFg / 360) * 100));
-            const bestFps = Math.max(g.fps1080pNative, g.fpsDlssFg);
-            const tierBadge = bestFps >= 120
-              ? '<span class="sp-game-tier sp-game-tier--ultra">ULTRA PŁYNNIE 120+ FPS</span>'
-              : bestFps >= 60
-                ? '<span class="sp-game-tier sp-game-tier--smooth">PŁYNNIE 60+ FPS</span>'
-                : '<span class="sp-game-tier sp-game-tier--playable">GRYWALNE 35-59 FPS</span>';
+          ${visibleGames.length === 0
+            ? `<div class="sp-game-bar-card" style="grid-column:1 / -1;text-align:center;color:var(--text-muted);padding:20px;">Brak gier spełniających wybrany filtr dla aktualnych wyników testu tego komputera.</div>`
+            : visibleGames
+                .map((g) => {
+                  const w1080 = Math.max(4, Math.min(100, Math.round((g.fps1080pNative / 360) * 100)));
+                  const w1440 = Math.max(4, Math.min(100, Math.round((g.fps1440pQuality / 360) * 100)));
+                  const wFg = Math.max(4, Math.min(100, Math.round((g.fpsDlssFg / 360) * 100)));
+                  const tierBadge = `<span class="sp-game-tier sp-game-tier--${g.tier}">${g.tierLabel}</span>`;
 
-            return `
-              <div class="sp-game-bar-card">
-                <div class="sp-game-bar-top">
-                  <div>
-                    <strong>${g.title}</strong>
-                    <span class="sp-game-meta">${g.engine} · ${g.genre} · Zalecane VRAM: ${g.vramRecommendedGb} GB</span>
-                  </div>
-                  ${tierBadge}
-                </div>
+                  return `
+                    <div class="sp-game-bar-card">
+                      <div class="sp-game-bar-top">
+                        <div class="sp-game-bar-title-col">
+                          <strong class="sp-game-bar-title">${escHtml(g.title)}</strong>
+                          <span class="sp-game-meta">${escHtml(g.engine)} · ${escHtml(g.genre)} · Zalecane VRAM: ${g.vramRecommendedGb} GB</span>
+                        </div>
+                        ${tierBadge}
+                      </div>
 
-                <div class="sp-game-bars">
-                  <div class="sp-game-bar-row">
-                    <span class="sp-game-bar-label">1080p Natywne</span>
-                    <div class="sp-game-bar-track">
-                      <div class="sp-game-bar-fill sp-game-bar-fill--1080" style="width:${w1080}%"></div>
-                    </div>
-                    <strong class="sp-game-bar-val">${g.fps1080pNative} FPS</strong>
-                  </div>
-                  <div class="sp-game-bar-row">
-                    <span class="sp-game-bar-label">1440p Quality</span>
-                    <div class="sp-game-bar-track">
-                      <div class="sp-game-bar-fill sp-game-bar-fill--1440" style="width:${w1440}%"></div>
-                    </div>
-                    <strong class="sp-game-bar-val">${g.fps1440pQuality} FPS</strong>
-                  </div>
-                  <div class="sp-game-bar-row">
-                    <span class="sp-game-bar-label">DLSS/FSR + FG</span>
-                    <div class="sp-game-bar-track">
-                      <div class="sp-game-bar-fill sp-game-bar-fill--fg" style="width:${wFg}%"></div>
-                    </div>
-                    <strong class="sp-game-bar-val sp-game-bar-val--fg">${g.fpsDlssFg} FPS</strong>
-                  </div>
-                </div>
+                      <div class="sp-game-bars">
+                        <div class="sp-game-bar-row">
+                          <span class="sp-game-bar-label">1080p Natywne</span>
+                          <div class="sp-game-bar-track">
+                            <div class="sp-game-bar-fill sp-game-bar-fill--1080" style="width:${w1080}%"></div>
+                          </div>
+                          <strong class="sp-game-bar-val">${g.fps1080pNative} FPS</strong>
+                        </div>
+                        <div class="sp-game-bar-row">
+                          <span class="sp-game-bar-label">1440p Quality</span>
+                          <div class="sp-game-bar-track">
+                            <div class="sp-game-bar-fill sp-game-bar-fill--1440" style="width:${w1440}%"></div>
+                          </div>
+                          <strong class="sp-game-bar-val">${g.fps1440pQuality} FPS</strong>
+                        </div>
+                        <div class="sp-game-bar-row">
+                          <span class="sp-game-bar-label">DLSS/FSR + FG</span>
+                          <div class="sp-game-bar-track">
+                            <div class="sp-game-bar-fill sp-game-bar-fill--fg" style="width:${wFg}%"></div>
+                          </div>
+                          <strong class="sp-game-bar-val sp-game-bar-val--fg">${g.fpsDlssFg} FPS</strong>
+                        </div>
+                      </div>
 
-                <div class="sp-game-rec-line">
-                  <span>Optymalne ustawienia:</span> <strong>${g.recommendedSetting}</strong>
-                </div>
-              </div>
-            `;
-          }).join('')}
+                      ${
+                        g.vramWarning
+                          ? `<div class="sp-game-vram-warn">⚠️ ${escHtml(g.vramWarning)}</div>`
+                          : ''
+                      }
+
+                      <div class="sp-game-rec-line">
+                        <span>Optymalne ustawienia:</span> <strong>${escHtml(g.recommendedSetting)}</strong>
+                      </div>
+                    </div>
+                  `;
+                })
+                .join('')}
         </div>
       </div>
 
       <!-- 1B. 30-DNIOWY WYKRES TRENDU WYDAJNOŚCI (FPS) DLA WYBRANEJ GRY -->
-      <div class="sp-panel sp-games-trend-panel" style="margin-top:20px;">
+      <div class="sp-panel sp-games-trend-panel">
         <div class="sp-panel-head" style="flex-wrap:wrap;gap:12px;">
           <div>
             <span class="sp-eyebrow">HISTORIA WYDAJNOŚCI W CZASIE · OSTATNIE 30 DNI</span>
             <h3>📈 30-dniowy trend FPS w wybranej grze</h3>
-            <p class="sp-muted">Analiza zmian klatkażu na przestrzeni ostatniego miesiąca (aktualizacje sterowników GPU, optymalizacje łat i profile upscalingu).</p>
+            <p class="sp-muted">Analiza zmian klatkażu na przestrzeni ostatniego miesiąca oparta na zmierzonym wyniku Twojego PC.</p>
           </div>
           <div style="display:flex;align-items:center;gap:8px;">
             <label style="font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:6px;">
               <span>Wybierz grę:</span>
               <select id="sp-trend-game-select" class="sp-select" style="padding:6px 10px;font-size:12px;">
-                ${games.map((g) => `<option value="${g.id}" ${optimizerState.selectedTrendGameId === g.id ? 'selected' : ''}>${g.title} (${g.fpsDlssFg} FPS)</option>`).join('')}
+                ${allGames.map((g) => `<option value="${g.id}" ${optimizerState.selectedTrendGameId === g.id ? 'selected' : ''}>${escHtml(g.title)} (${g.fpsDlssFg} FPS)</option>`).join('')}
               </select>
             </label>
           </div>
@@ -594,28 +872,32 @@ export function renderPcSuitabilityAndGamesReport(ctx: PcSuitabilityInputContext
           <div>
             <span class="sp-eyebrow">PROFIL PRZEZNACZENIA MASZYNY · OCENA 8 ZASTOSOWAŃ (0–100%)</span>
             <h3>🏆 Do czego najlepiej nadaje się ten PC / Laptop?</h3>
-            <p class="sp-muted">Kompleksowa klasyfikacja możliwości komputera po testach CPU (${hw.cpuScore}/100), GPU 3D (${hw.gpuScore}/100), RAM (${hw.ramScore}/100) oraz Dysku NVMe/SSD (${hw.diskScore}/100).</p>
+            <p class="sp-muted">Kompleksowa klasyfikacja możliwości komputera po testach CPU (${Math.min(100, hw.cpuScore)}/100), GPU 3D (${Math.min(100, hw.gpuScore)}/100), RAM (${Math.min(100, hw.ramScore)}/100) oraz Dysku NVMe/SSD (${Math.min(100, hw.diskScore)}/100).</p>
           </div>
         </div>
 
         <div class="sp-suitability-grid">
-          ${suitability.map((cat) => `
+          ${suitability
+            .map(
+              (cat) => `
             <div class="sp-suit-card">
               <div class="sp-suit-head">
                 <span class="sp-suit-icon">${cat.icon}</span>
                 <div class="sp-suit-title-wrap">
-                  <strong>${cat.title}</strong>
+                  <strong class="sp-suit-title">${escHtml(cat.title)}</strong>
                   <span class="sp-suit-badge ${cat.badgeClass}">${cat.verdict}</span>
                 </div>
-                <span class="sp-suit-score">${cat.score}%</span>
+                <span class="sp-suit-score ${cat.score >= 75 ? 'is-ok' : cat.score >= 55 ? 'is-warn' : 'is-err'}">${cat.score}%</span>
               </div>
               <div class="sp-suit-bar-track">
-                <div class="sp-suit-bar-fill" style="width:${cat.score}%"></div>
+                <div class="sp-suit-bar-fill ${cat.fillClass}" style="width:${cat.score}%"></div>
               </div>
-              <p class="sp-suit-summary">${cat.summary}</p>
-              <div class="sp-suit-note">${cat.bottleneckNote}</div>
+              <p class="sp-suit-summary">${escHtml(cat.summary)}</p>
+              <div class="sp-suit-note">${escHtml(cat.bottleneckNote)}</div>
             </div>
-          `).join('')}
+          `
+            )
+            .join('')}
         </div>
       </div>
 
@@ -689,47 +971,47 @@ export function renderPcSuitabilityAndGamesReport(ctx: PcSuitabilityInputContext
           <div class="sp-scheme-result-head">
             <div>
               <span class="sp-badge sp-badge--ok">GOTOWY SCHEMAT OPTYMALNYCH USTAWIEŃ</span>
-              <h4>${scheme.title}</h4>
+              <h4>${escHtml(scheme.title)}</h4>
             </div>
             <div class="sp-scheme-actions">
-              <button class="sp-btn sp-btn--primary" data-opt-apply-3d="true">
+              <button type="button" class="sp-btn sp-btn--primary" data-opt-apply-3d="true">
                 ⚡ Zastosuj ten schemat na żywo w Silniku Gry 3D MAX
               </button>
             </div>
           </div>
-          ${optimizerState.appliedFeedback ? `<div class="sp-scheme-feedback">${optimizerState.appliedFeedback}</div>` : ''}
+          ${optimizerState.appliedFeedback ? `<div class="sp-scheme-feedback">${escHtml(optimizerState.appliedFeedback)}</div>` : ''}
           <div class="sp-scheme-grid">
             <div class="sp-scheme-item">
               <span>1. Skalowanie AI (DLSS / FSR / XeSS)</span>
-              <strong>${scheme.upscalingRule}</strong>
+              <strong>${escHtml(scheme.upscalingRule)}</strong>
             </div>
             <div class="sp-scheme-item">
               <span>2. Generowanie Klatek (FG / Smooth Motion)</span>
-              <strong>${scheme.frameGenRule}</strong>
+              <strong>${escHtml(scheme.frameGenRule)}</strong>
             </div>
             <div class="sp-scheme-item">
               <span>3. Limit FPS &amp; Synchronizacja</span>
-              <strong>${scheme.fpsLimitRule}</strong>
+              <strong>${escHtml(scheme.fpsLimitRule)}</strong>
             </div>
             <div class="sp-scheme-item">
               <span>4. V-Sync, Reflex / Anti-Lag &amp; HDR</span>
-              <strong>${scheme.latencySyncRule}</strong>
+              <strong>${escHtml(scheme.latencySyncRule)}</strong>
             </div>
             <div class="sp-scheme-item">
               <span>5. Oświetlenie, Cienie, Lumen &amp; RT</span>
-              <strong>${scheme.lightingShadowsRule}</strong>
+              <strong>${escHtml(scheme.lightingShadowsRule)}</strong>
             </div>
             <div class="sp-scheme-item">
               <span>6. Tekstury (VRAM), AF x16 &amp; Geometria</span>
-              <strong>${scheme.texturesGeometryRule}</strong>
+              <strong>${escHtml(scheme.texturesGeometryRule)}</strong>
             </div>
             <div class="sp-scheme-item">
               <span>7. Filtry Post-Processingu</span>
-              <strong>${scheme.postProcessRule}</strong>
+              <strong>${escHtml(scheme.postProcessRule)}</strong>
             </div>
             <div class="sp-scheme-item sp-scheme-item--gain">
               <span>Szacowany Rezultat Wydajności</span>
-              <strong>${scheme.expectedGainText}</strong>
+              <strong>${escHtml(scheme.expectedGainText)}</strong>
             </div>
           </div>
         </div>
@@ -796,10 +1078,34 @@ export function renderPcSuitabilityAndGamesReport(ctx: PcSuitabilityInputContext
   `;
 }
 
-export function bindPcSuitabilityReportEvents(root: HTMLElement, rerender: () => void): void {
+export function bindPcSuitabilityReportEvents(
+  root: HTMLElement,
+  rerender: () => void,
+  ctx?: PcSuitabilityInputContext,
+  onRunFullSuite?: () => void
+): void {
+  root.querySelectorAll<HTMLButtonElement>('[data-run-full-suite]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      onRunFullSuite?.();
+    });
+  });
+
+  root.querySelectorAll<HTMLButtonElement>('[data-game-filter]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const mode = btn.dataset.gameFilter as GameFilterMode;
+      if (mode) {
+        optimizerState.gameFilter = mode;
+        rerender();
+      }
+    });
+  });
+
   root.querySelectorAll<HTMLSelectElement>('[data-opt-select]').forEach((selectEl) => {
     selectEl.addEventListener('change', () => {
       const key = selectEl.dataset.optSelect as keyof OptimizerState;
+      if (key === 'gpuTier' || key === 'vramGb') {
+        optimizerState.userCustomizedTier = true;
+      }
       if (key === 'vramGb' || key === 'refreshHz' || key === 'targetFps') {
         (optimizerState as unknown as Record<string, number>)[key] = Number(selectEl.value);
       } else if (key) {
@@ -824,6 +1130,23 @@ export function bindPcSuitabilityReportEvents(root: HTMLElement, rerender: () =>
     });
   });
 
+  const renderTrendChart = () => {
+    const mount = root.querySelector<HTMLElement>('#sp-game-trend-d3-mount');
+    if (!mount) return;
+    const effectiveCtx: PcSuitabilityInputContext = ctx ?? {
+      specs: null,
+      cpu: { multiCoreScore: 8000, coresUsed: 8 } as CpuTestResult,
+      ram: { overallScore: 85 } as RamTestResult,
+      disk: { overallScore: 85 } as DiskTestResult,
+      gpu: { avgFps: 90, overallScore: 80 } as GpuStressMetrics,
+      game: { avgFps: 90, overallScore: 80 } as GameBenchMetrics,
+    };
+    const allGames = predictPlayableGames(effectiveCtx);
+    const selGame = allGames.find((g) => g.id === optimizerState.selectedTrendGameId) || allGames[0];
+    const historyData = generate30DayGameFpsHistory(selGame.fpsDlssFg);
+    renderGame30DayFpsTrendChartD3(selGame.title, historyData, mount, 210);
+  };
+
   const trendSelect = root.querySelector<HTMLSelectElement>('#sp-trend-game-select');
   if (trendSelect) {
     trendSelect.addEventListener('change', () => {
@@ -831,16 +1154,6 @@ export function bindPcSuitabilityReportEvents(root: HTMLElement, rerender: () =>
       renderTrendChart();
     });
   }
-
-  const renderTrendChart = () => {
-    const mount = root.querySelector<HTMLElement>('#sp-game-trend-d3-mount');
-    if (!mount) return;
-    const dummyCtx = { specs: null, cpu: { multiCoreScore: 8000, coresUsed: 8 }, ram: { overallScore: 85 }, disk: { overallScore: 85 }, gpu: { avgFps: 90 }, game: { avgFps: 90 } };
-    const allGames = predictPlayableGames(dummyCtx as any);
-    const selGame = allGames.find((g) => g.id === optimizerState.selectedTrendGameId) || allGames[0];
-    const historyData = generate30DayGameFpsHistory(selGame.fpsDlssFg);
-    renderGame30DayFpsTrendChartD3(selGame.title, historyData, mount, 210);
-  };
 
   renderTrendChart();
 

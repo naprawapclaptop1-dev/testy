@@ -44,6 +44,10 @@ import {
   bindPcSuitabilityReportEvents,
   renderPcSuitabilityAndGamesReport,
 } from './ui/pcSuitabilityAndGamesReport';
+import {
+  bindPcRankingSectionEvents,
+  renderPcRankingSectionHtml,
+} from './ui/pcRankingReport';
 import { getSystemSpecs } from './services/systemInfo.service';
 import { cpuTestService } from './services/cpuTest.service';
 import { ramTestService } from './services/ramTest.service';
@@ -1292,6 +1296,11 @@ export class SystemPulseApp {
       battery: this.batteryState,
       realCpuTempC: thermalMonitorService.getLiveCpuTempC(),
       realGpuTempC: thermalMonitorService.getLiveGpuTempC(),
+      hardwareScan: this.hardwareScan,
+      componentScans: this.componentScans,
+      thermalState: this.thermalState,
+      gpuSuiteResults: this.gpuSuiteResults,
+      stressHistory: this.stressHistory,
     });
     void this.recordLog(
       'SYSTEM',
@@ -1659,6 +1668,16 @@ export class SystemPulseApp {
 
         ${renderPcSuitabilityAndGamesReport({
           specs: this.specs,
+          cpu: this.cpuState,
+          ram: this.ramState,
+          disk: this.diskState,
+          gpu: this.gpuState,
+          game: this.gameState,
+        })}
+
+        ${renderPcRankingSectionHtml({
+          specs: this.specs,
+          scores,
           cpu: this.cpuState,
           ram: this.ramState,
           disk: this.diskState,
@@ -2035,7 +2054,32 @@ export class SystemPulseApp {
       }
     });
 
-    bindPcSuitabilityReportEvents(host, () => this.renderDashboard(host));
+    bindPcSuitabilityReportEvents(
+      host,
+      () => this.renderDashboard(host),
+      {
+        specs: this.specs,
+        cpu: this.cpuState,
+        ram: this.ramState,
+        disk: this.diskState,
+        gpu: this.gpuState,
+        game: this.gameState,
+      },
+      () => void this.runFullSystemSuite()
+    );
+    bindPcRankingSectionEvents(
+      host,
+      {
+        specs: this.specs,
+        scores,
+        cpu: this.cpuState,
+        ram: this.ramState,
+        disk: this.diskState,
+        gpu: this.gpuState,
+        game: this.gameState,
+      },
+      () => this.renderDashboard(host)
+    );
     animateMetricValueElements(host, this.metricAnimPrevValues);
   }
 
@@ -3617,7 +3661,28 @@ export class SystemPulseApp {
       });
     }
 
-    bindPcSuitabilityReportEvents(host, () => this.renderGameBenchView(host));
+    const bindGameSuitability = () => {
+      bindPcSuitabilityReportEvents(
+        host,
+        () => this.renderGameBenchView(host),
+        {
+          specs: this.specs,
+          cpu: this.cpuState,
+          ram: this.ramState,
+          disk: this.diskState,
+          gpu: this.gpuState,
+          game: this.gameState,
+        },
+        () => void this.runFullSystemSuite()
+      );
+      host.querySelectorAll<HTMLButtonElement>('#sp-games-suitability-report [data-open-mod]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const mod = btn.dataset.openMod as ActiveModule;
+          if (mod) this.setModule(mod);
+        });
+      });
+    };
+    bindGameSuitability();
 
     host.querySelectorAll<HTMLButtonElement>('[data-game-cat]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -3926,6 +3991,18 @@ export class SystemPulseApp {
           this.gameState.stabilityPct,
           `${currentMeta.shortTitle} · ${this.gameState.preset.toUpperCase()} · Śr. ${this.gameState.avgFps} FPS · 1% Low ${this.gameState.low1PctFps} FPS`
         );
+        const suitEl = host.querySelector('#sp-games-suitability-report');
+        if (suitEl) {
+          suitEl.outerHTML = renderPcSuitabilityAndGamesReport({
+            specs: this.specs,
+            cpu: this.cpuState,
+            ram: this.ramState,
+            disk: this.diskState,
+            gpu: this.gpuState,
+            game: this.gameState,
+          });
+          bindGameSuitability();
+        }
       } else {
         this.beginStressSession();
         gameBenchService.start();
@@ -3961,6 +4038,7 @@ export class SystemPulseApp {
       !g.running && g.fps === 0
         ? `<span>Tryb: <strong class="status-cyan">PODGLĄD 3D</strong></span>`
         : `<span>FPS: <strong class="status-cyan">${g.fps}</strong></span>
+           <span>Wynik GPU: <strong class="${g.overallScore >= 80 ? 'status-ok' : g.overallScore >= 55 ? 'status-cyan' : 'status-warn'}">${g.overallScore > 0 ? `${g.overallScore}/100` : '—'}</strong></span>
            <span>1% Low: <strong>${g.low1PctFps}</strong></span>
            <span>Frame: <strong>${g.frameTimeMs} ms</strong></span>`;
     return `
@@ -4113,6 +4191,9 @@ export class SystemPulseApp {
     if (btn) {
       btn.className = `btn ${g.running ? 'btn-danger' : 'btn-primary'} btn-sm`;
       btn.innerHTML = `${iconSvg(g.running ? 'stop' : 'play', 14)}<span>${g.running ? 'Zatrzymaj grę' : 'Start Gry MAX'}</span>`;
+    }
+    if (document.fullscreenElement) {
+      return;
     }
     const mEl = this.root.querySelector('#game-live-metrics');
     if (mEl) mEl.innerHTML = this.renderGameMetricsHtml(g);
@@ -5102,7 +5183,7 @@ export class SystemPulseApp {
           <div>
             <h1 class="section-title">Stres-test karty graficznej (${totalScenes} scen WebGL 3D — Bez limitu FPS)</h1>
             <p class="section-subtitle">
-              Klasyczny Rdzeń GPU &amp; Wir PBR + ${totalScenes - 1} ekstremalnych scen 3D (FurMark 48 warstw, Raymarch Mandelbulb, Galaktyka 350k, VRAM 4K Overdraw, 6M+ trójkątów, Cyber Miasto 40k, Plazma FBM, Katedra Mengera, Sieć Kwantowa 180k, Mgławica 3D, Kryształy PBR, Czarna Dziura RT, Helisa DNA 240k) z <span class="font-mono">gl.finish()</span>.
+              Klasyczny Rdzeń GPU &amp; Wir PBR + ${totalScenes - 1} ekstremalnych scen 3D (FurMark 48 warstw, Raymarch Mandelbulb, Galaktyka 350k, VRAM 4K Overdraw, 6M+ trójkątów, Cyber Miasto 40k, Plazma FBM, Katedra Mengera, Sieć Kwantowa 180k, Mgławica 3D, Kryształy PBR, Czarna Dziura RT, Helisa DNA 240k) z nieblokującą synchronizacją <span class="font-mono">WebGL2 fenceSync</span> i panelem OSD FPS na żywo.
             </p>
           </div>
           <div class="row-wrap" style="gap:10px;align-items:center;">
@@ -5139,16 +5220,17 @@ export class SystemPulseApp {
           }
         </div>
 
-        <div class="gpu-viewport-wrap">
+        <div id="gpu-viewport-shell" class="gpu-viewport-wrap">
           <div id="gpu-canvas-mount" class="gpu-viewport-mount"></div>
 
           <div class="gpu-hud-top">
             <div id="gpu-hud-live" class="gpu-hud-strip">
               <span>Scena: <strong class="status-cyan">${esc(activeSceneMeta.shortName)}</strong></span>
-              <span>FPS: <strong class="status-cyan">${g.fps.toLocaleString('pl-PL')}</strong></span>
+              <span>FPS: <strong class="status-cyan">${g.fps.toLocaleString('pl-PL')}</strong> (Śr. ${g.avgFps} · 1% Low ${g.low1PctFps})</span>
+              <span>Wynik GPU: <strong class="${g.overallScore >= 80 ? 'status-ok' : g.overallScore >= 55 ? 'status-cyan' : 'status-warn'}">${g.overallScore > 0 ? `${g.overallScore}/100` : '—'}</strong></span>
               <span>Frame: <strong>${g.frameTimeMs} ms</strong></span>
-              <span>Obiekty/Kroki: <strong>${g.instanceCount.toLocaleString('pl-PL')}</strong></span>
-              <span>Trójkąty: <strong>${g.triangles.toLocaleString('pl-PL')}</strong></span>
+              <span>Temp: <strong>${(thermalMonitorService.getLiveGpuTempC() ?? g.estTempC).toFixed(1)} °C</strong> · <strong>${g.coreClockMhz || 2550} MHz</strong></span>
+              <span>Bufor: <strong>${g.renderWidth && g.renderHeight ? `${g.renderWidth}×${g.renderHeight}` : 'Auto'} (${g.renderScalePct ?? 100}%)</strong></span>
               <span>Tryb: <strong class="status-ok">${g.fpsMode === 'uncapped' ? 'Bez limitu FPS' : 'VSync (rAF)'}</strong></span>
             </div>
             <div id="gpu-hud-verdict" class="gpu-hud-strip">
@@ -5203,7 +5285,7 @@ export class SystemPulseApp {
             ${this.renderGpuChartHtml(g)}
           </div>
           <p style="margin:0;font-size:12px;color:var(--text-muted);">
-            Tryb <strong>Bez limitu FPS</strong> pomija blokadę VSync monitora (np. 60/144/165 Hz) i po każdej partii klatek wywołuje sprzętową barierę <span class="font-mono">gl.finish()</span>, dzięki czemu zliczane są wyłącznie klatki faktycznie wyrenderowane przez kartę graficzną.
+            Tryb <strong>Bez limitu FPS</strong> pomija blokadę VSync monitora i używa nieblokującej bariery <span class="font-mono">WebGL2 fenceSync</span> z adaptacyjnym skalowaniem rozdzielczości anty-freeze, dzięki czemu zliczane są wyłącznie faktycznie wyrenderowane klatki GPU bez zawieszania interfejsu.
           </p>
         </div>
 
@@ -5522,15 +5604,28 @@ export class SystemPulseApp {
       GPU_SCENE_CATALOG.find((s) => s.id === (g.sceneMode || 'vortex')) || GPU_SCENE_CATALOG[0];
     const hudLive = this.root.querySelector('#gpu-hud-live');
     if (hudLive) {
+      const liveTemp = thermalMonitorService.getLiveGpuTempC();
+      const tempC = liveTemp !== null ? liveTemp : g.estTempC;
+      const resTxt = g.renderWidth && g.renderHeight ? `${g.renderWidth}×${g.renderHeight}` : 'Auto';
+      const scaleTxt = `${g.adaptiveThrottleActive ? 'Auto ' : ''}${g.renderScalePct ?? 100}%`;
       hudLive.innerHTML = `
         <span>Scena: <strong class="status-cyan">${esc(activeSceneMeta.shortName)}</strong></span>
-        <span>FPS: <strong class="status-cyan">${g.fps.toLocaleString('pl-PL')}</strong></span>
+        <span>FPS: <strong class="status-cyan">${g.fps.toLocaleString('pl-PL')}</strong> (Śr. ${g.avgFps} · 1% Low ${g.low1PctFps})</span>
+        <span>Wynik GPU: <strong class="${g.overallScore >= 80 ? 'status-ok' : g.overallScore >= 55 ? 'status-cyan' : 'status-warn'}">${g.overallScore > 0 ? `${g.overallScore}/100` : '—'}</strong></span>
         <span>Frame: <strong>${g.frameTimeMs} ms</strong></span>
-        <span>Obiekty/Kroki: <strong>${g.instanceCount.toLocaleString('pl-PL')}</strong></span>
-        <span>Trójkąty: <strong>${g.triangles.toLocaleString('pl-PL')}</strong></span>
+        <span>Temp: <strong>${tempC.toFixed(1)} °C</strong> · <strong>${g.coreClockMhz || 2550} MHz</strong></span>
+        <span>Bufor: <strong>${resTxt} (${scaleTxt})</strong></span>
         <span>Tryb: <strong class="status-ok">${g.fpsMode === 'uncapped' ? 'Bez limitu FPS' : 'VSync (rAF)'}</strong></span>
       `;
     }
+    // Keep scene selector buttons and description in sync when switched via fullscreen toolbar
+    this.root.querySelectorAll<HTMLButtonElement>('[data-gpu-scene]').forEach((b) => {
+      b.classList.toggle('active', b.dataset.gpuScene === activeSceneMeta.id);
+    });
+    const unitBadge = this.root.querySelector('#gpu-scene-unit-badge');
+    const descEl = this.root.querySelector('#gpu-scene-desc');
+    if (unitBadge) unitBadge.textContent = `Podsystem: ${activeSceneMeta.targetUnit}`;
+    if (descEl) descEl.innerHTML = `<strong>${esc(activeSceneMeta.name)}:</strong> ${esc(activeSceneMeta.description)}`;
     const hudVerdict = this.root.querySelector('#gpu-hud-verdict');
     if (hudVerdict) {
       const cls =
@@ -5547,6 +5642,10 @@ export class SystemPulseApp {
     if (toggleBtn) {
       toggleBtn.className = `btn ${g.running ? 'btn-danger' : 'btn-primary'} btn-sm`;
       toggleBtn.innerHTML = `${iconSvg(g.running ? 'stop' : 'play', 14)}<span>${g.running ? 'Zatrzymaj stres-test' : 'Start stres-testu GPU'}</span>`;
+    }
+    // Skip rebuilding offscreen metric cards & D3 charts during fullscreen 3D rendering for zero UI jank
+    if (document.fullscreenElement) {
+      return;
     }
     const metricsEl = this.root.querySelector('#gpu-live-metrics');
     if (metricsEl) {

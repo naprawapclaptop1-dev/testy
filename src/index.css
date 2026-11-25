@@ -687,7 +687,31 @@ body {
   overflow: hidden;
 }
 
+.gpu-viewport-wrap:fullscreen,
+.gpu-viewport-wrap:-webkit-full-screen {
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: none !important;
+  border-radius: 0 !important;
+  border: none !important;
+  background: #03060c;
+}
+
+#gpu-viewport-shell:fullscreen .gpu-hud-top,
+#gpu-viewport-shell:-webkit-full-screen .gpu-hud-top,
+#gpu-viewport-shell.osd-active .gpu-hud-top {
+  display: none;
+}
+
+.gpu-viewport-wrap:fullscreen .gpu-hud-bottom,
+.gpu-viewport-wrap:-webkit-full-screen .gpu-hud-bottom {
+  bottom: 18px;
+  z-index: 25;
+  background: rgba(5, 9, 18, 0.94);
+}
+
 .gpu-viewport-mount {
+  position: relative;
   width: 100%;
   height: 100%;
 }
@@ -697,6 +721,7 @@ body {
   top: 10px;
   left: 12px;
   right: 12px;
+  padding-right: 196px;
   box-sizing: border-box;
   min-width: 0;
   display: flex;
@@ -709,10 +734,9 @@ body {
 }
 
 .gpu-hud-strip {
-  background: rgba(7, 9, 14, 0.86);
-  backdrop-filter: blur(8px);
+  background: rgba(7, 9, 14, 0.92);
   color: #f1f5f9;
-  border: 1px solid rgba(51, 65, 85, 0.9);
+  border: 1px solid rgba(51, 65, 85, 0.95);
   border-radius: 8px;
   padding: 6px 11px;
   display: flex;
@@ -732,7 +756,7 @@ body {
   bottom: 14px;
   left: 50%;
   transform: translateX(-50%);
-  background: rgba(7, 9, 14, 0.92);
+  background: rgba(7, 9, 14, 0.94);
   color: #f1f5f9;
   border: 1px solid #334155;
   border-radius: 10px;
@@ -744,6 +768,256 @@ body {
   max-width: 96%;
   flex-wrap: wrap;
   justify-content: center;
+}
+
+/* Live Fullscreen / Toggleable RTSS-Style GPU Telemetry OSD */
+.gpu-fs-toolbar {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 30;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.gpu-fs-btn {
+  background: rgba(10, 16, 30, 0.94);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.55);
+  padding: 6px 11px;
+  border-radius: 7px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.55);
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.12s ease;
+}
+
+.gpu-fs-btn:hover {
+  background: rgba(15, 28, 52, 0.98);
+  border-color: rgba(56, 189, 248, 0.85);
+}
+
+.gpu-fs-btn.active {
+  background: rgba(6, 182, 212, 0.28);
+  color: #e0f2fe;
+  border-color: #22d3ee;
+}
+
+.gpu-fs-btn.danger {
+  color: #fda4af;
+  border-color: rgba(244, 63, 94, 0.65);
+}
+
+.gpu-live-osd {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 26;
+  width: 376px;
+  max-width: calc(100% - 24px);
+  background: rgba(6, 10, 20, 0.92);
+  color: #f1f5f9;
+  border: 1px solid rgba(56, 189, 248, 0.42);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.65);
+  pointer-events: none;
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.gpu-live-osd.visible {
+  display: flex;
+}
+
+.gpu-osd-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+  padding-bottom: 6px;
+}
+
+.gpu-osd-title {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #e2e8f0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gpu-osd-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(16, 185, 129, 0.18);
+  color: #34d399;
+  border: 1px solid rgba(52, 211, 153, 0.45);
+  white-space: nowrap;
+}
+
+.gpu-osd-badge.paused {
+  background: rgba(148, 163, 184, 0.16);
+  color: #cbd5e1;
+  border-color: rgba(148, 163, 184, 0.4);
+}
+
+.gpu-osd-badge.warn {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fbbf24;
+  border-color: rgba(251, 191, 36, 0.5);
+}
+
+.gpu-osd-badge.err {
+  background: rgba(244, 63, 94, 0.22);
+  color: #fda4af;
+  border-color: rgba(251, 113, 133, 0.55);
+}
+
+.gpu-osd-fps-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.gpu-osd-fps-main {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.gpu-osd-fps-val {
+  font-size: 30px;
+  line-height: 1;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.gpu-osd-fps-unit {
+  font-size: 12px;
+  font-weight: 700;
+  color: #94a3b8;
+}
+
+.gpu-osd-score-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 9px;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.8);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  min-width: 78px;
+}
+
+.gpu-osd-score-lbl {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: #94a3b8;
+  line-height: 1.1;
+}
+
+.gpu-osd-score-row {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+  margin-top: 1px;
+}
+
+.gpu-osd-score-val {
+  font-size: 20px;
+  line-height: 1;
+  font-weight: 800;
+}
+
+.gpu-osd-score-max {
+  font-size: 10px;
+  font-weight: 700;
+  color: #64748b;
+}
+
+.gpu-osd-ft-box {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+}
+
+.gpu-osd-ft-val {
+  font-size: 13px;
+  font-weight: 700;
+  color: #fbbf24;
+}
+
+.gpu-osd-sparkline {
+  width: 104px;
+  height: 22px;
+  display: block;
+}
+
+.gpu-osd-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px 10px;
+  padding-top: 2px;
+}
+
+.gpu-osd-cell {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(51, 65, 85, 0.55);
+  border-radius: 5px;
+  padding: 3px 6px;
+}
+
+.gpu-osd-lbl {
+  color: #94a3b8;
+  font-size: 10px;
+}
+
+.gpu-osd-val {
+  color: #f8fafc;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.gpu-osd-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10px;
+  color: #94a3b8;
+  border-top: 1px solid rgba(148, 163, 184, 0.16);
+  padding-top: 5px;
+}
+
+.gpu-osd-gpu-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 210px;
 }
 
 /* Display Diagnostics */
@@ -5333,6 +5607,41 @@ body {
 }
 
 /* =========================================================================
+   UTILITY HELPERS (verified across dashboard, thermal, fan & PSU panels)
+   ========================================================================= */
+
+.stack-xs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.status-amber {
+  color: #fbbf24;
+}
+
+.input-text {
+  padding: 6px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-inset);
+  color: var(--text-primary);
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.input-text:focus {
+  border-color: var(--accent-cyan);
+}
+
+.thermal-sparkline-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* =========================================================================
    PLAYABLE GAMES FPS CHART, PC/LAPTOP SUITABILITY & 5-CATEGORY GPU OPTIMIZER
    ========================================================================= */
 
@@ -5340,6 +5649,229 @@ body {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.sp-panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-hairline);
+  border-radius: 12px;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.sp-games-chart-panel {
+  border-color: rgba(6, 182, 212, 0.28);
+}
+
+.sp-games-trend-panel {
+  border-color: rgba(99, 102, 241, 0.28);
+}
+
+.sp-suitability-panel {
+  border-color: rgba(16, 185, 129, 0.25);
+}
+
+.sp-gpu-guide-panel {
+  border-color: rgba(56, 189, 248, 0.26);
+}
+
+.sp-games-untested-card {
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.12), rgba(15, 23, 42, 0.96));
+  border: 1px solid rgba(6, 182, 212, 0.35);
+  padding: 24px;
+  border-radius: 14px;
+  text-align: center;
+  align-items: center;
+  gap: 6px;
+}
+
+.sp-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.sp-panel-head h3 {
+  margin: 3px 0 4px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.sp-eyebrow {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent-cyan);
+}
+
+.sp-muted {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.48;
+  color: var(--text-secondary);
+}
+
+.sp-muted strong {
+  color: var(--text-primary);
+}
+
+.sp-games-head-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.sp-games-legend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.sp-legend-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.sp-legend-dot i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+}
+
+.sp-legend-dot--1080 i {
+  background: linear-gradient(90deg, #0ea5e9, #38bdf8);
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.55);
+}
+
+.sp-legend-dot--1440 i {
+  background: linear-gradient(90deg, #6366f1, #818cf8);
+  box-shadow: 0 0 8px rgba(129, 140, 248, 0.55);
+}
+
+.sp-legend-dot--fg i {
+  background: linear-gradient(90deg, #10b981, #34d399);
+  box-shadow: 0 0 8px rgba(52, 211, 153, 0.55);
+}
+
+.sp-calibration-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sp-cal-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.sp-cal-pill--ok {
+  background: rgba(16, 185, 129, 0.12);
+  border-color: rgba(16, 185, 129, 0.35);
+  color: #34d399;
+}
+
+.sp-cal-pill--ok:hover {
+  background: rgba(16, 185, 129, 0.2);
+}
+
+.sp-cal-pill--pending {
+  background: rgba(245, 158, 11, 0.1);
+  border-color: rgba(245, 158, 11, 0.34);
+  color: #fbbf24;
+}
+
+.sp-cal-pill--pending:hover {
+  background: rgba(245, 158, 11, 0.2);
+}
+
+.sp-games-summary-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-hairline);
+}
+
+.sp-games-summary-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sp-summary-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  border: 1px solid var(--border-hairline);
+  background: rgba(15, 23, 42, 0.65);
+  color: var(--text-secondary);
+}
+
+.sp-summary-chip--ultra strong { color: #34d399; }
+.sp-summary-chip--smooth strong { color: #38bdf8; }
+.sp-summary-chip--playable strong { color: #fbbf24; }
+.sp-summary-chip--low strong { color: #fb7185; }
+
+.sp-games-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.sp-filter-btn {
+  padding: 5px 10px;
+  border-radius: 7px;
+  font-size: 11.5px;
+  font-weight: 600;
+  border: 1px solid var(--border-hairline);
+  background: rgba(15, 23, 42, 0.72);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.sp-filter-btn:hover {
+  border-color: rgba(56, 189, 248, 0.45);
+  color: var(--text-primary);
+}
+
+.sp-filter-btn.active {
+  background: rgba(6, 182, 212, 0.18);
+  border-color: rgba(6, 182, 212, 0.55);
+  color: #38bdf8;
 }
 
 .sp-games-chart-grid {
@@ -5351,8 +5883,8 @@ body {
 .sp-game-bar-card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 12px 14px;
+  gap: 9px;
+  padding: 13px 14px;
   border-radius: 10px;
   background: var(--bg-inset);
   border: 1px solid var(--border-hairline);
@@ -5363,6 +5895,7 @@ body {
   border-color: rgba(6, 182, 212, 0.45);
 }
 
+.sp-game-bar-top,
 .sp-game-bar-head {
   display: flex;
   align-items: flex-start;
@@ -5370,42 +5903,93 @@ body {
   gap: 8px;
 }
 
+.sp-game-bar-title-col {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
 .sp-game-bar-title {
   font-size: 13px;
   font-weight: 700;
   color: var(--text-primary);
+  line-height: 1.3;
 }
 
+.sp-game-meta,
 .sp-game-bar-meta {
+  display: block;
   font-size: 11px;
   color: var(--text-muted);
-  margin-top: 2px;
+  line-height: 1.35;
 }
 
+.sp-game-tier {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+
+.sp-game-tier--ultra {
+  background: rgba(16, 185, 129, 0.16);
+  border-color: rgba(16, 185, 129, 0.42);
+  color: #34d399;
+}
+
+.sp-game-tier--smooth {
+  background: rgba(14, 165, 233, 0.16);
+  border-color: rgba(56, 189, 248, 0.42);
+  color: #38bdf8;
+}
+
+.sp-game-tier--playable {
+  background: rgba(245, 158, 11, 0.16);
+  border-color: rgba(251, 191, 36, 0.42);
+  color: #fbbf24;
+}
+
+.sp-game-tier--low {
+  background: rgba(244, 63, 94, 0.16);
+  border-color: rgba(251, 113, 133, 0.45);
+  color: #fb7185;
+}
+
+.sp-game-bars,
 .sp-game-bar-rows {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 6px;
 }
 
 .sp-game-bar-row {
   display: grid;
-  grid-template-columns: 98px 1fr 66px;
+  grid-template-columns: 102px 1fr 64px;
   align-items: center;
   gap: 8px;
 }
 
+.sp-game-bar-label,
 .sp-game-bar-lbl {
   font-family: var(--font-mono);
   font-size: 10.5px;
   color: var(--text-secondary);
+  white-space: nowrap;
 }
 
 .sp-game-bar-track {
   height: 9px;
   border-radius: 999px;
-  background: rgba(15, 23, 42, 0.9);
-  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(15, 23, 42, 0.92);
+  border: 1px solid rgba(148, 163, 184, 0.18);
   overflow: hidden;
 }
 
@@ -5415,16 +5999,19 @@ body {
   transition: width 0.25s ease;
 }
 
+.sp-game-bar-fill--1080,
 .sp-game-bar-fill.is-1080p {
-  background: linear-gradient(90deg, #0ea5e9, #38bdf8);
+  background: linear-gradient(90deg, #0284c7, #38bdf8);
 }
 
+.sp-game-bar-fill--1440,
 .sp-game-bar-fill.is-1440p {
   background: linear-gradient(90deg, #6366f1, #818cf8);
 }
 
+.sp-game-bar-fill--fg,
 .sp-game-bar-fill.is-upscaled {
-  background: linear-gradient(90deg, #10b981, #34d399);
+  background: linear-gradient(90deg, #059669, #34d399);
 }
 
 .sp-game-bar-val {
@@ -5433,14 +6020,35 @@ body {
   font-weight: 700;
   text-align: right;
   color: var(--text-primary);
+  white-space: nowrap;
 }
 
+.sp-game-bar-val--fg {
+  color: #34d399;
+}
+
+.sp-game-vram-warn {
+  font-size: 11px;
+  line-height: 1.35;
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+
+.sp-game-rec-line,
 .sp-game-bar-tip {
   font-size: 11px;
-  line-height: 1.38;
+  line-height: 1.4;
   color: var(--text-secondary);
-  padding-top: 4px;
+  padding-top: 6px;
   border-top: 1px dashed rgba(148, 163, 184, 0.16);
+}
+
+.sp-game-rec-line strong {
+  color: var(--text-primary);
+  font-weight: 600;
 }
 
 .sp-suitability-grid {
@@ -5473,19 +6081,58 @@ body {
 .sp-suit-title-wrap {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
 }
 
 .sp-suit-title {
   font-size: 12.5px;
   font-weight: 700;
   color: var(--text-primary);
-  margin-bottom: 3px;
+  line-height: 1.3;
+}
+
+.sp-suit-badge {
+  align-self: flex-start;
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.sp-suit-badge--ideal {
+  background: rgba(16, 185, 129, 0.16);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+}
+
+.sp-suit-badge--vgood {
+  background: rgba(14, 165, 233, 0.16);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+}
+
+.sp-suit-badge--good {
+  background: rgba(245, 158, 11, 0.16);
+  color: #fbbf24;
+  border: 1px solid rgba(251, 191, 36, 0.35);
+}
+
+.sp-suit-badge--basic {
+  background: rgba(244, 63, 94, 0.16);
+  color: #fb7185;
+  border: 1px solid rgba(251, 113, 133, 0.38);
 }
 
 .sp-suit-score {
   font-family: var(--font-mono);
   font-size: 18px;
   font-weight: 800;
+  color: var(--text-primary);
 }
 
 .sp-suit-score.is-ok {
@@ -5500,26 +6147,38 @@ body {
   color: #fb7185;
 }
 
+.sp-suit-bar-track,
 .sp-suit-track {
-  height: 7px;
+  height: 8px;
   border-radius: 999px;
   background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(148, 163, 184, 0.16);
   overflow: hidden;
 }
 
+.sp-suit-bar-fill,
 .sp-suit-fill {
   height: 100%;
   border-radius: 999px;
+  background: linear-gradient(90deg, #0ea5e9, #38bdf8);
+  transition: width 0.25s ease;
 }
 
+.sp-suit-bar-fill--ideal,
 .sp-suit-fill.is-ok {
   background: linear-gradient(90deg, #059669, #34d399);
 }
 
+.sp-suit-bar-fill--vgood {
+  background: linear-gradient(90deg, #0284c7, #38bdf8);
+}
+
+.sp-suit-bar-fill--good,
 .sp-suit-fill.is-warn {
   background: linear-gradient(90deg, #d97706, #fbbf24);
 }
 
+.sp-suit-bar-fill--basic,
 .sp-suit-fill.is-err {
   background: linear-gradient(90deg, #e11d48, #fb7185);
 }
@@ -5531,11 +6190,12 @@ body {
   color: var(--text-secondary);
 }
 
+.sp-suit-note,
 .sp-suit-bottleneck {
   font-size: 10.5px;
   font-family: var(--font-mono);
   color: var(--text-muted);
-  padding-top: 4px;
+  padding-top: 5px;
   border-top: 1px solid rgba(148, 163, 184, 0.14);
 }
 
@@ -5562,6 +6222,7 @@ body {
   color: var(--text-primary);
 }
 
+.sp-select,
 .sp-opt-input {
   padding: 7px 10px;
   border-radius: 7px;
@@ -5573,7 +6234,6 @@ body {
 }
 
 .sp-scheme-result-box {
-  margin-top: 12px;
   padding: 14px 16px;
   border-radius: 10px;
   background: rgba(15, 23, 42, 0.78);
@@ -5583,12 +6243,72 @@ body {
   gap: 12px;
 }
 
+.sp-scheme-result-head,
 .sp-scheme-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+.sp-scheme-result-head h4 {
+  margin: 5px 0 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: #f8fafc;
+}
+
+.sp-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.sp-badge--ok {
+  background: rgba(16, 185, 129, 0.16);
+  border: 1px solid rgba(16, 185, 129, 0.38);
+  color: #34d399;
+}
+
+.sp-scheme-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sp-btn {
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: filter 0.15s ease, transform 0.15s ease;
+}
+
+.sp-btn--primary {
+  background: linear-gradient(135deg, #06b6d4, #0284c7);
+  color: #f8fafc;
+  box-shadow: 0 4px 14px rgba(6, 182, 212, 0.32);
+}
+
+.sp-btn--primary:hover {
+  filter: brightness(1.08);
+}
+
+.sp-scheme-feedback {
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: rgba(16, 185, 129, 0.14);
+  border: 1px solid rgba(16, 185, 129, 0.38);
+  color: #6ee7b7;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .sp-scheme-title {
@@ -5616,7 +6336,29 @@ body {
   border: 1px solid var(--border-hairline);
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
+}
+
+.sp-scheme-item span {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+
+.sp-scheme-item strong {
+  font-size: 12px;
+  line-height: 1.38;
+  color: var(--text-primary);
+}
+
+.sp-scheme-item--gain {
+  border-color: rgba(16, 185, 129, 0.35);
+  background: rgba(16, 185, 129, 0.08);
+}
+
+.sp-scheme-item--gain strong {
+  color: #34d399;
 }
 
 .sp-scheme-k {
@@ -5655,6 +6397,27 @@ body {
   gap: 8px;
 }
 
+.sp-cat-card-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sp-cat-card-head h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.sp-cat-num {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--accent-cyan);
+}
+
 .sp-cat-head {
   font-size: 13px;
   font-weight: 700;
@@ -5674,6 +6437,208 @@ body {
 
 .sp-cat-list strong {
   color: var(--text-primary);
+}
+
+/* =========================================================================
+   PC / LAPTOP PERFORMANCE RANKING SECTION
+   ========================================================================= */
+.sp-ranking-panel {
+  border-color: rgba(6, 182, 212, 0.28);
+}
+
+.sp-ranking-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sp-ranking-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.sp-ranking-kpi {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-hairline);
+}
+
+.sp-ranking-kpi-lbl {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.sp-ranking-kpi-val {
+  font-size: 20px;
+  font-weight: 800;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.sp-ranking-kpi-sub {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.sp-ranking-save-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-hairline);
+}
+
+.sp-ranking-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  border-radius: 10px;
+  border: 1px solid var(--border-hairline);
+  background: var(--bg-inset);
+}
+
+.sp-ranking-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  min-width: 680px;
+}
+
+.sp-ranking-table thead th {
+  text-align: left;
+  padding: 9px 10px;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-strong);
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.sp-ranking-table tbody td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border-hairline);
+  color: var(--text-primary);
+  vertical-align: middle;
+}
+
+.sp-rank-row {
+  transition: background-color 0.15s ease;
+}
+
+.sp-rank-row:hover {
+  background: rgba(148, 163, 184, 0.06);
+}
+
+.sp-rank-row--current {
+  background: rgba(6, 182, 212, 0.14);
+}
+
+.sp-rank-row--current:hover {
+  background: rgba(6, 182, 212, 0.2);
+}
+
+.sp-rank-row--saved {
+  background: rgba(16, 185, 129, 0.09);
+}
+
+.sp-rank-row--saved:hover {
+  background: rgba(16, 185, 129, 0.15);
+}
+
+.sp-rank-name-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sp-rank-name-cell strong {
+  font-size: 12.5px;
+  color: var(--text-primary);
+}
+
+.sp-rank-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.sp-rank-tag {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  background: rgba(148, 163, 184, 0.15);
+  color: var(--text-secondary);
+  border: 1px solid rgba(148, 163, 184, 0.28);
+}
+
+.sp-rank-tag--current {
+  background: rgba(6, 182, 212, 0.22);
+  color: #67e8f9;
+  border-color: rgba(6, 182, 212, 0.55);
+}
+
+.sp-rank-tag--saved {
+  background: rgba(16, 185, 129, 0.2);
+  color: #6ee7b7;
+  border-color: rgba(16, 185, 129, 0.5);
+}
+
+.sp-rank-score-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sp-rank-score-cell strong {
+  font-size: 12px;
+  min-width: 48px;
+  text-align: right;
+}
+
+.sp-rank-bar-track {
+  flex: 1;
+  height: 7px;
+  border-radius: 99px;
+  background: rgba(148, 163, 184, 0.18);
+  overflow: hidden;
+  min-width: 72px;
+}
+
+.sp-rank-bar-fill {
+  height: 100%;
+  border-radius: 99px;
+  transition: width 0.25s ease;
+}
+
+.sp-rank-bar-fill--top {
+  background: linear-gradient(90deg, #06b6d4, #10b981);
+}
+
+.sp-rank-bar-fill--mid {
+  background: linear-gradient(90deg, #3b82f6, #06b6d4);
+}
+
+.sp-rank-bar-fill--low {
+  background: linear-gradient(90deg, #f59e0b, #ef4444);
 }
 
 /* Cinematic Graphics & Polish Enhancements */

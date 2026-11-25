@@ -1,5 +1,10 @@
 import * as THREE from 'three';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
 import {
   GpuFpsMode,
   GpuLoadPreset,
@@ -7,7 +12,17 @@ import {
   GpuStressMetrics,
   GpuTelemetryPoint,
 } from '../types';
+import {
+  createCarbonFiberTextures,
+  createCinematicBackdropDome,
+  createCinematicHdrEnvironment,
+  createFloatingEmberBokeh,
+  createPlanarReflector,
+  createVolumetricLightShafts,
+} from './aaaVisuals';
+import { createCinematicGradePass, createStudioFloorDeckTextures } from './cinematicPostFx';
 import { createArchitecturePbrTextures } from './gameVehicleModels';
+import { thermalMonitorService } from './thermalMonitor.service';
 
 export interface GpuSceneCatalogItem {
   id: GpuSceneMode;
@@ -382,6 +397,249 @@ function detectSoftwareGl(): { isSoftwareGl: boolean; rendererName: string } {
   }
 }
 
+export const HEAVY_FRAGMENT_SCENES: ReadonlySet<GpuSceneMode> = new Set<GpuSceneMode>([
+  'raymarching',
+  'menger_sponge',
+  'volumetric_nebula',
+  'blackhole_lensing',
+  'fractal_julia4d',
+  'volumetric_clouds_4k',
+]);
+
+export function computeSafeInitialRenderScale(
+  width: number,
+  height: number,
+  dpr: number,
+  isHeavyFragment: boolean,
+  isSoftwareGl: boolean
+): number {
+  const safeW = Math.max(320, width);
+  const safeH = Math.max(240, height);
+  const pixels = safeW * safeH;
+  if (isSoftwareGl) {
+    const swBudget = isHeavyFragment ? 480 * 270 : 960 * 540;
+    return Number(Math.max(0.38, Math.min(1, Math.sqrt(swBudget / pixels))).toFixed(2));
+  }
+  if (isHeavyFragment) {
+    // Cap initial fullscreen raymarch pixel budget (~720p-900p) so first frame never stalls Windows TDR;
+    // fast GPUs smoothly auto-scale back up to 100% within seconds.
+    const budget = 1280 * 720;
+    if (pixels <= budget) return 1;
+    return Number(Math.max(0.45, Math.min(1, Math.sqrt(budget / pixels))).toFixed(2));
+  }
+  const effectivePixels = pixels * Math.min(Math.max(1, dpr), 2) ** 2;
+  const geoBudget = 2560 * 1440;
+  if (effectivePixels > geoBudget) {
+    return Number(Math.max(0.65, Math.min(1, Math.sqrt(geoBudget / effectivePixels))).toFixed(2));
+  }
+  return 1;
+}
+
+export function computeAdaptiveRenderScale(
+  currentScale: number,
+  frameMs: number,
+  isHeavyFragment: boolean,
+  slowFrames: number,
+  fastFrames: number
+): { nextScale: number; slowFrames: number; fastFrames: number; throttled: boolean } {
+  const minScale = isHeavyFragment ? 0.38 : 0.55;
+  const slowThresholdMs = isHeavyFragment ? 48 : 58;
+  const fastThresholdMs = isHeavyFragment ? 20 : 14;
+  let nextScale = Math.max(minScale, Math.min(1, currentScale));
+  let nextSlow = slowFrames;
+  let nextFast = fastFrames;
+
+  if (frameMs >= 135) {
+    // Severe GPU stall detected — immediately reduce render resolution to prevent UI/TDR freeze
+    nextScale = Math.max(minScale, nextScale * 0.72);
+    nextSlow = 0;
+    nextFast = 0;
+  } else if (frameMs > slowThresholdMs) {
+    nextSlow++;
+    nextFast = 0;
+    if (nextSlow >= 2) {
+      nextScale = Math.max(minScale, nextScale * 0.85);
+      nextSlow = 0;
+    }
+  } else if (frameMs < fastThresholdMs && nextScale < 1) {
+    nextFast++;
+    nextSlow = 0;
+    if (nextFast >= 8) {
+      nextScale = Math.min(1, nextScale + 0.1);
+      nextFast = 0;
+    }
+  } else {
+    nextSlow = Math.max(0, nextSlow - 1);
+    nextFast = Math.max(0, nextFast - 1);
+  }
+
+  const rounded = Number(nextScale.toFixed(2));
+  return {
+    nextScale: rounded,
+    slowFrames: nextSlow,
+    fastFrames: nextFast,
+    throttled: rounded < 0.98,
+  };
+}
+
+export function computeAdaptiveRaymarchSteps(
+  baseSteps: number,
+  renderScale: number,
+  minSteps = 24
+): number {
+  const safeBase = Math.max(minSteps, Math.round(baseSteps));
+  const stepFactor = renderScale < 0.55 ? 0.6 : renderScale < 0.78 ? 0.78 : 1.0;
+  return Math.max(minSteps, Math.round(safeBase * stepFactor));
+}
+
+function escapeOsdHtml(raw: string): string {
+  return String(raw)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function formatElapsedMmSs(sec: number): string {
+  const total = Math.max(0, Math.floor(sec));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+export function renderGpuOsdHtml(
+  m: GpuStressMetrics,
+  liveGpuTempC: number | null,
+  frameHistoryMs: number[],
+  isFullscreen: boolean
+): string {
+  const fpsColor =
+    !m.running && m.fps === 0
+      ? '#94a3b8'
+      : m.fps >= 60
+        ? '#34d399'
+        : m.fps >= 30
+          ? '#38bdf8'
+          : m.fps >= 18
+            ? '#fbbf24'
+            : '#f87171';
+
+  const badgeCls = !m.running
+    ? 'paused'
+    : m.verdict === 'THROTTLING / PRZECIĄŻENIE'
+      ? 'err'
+      : m.verdict === 'LEKKI SPADEK'
+        ? 'warn'
+        : '';
+  const badgeText = !m.running ? 'GOTOWY' : `${m.preset.toUpperCase()} · ${m.verdict}`;
+
+  const tempVal = liveGpuTempC !== null ? liveGpuTempC : m.estTempC;
+  const tempTag = liveGpuTempC !== null ? 'LIVE' : 'est.';
+  const tempColor = tempVal >= 82 ? '#f87171' : tempVal >= 70 ? '#fbbf24' : '#34d399';
+
+  // Mini real-time frametime sparkline SVG (last 32 samples)
+  const samples = frameHistoryMs.slice(-32);
+  let sparkPath = '';
+  if (samples.length >= 2) {
+    const maxVal = Math.max(33, ...samples);
+    const w = 120;
+    const h = 22;
+    sparkPath = samples
+      .map((val, idx) => {
+        const x = ((idx / (samples.length - 1)) * w).toFixed(1);
+        const y = (h - Math.min(1, val / maxVal) * (h - 3) - 1.5).toFixed(1);
+        return `${idx === 0 ? 'M' : 'L'}${x},${y}`;
+      })
+      .join(' ');
+  }
+
+  const resW = m.renderWidth || 0;
+  const resH = m.renderHeight || 0;
+  const scalePct = m.renderScalePct ?? 100;
+  const resText = resW > 0 && resH > 0 ? `${resW}×${resH}` : '—';
+  const scaleBadge = m.adaptiveThrottleActive ? `Auto ${scalePct}%` : `${scalePct}%`;
+
+  const allocGb = (m.allocatedVramMB / 1024).toFixed(1);
+  const texGb = (m.textureVramMB / 1024).toFixed(1);
+  const modeLabel = m.fpsMode === 'uncapped' ? 'Bez limitu' : 'VSync';
+  const scoreColor =
+    m.overallScore <= 0
+      ? '#94a3b8'
+      : m.overallScore >= 80
+        ? '#34d399'
+        : m.overallScore >= 60
+          ? '#38bdf8'
+          : m.overallScore >= 40
+            ? '#fbbf24'
+            : '#f87171';
+  const scoreDisplay = m.overallScore > 0 ? String(m.overallScore) : '—';
+
+  return `
+    <div class="gpu-osd-header">
+      <span class="gpu-osd-title">${escapeOsdHtml(m.sceneLabel)}</span>
+      <span class="gpu-osd-badge ${badgeCls}">${escapeOsdHtml(badgeText)}</span>
+    </div>
+    <div class="gpu-osd-fps-row">
+      <div class="gpu-osd-fps-main">
+        <span class="gpu-osd-fps-val" style="color:${fpsColor};">${m.fps > 0 ? m.fps.toLocaleString('pl-PL') : '0'}</span>
+        <span class="gpu-osd-fps-unit">FPS</span>
+      </div>
+      <div class="gpu-osd-score-box">
+        <span class="gpu-osd-score-lbl">WYNIK GPU</span>
+        <div class="gpu-osd-score-row">
+          <span class="gpu-osd-score-val" style="color:${scoreColor};">${scoreDisplay}</span>
+          <span class="gpu-osd-score-max">/100</span>
+        </div>
+      </div>
+      <div class="gpu-osd-ft-box">
+        <span class="gpu-osd-ft-val">${m.frameTimeMs > 0 ? m.frameTimeMs.toFixed(1) : '0.0'} ms</span>
+        <svg class="gpu-osd-sparkline" viewBox="0 0 120 22" preserveAspectRatio="none" aria-hidden="true">
+          <line x1="0" y1="11" x2="120" y2="11" stroke="rgba(148,163,184,0.22)" stroke-dasharray="2,2" stroke-width="1"/>
+          ${sparkPath ? `<path d="${sparkPath}" fill="none" stroke="${fpsColor}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>` : ''}
+        </svg>
+      </div>
+    </div>
+    <div class="gpu-osd-grid">
+      <div class="gpu-osd-cell">
+        <span class="gpu-osd-lbl">Śr. / Max</span>
+        <span class="gpu-osd-val">${m.avgFps} / ${m.maxFps} FPS</span>
+      </div>
+      <div class="gpu-osd-cell">
+        <span class="gpu-osd-lbl">Min / 1% Low</span>
+        <span class="gpu-osd-val">${m.minFps} / ${m.low1PctFps} FPS</span>
+      </div>
+      <div class="gpu-osd-cell">
+        <span class="gpu-osd-lbl">GPU Temp (${tempTag})</span>
+        <span class="gpu-osd-val" style="color:${tempColor};">${tempVal.toFixed(1)} °C</span>
+      </div>
+      <div class="gpu-osd-cell">
+        <span class="gpu-osd-lbl">Zegar GPU</span>
+        <span class="gpu-osd-val" style="color:${m.thermalThrottleActive ? '#f87171' : '#38bdf8'};">${m.coreClockMhz} MHz${m.thermalThrottleActive ? ' ⚠' : ''}</span>
+      </div>
+      <div class="gpu-osd-cell">
+        <span class="gpu-osd-lbl">Bufor 3D</span>
+        <span class="gpu-osd-val">${resText} · ${scaleBadge}</span>
+      </div>
+      <div class="gpu-osd-cell">
+        <span class="gpu-osd-lbl">VRAM (Alok/Tex)</span>
+        <span class="gpu-osd-val">${allocGb}/${texGb} GB</span>
+      </div>
+      <div class="gpu-osd-cell">
+        <span class="gpu-osd-lbl">Trójk. / Draw</span>
+        <span class="gpu-osd-val">${m.triangles.toLocaleString('pl-PL')} / ${m.drawCalls}</span>
+      </div>
+      <div class="gpu-osd-cell">
+        <span class="gpu-osd-lbl">Moc / Stabil.</span>
+        <span class="gpu-osd-val">${m.estFp32Tflops ? `${m.estFp32Tflops} TF` : '—'} · ${m.stabilityPct}%</span>
+      </div>
+    </div>
+    <div class="gpu-osd-footer">
+      <span class="gpu-osd-gpu-name" title="${escapeOsdHtml(m.rendererName)}">${escapeOsdHtml(m.rendererName)}</span>
+      <span>${modeLabel} · ${formatElapsedMmSs(m.elapsedSec)} · ${m.totalFramesRendered.toLocaleString('pl-PL')} kl.${isFullscreen ? ' · ESC wyjście' : ''}</span>
+    </div>
+  `;
+}
+
 function createPcbTexture(maxAnisotropy: number): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
   canvas.width = 512;
@@ -526,27 +784,38 @@ const FURMARK_FRAG = `
   }
 
   void main() {
-    // High-frequency fur strands + fiery plasma wave
-    vec2 strandUv = vUv * vec2(88.0, 32.0);
-    float strand = noise(strandUv + vec2(uTime * 0.6 * vShell, -uTime * 0.4));
+    // Two-tier high-frequency fur strands + swirling solar plasma turbulence
+    vec2 strandUv = vUv * vec2(112.0, 42.0);
+    vec2 fineUv = vUv * vec2(224.0, 84.0);
+    float strand = noise(strandUv + vec2(uTime * 0.65 * vShell, -uTime * 0.42));
+    float fineStrand = noise(fineUv + vec2(-uTime * 0.4 * vShell, uTime * 0.25));
     float tuft = fbm(vUv * vec2(14.0, 6.0) + vec2(uTime * 0.45, -uTime * 0.3));
-    float density = strand * 0.72 + tuft * 0.48;
-    if (vShell > 0.02 && density < vShell * 0.88) discard;
+    float density = strand * 0.56 + fineStrand * 0.22 + tuft * 0.48;
+    if (vShell > 0.02 && density < vShell * 0.86) discard;
 
+    vec3 N = normalize(vNormal);
     vec3 viewDir = normalize(cameraPosition - vWorldPos);
-    float fresnel = pow(1.0 - max(dot(normalize(vNormal), viewDir), 0.0), 2.4);
-    float heat = clamp(tuft * 1.15 + vShell * 0.55, 0.0, 1.0);
+    vec3 keyLightDir = normalize(vec3(0.55, 0.78, 0.45));
+    float ndl = max(dot(N, keyLightDir), 0.0);
+    float fresnel = pow(1.0 - max(dot(N, viewDir), 0.0), 2.35);
+    float heat = clamp(tuft * 1.18 + vShell * 0.58 + fineStrand * 0.14, 0.0, 1.0);
 
-    vec3 deepCore = vec3(0.24, 0.02, 0.01);
-    vec3 magma = vec3(0.95, 0.28, 0.04);
-    vec3 goldTip = vec3(1.0, 0.82, 0.25);
-    vec3 col = mix(deepCore, magma, smoothstep(0.08, 0.58, heat));
-    col = mix(col, goldTip, smoothstep(0.55, 0.96, heat));
-    col += vec3(0.18, 0.55, 1.0) * fresnel * 0.45;
-    // Ambient occlusion near base of fur
-    col *= (0.38 + 0.72 * vShell);
+    // Blackbody furnace palette with HDR emissive tips (> 1.0 triggers volumetric bloom)
+    vec3 deepCore = vec3(0.16, 0.015, 0.01);
+    vec3 crimson = vec3(0.78, 0.09, 0.02);
+    vec3 magma = vec3(1.18, 0.38, 0.04);
+    vec3 whiteHotTip = vec3(1.65, 1.24, 0.46);
+    vec3 col = mix(deepCore, crimson, smoothstep(0.05, 0.34, heat));
+    col = mix(col, magma, smoothstep(0.32, 0.68, heat));
+    col = mix(col, whiteHotTip, smoothstep(0.66, 0.98, heat));
 
-    float alpha = vShell < 0.02 ? 1.0 : clamp((1.0 - vShell * 0.72) * 0.88, 0.14, 0.95);
+    // Directional key scatter + cool cyan/violet velvet rim sheen
+    col *= (0.76 + 0.42 * ndl);
+    col += vec3(0.24, 0.72, 1.35) * fresnel * (0.35 + 0.45 * vShell);
+    // Deep ambient occlusion inside fur roots, luminous tips
+    col *= (0.32 + 0.84 * pow(vShell, 0.85));
+
+    float alpha = vShell < 0.02 ? 1.0 : clamp((1.0 - vShell * 0.70) * 0.90, 0.14, 0.96);
     gl_FragColor = vec4(col, alpha);
   }
 `;
@@ -613,6 +882,12 @@ const RAYMARCH_FRAG = `
     );
   }
 
+  float hash21(vec2 p) {
+    p = fract(p * vec2(234.34, 435.345));
+    p += dot(p, p + 34.23);
+    return fract(p.x * p.y);
+  }
+
   float calcAO(vec3 pos, vec3 nor) {
     float occ = 0.0;
     float sca = 1.0;
@@ -625,6 +900,39 @@ const RAYMARCH_FRAG = `
     return clamp(1.0 - 2.4 * occ, 0.0, 1.0);
   }
 
+  float calcSoftShadow(vec3 ro, vec3 rd) {
+    float res = 1.0;
+    float t = 0.035;
+    for (int i = 0; i < 12; i++) {
+      float h = mapMandelbulb(ro + rd * t).x;
+      res = min(res, 7.5 * h / t);
+      t += clamp(h, 0.03, 0.22);
+      if (res < 0.05 || t > 1.45) break;
+    }
+    return clamp(res, 0.12, 1.0);
+  }
+
+  vec3 cosmicBackdrop(vec3 rd, vec2 uv) {
+    vec3 bg = mix(vec3(0.012, 0.020, 0.052), vec3(0.036, 0.088, 0.175), clamp(uv.y + 0.52, 0.0, 1.0));
+    // Subtle deep-space volumetric nebula ribbons
+    float band = sin(rd.x * 4.5 + rd.y * 3.2 + uTime * 0.09) * cos(rd.z * 3.8 - rd.y * 2.6);
+    bg += vec3(0.05, 0.14, 0.26) * smoothstep(0.15, 0.95, band) * 0.42;
+    bg += vec3(0.12, 0.04, 0.20) * smoothstep(0.25, 0.98, -band) * 0.34;
+    // Crisp dual-scale procedural starfield
+    vec2 sp1 = floor(rd.xy / max(abs(rd.z) + 0.35, 0.35) * 90.0);
+    float s1 = hash21(sp1 + floor(rd.z * 4.0));
+    if (s1 > 0.986) {
+      float twinkle = 0.65 + 0.35 * sin(uTime * 2.8 + s1 * 80.0);
+      bg += mix(vec3(0.65, 0.85, 1.0), vec3(1.0, 0.88, 0.72), fract(s1 * 19.3)) * twinkle * 0.95;
+    }
+    vec2 sp2 = floor(rd.xz / max(abs(rd.y) + 0.45, 0.45) * 140.0);
+    float s2 = hash21(sp2 + 13.7);
+    if (s2 > 0.992) {
+      bg += vec3(0.55, 0.78, 1.0) * 0.6;
+    }
+    return bg;
+  }
+
   void main() {
     vec2 uv = (gl_FragCoord.xy - 0.5 * uResolution) / max(uResolution.y, 1.0);
     float camR = 2.45 + sin(uTime * 0.28) * 0.25;
@@ -635,52 +943,79 @@ const RAYMARCH_FRAG = `
     vec3 vv = cross(uu, ww);
     vec3 rd = normalize(uv.x * uu + uv.y * vv + 1.55 * ww);
 
-    // Deep cosmic backdrop
-    vec3 col = mix(vec3(0.015, 0.025, 0.06), vec3(0.04, 0.10, 0.18), clamp(uv.y + 0.5, 0.0, 1.0));
+    // Rich cosmic starfield & nebula backdrop
+    vec3 col = cosmicBackdrop(rd, uv);
 
     float t = 0.0;
+    float tMax = 6.0;
     float glow = 0.0;
     float trap = 0.0;
     bool hit = false;
 
-    for (int i = 0; i < 256; i++) {
-      if (i >= uMaxSteps) break;
-      vec3 p = ro + rd * t;
-      vec2 res = mapMandelbulb(p);
-      float d = res.x;
-      glow += 0.012 / (0.045 + abs(d) * 14.0);
-      if (d < 0.0012) {
-        hit = true;
-        trap = res.y;
-        break;
+    // Analytic bounding-sphere early-out (Mandelbulb fits strictly inside R = 1.55)
+    // Skips 100% of empty background rays in O(1) instead of 256 fractal steps!
+    float b = dot(ro, rd);
+    float c = dot(ro, ro) - 2.4025;
+    float disc = b * b - c;
+    if (disc > 0.0) {
+      float sq = sqrt(disc);
+      t = max(0.0, -b - sq);
+      tMax = min(6.0, -b + sq);
+      for (int i = 0; i < 256; i++) {
+        if (i >= uMaxSteps) break;
+        vec3 p = ro + rd * t;
+        vec2 res = mapMandelbulb(p);
+        float d = res.x;
+        glow += 0.012 / (0.042 + abs(d) * 14.0);
+        if (d < 0.0012) {
+          hit = true;
+          trap = res.y;
+          break;
+        }
+        if (t > tMax) break;
+        t += d * 0.85;
       }
-      if (t > 6.0) break;
-      t += d * 0.85;
+    } else {
+      float closestDist = length(ro - rd * b);
+      glow = exp(-max(0.0, closestDist - 1.32) * 4.2) * 1.45;
     }
 
     if (hit) {
       vec3 pos = ro + rd * t;
       vec3 nor = calcNormal(pos);
       float ao = calcAO(pos, nor);
-      vec3 keyDir = normalize(vec3(0.7, 0.8, 0.5));
-      vec3 rimDir = normalize(vec3(-0.7, 0.3, -0.6));
-      float diff = max(dot(nor, keyDir), 0.0);
-      float rim = pow(1.0 - max(dot(nor, -rd), 0.0), 3.0);
-      vec3 h = normalize(keyDir - rd);
-      float spec = pow(max(dot(nor, h), 0.0), 42.0);
+      vec3 keyDir = normalize(vec3(0.72, 0.82, 0.52));
+      vec3 rimDir = normalize(vec3(-0.72, 0.32, -0.62));
+      float shadow = calcSoftShadow(pos + nor * 0.008, keyDir);
+      float diff = max(dot(nor, keyDir), 0.0) * shadow;
+      float ndv = max(dot(nor, -rd), 0.0);
+      float fresnel = pow(1.0 - ndv, 3.2);
+      vec3 hKey = normalize(keyDir - rd);
+      vec3 hRim = normalize(rimDir - rd);
+      float specKey = pow(max(dot(nor, hKey), 0.0), 64.0) * shadow;
+      float specRim = pow(max(dot(nor, hRim), 0.0), 28.0);
 
-      vec3 palette = 0.5 + 0.5 * cos(6.28318 * (vec3(0.55, 0.68, 0.82) + trap * 1.45 + vec3(0.0, 0.15, 0.32)));
-      col = palette * (0.18 + 0.92 * diff) * ao;
-      col += vec3(0.15, 0.82, 1.0) * rim * 0.75 * ao;
-      col += vec3(1.0, 0.92, 0.78) * spec * 0.85;
-      col += vec3(0.95, 0.38, 0.12) * max(dot(nor, rimDir), 0.0) * 0.35 * ao;
+      // Iridescent metallic-enamel fractal orbit-trap palette
+      vec3 palette = 0.5 + 0.5 * cos(6.28318 * (vec3(0.55, 0.68, 0.82) + trap * 1.48 + vec3(0.0, 0.14, 0.30)));
+      vec3 iridTint = 0.5 + 0.5 * cos(6.28318 * (vec3(0.2, 0.45, 0.72) + ndv * 0.85));
+      vec3 reflEnv = cosmicBackdrop(reflect(rd, nor), uv);
+
+      col = palette * (0.14 + 0.96 * diff) * ao;
+      // Subtle clearcoat environment reflection + iridescence
+      col += mix(reflEnv, iridTint, 0.38) * fresnel * 0.68 * ao;
+      // Crisp gold key specular + electric cyan rim specular (HDR > 1.0 for subtle bloom)
+      col += vec3(1.25, 1.08, 0.85) * specKey * 1.05;
+      col += vec3(0.22, 0.92, 1.25) * (fresnel * 0.58 + specRim * 0.55) * ao;
+      col += vec3(0.98, 0.36, 0.16) * max(dot(nor, rimDir), 0.0) * 0.34 * ao;
+      // Luminous inner cavity accent
+      col += vec3(0.08, 0.48, 0.78) * (1.0 - ao) * 0.16;
     } else {
-      col += vec3(0.06, 0.45, 0.72) * glow * 0.22;
+      col += mix(vec3(0.06, 0.52, 0.88), vec3(0.32, 0.82, 1.15), clamp(glow * 0.4, 0.0, 1.0)) * glow * 0.28;
     }
 
-    // ACES-like filmic curve
-    col = (col * (2.51 * col + 0.03)) / (col * (2.43 * col + 0.59) + 0.14);
-    gl_FragColor = vec4(pow(clamp(col, 0.0, 1.0), vec3(0.92)), 1.0);
+    // Smooth HDR highlight rolloff (preserves vivid highlights > 0.9 for UnrealBloom without clipping)
+    col = (col * (2.25 * col + 0.04)) / (col * (1.88 * col + 0.56) + 0.14);
+    gl_FragColor = vec4(pow(clamp(col, 0.0, 1.35), vec3(0.94)), 1.0);
   }
 `;
 
@@ -1180,10 +1515,20 @@ const DNA_PARTICLE_FRAG = `
 export class GpuStressEngine {
   private mountEl: HTMLElement | null = null;
   private renderer: THREE.WebGLRenderer | null = null;
+  private composer: EffectComposer | null = null;
+  private composerRT: THREE.WebGLRenderTarget | null = null;
+  private renderPass: RenderPass | null = null;
+  private bloomPass: UnrealBloomPass | null = null;
+  private cinematicPass: ShaderPass | null = null;
+  private postFxEnabled = true;
   private scene: THREE.Scene | null = null;
   private camera: THREE.PerspectiveCamera | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private envRenderTarget: THREE.WebGLRenderTarget | null = null;
+  private backdropDome: THREE.Mesh | null = null;
+  private backdropMat: THREE.ShaderMaterial | null = null;
+  private animatedShaderMats: THREE.ShaderMaterial[] = [];
+  private holoRingGroup: THREE.Group | null = null;
 
   // Active scene container & animated refs
   private activeGroup: THREE.Group | null = null;
@@ -1268,8 +1613,8 @@ export class GpuStressEngine {
   private preset: GpuLoadPreset = 'high';
   private fpsMode: GpuFpsMode = 'uncapped';
   private frameHandle = 0;
-  private uncappedChannel: MessageChannel | null = null;
-  private uncappedBatchSize = 2;
+  private frameHandleIsRaf = false;
+  private uncappedBatchSize = 1;
   private lastUiYieldTime = 0;
   private startTime = 0;
   private lastFrameTime = 0;
@@ -1278,6 +1623,31 @@ export class GpuStressEngine {
   private windowFrames = 0;
   private animFrameTick = 0;
   private stormCloudGroup: THREE.Group | null = null;
+
+  private pendingGpuSync: WebGLSync | null = null;
+  private pendingSyncStartMs = 0;
+  private pendingFramesInSlice = 1;
+  private lastGpuFrameMs = 16;
+  private renderScale = 1.0;
+  private slowFrameStreak = 0;
+  private fastFrameStreak = 0;
+  private adaptiveThrottleActive = false;
+  private baseRaymarchMaxSteps = 128;
+  private baseMengerMaxSteps = 110;
+  private baseNebulaMaxSteps = 56;
+  private baseBlackholeMaxSteps = 96;
+  private baseJulia4dMaxSteps = 116;
+  private baseVolumetricCloudSteps = 28;
+
+  private osdEl: HTMLElement | null = null;
+  private osdForceVisible = true;
+  private fsBtnEl: HTMLButtonElement | null = null;
+  private postFxBtnEl: HTMLButtonElement | null = null;
+  private osdToggleBtnEl: HTMLButtonElement | null = null;
+  private fsStartStopBtnEl: HTMLButtonElement | null = null;
+  private fsPrevBtnEl: HTMLButtonElement | null = null;
+  private fsNextBtnEl: HTMLButtonElement | null = null;
+  private fsChangeListener: (() => void) | null = null;
 
   private frameTimes: number[] = [];
   private allFpsSamples: number[] = [];
@@ -1323,6 +1693,10 @@ export class GpuStressEngine {
       elapsedSec: 0,
       isSoftwareGl: this.isSoftwareGl,
       rendererName: this.rendererName,
+      renderWidth: 0,
+      renderHeight: 0,
+      renderScalePct: 100,
+      adaptiveThrottleActive: false,
       allocatedVramMB: 8192,
       textureVramMB: 4096,
       coreClockMhz: 2550,
@@ -1348,9 +1722,258 @@ export class GpuStressEngine {
     return this.sceneMode;
   }
 
+  private getFullscreenTarget(): HTMLElement | null {
+    if (!this.mountEl) return null;
+    return (this.mountEl.closest('.gpu-viewport-wrap') as HTMLElement | null) || this.mountEl;
+  }
+
+  private isInFullscreen(): boolean {
+    const fsEl = document.fullscreenElement;
+    if (!fsEl || !this.mountEl) return false;
+    return fsEl === this.mountEl || fsEl === this.getFullscreenTarget() || fsEl.contains(this.mountEl);
+  }
+
+  private isFullscreenShaderScene(): boolean {
+    return (
+      this.sceneMode === 'raymarching' ||
+      this.sceneMode === 'menger_sponge' ||
+      this.sceneMode === 'volumetric_nebula' ||
+      this.sceneMode === 'blackhole_lensing' ||
+      this.sceneMode === 'fractal_julia4d'
+    );
+  }
+
+  private setupComposer(width: number, height: number): void {
+    this.composer?.dispose();
+    this.composer = null;
+    this.composerRT?.dispose();
+    this.composerRT = null;
+    this.bloomPass?.dispose();
+    this.bloomPass = null;
+    this.cinematicPass?.dispose();
+    this.cinematicPass = null;
+    this.renderPass = null;
+
+    if (!this.renderer || !this.scene || !this.camera || this.isSoftwareGl) return;
+
+    const maxSamples =
+      typeof this.renderer.capabilities?.maxSamples === 'number'
+        ? this.renderer.capabilities.maxSamples
+        : 0;
+    const safeSamples = maxSamples >= 2 ? Math.min(4, maxSamples) : 0;
+
+    try {
+      const composerRT = new THREE.WebGLRenderTarget(Math.max(1, width), Math.max(1, height), {
+        type: THREE.HalfFloatType,
+        samples: safeSamples,
+      });
+      const composer = new EffectComposer(this.renderer, composerRT);
+      const renderPass = new RenderPass(this.scene, this.camera);
+      const bloomPass = new UnrealBloomPass(new THREE.Vector2(width, height), 0.56, 0.48, 0.76);
+      const cinematicPass = createCinematicGradePass(width, height, {
+        sharpen: 0.36,
+        chromatic: 0.0012,
+        vignette: 0.22,
+        vibrance: 0.14,
+        contrast: 1.05,
+      });
+      const outputPass = new OutputPass();
+
+      composer.addPass(renderPass);
+      composer.addPass(bloomPass);
+      composer.addPass(cinematicPass);
+      composer.addPass(outputPass);
+
+      this.composerRT = composerRT;
+      this.composer = composer;
+      this.renderPass = renderPass;
+      this.bloomPass = bloomPass;
+      this.cinematicPass = cinematicPass;
+      this.syncPostFxParams();
+    } catch {
+      this.composer?.dispose();
+      this.composer = null;
+      this.composerRT?.dispose();
+      this.composerRT = null;
+      this.bloomPass?.dispose();
+      this.bloomPass = null;
+      this.cinematicPass?.dispose();
+      this.cinematicPass = null;
+      this.renderPass = null;
+    }
+  }
+
+  private syncPostFxParams(): void {
+    if (!this.bloomPass || !this.cinematicPass) return;
+    const isShader = this.isFullscreenShaderScene();
+    if (isShader) {
+      // Gentle luminous halo on raymarched fractals/nebulae while keeping ultra-crisp micro-detail
+      this.bloomPass.strength = 0.34;
+      this.bloomPass.radius = 0.44;
+      this.bloomPass.threshold = 0.84;
+      this.cinematicPass.uniforms.uSharpen.value = 0.42;
+      this.cinematicPass.uniforms.uChromatic.value = 0.0011;
+      this.cinematicPass.uniforms.uVignette.value = 0.20;
+      this.cinematicPass.uniforms.uVibrance.value = 0.12;
+      this.cinematicPass.uniforms.uContrast.value = 1.04;
+    } else {
+      // Rich HDR Bloom + CAS crispness on 3D PBR, plasma, crystal, and showcase scenes
+      this.bloomPass.strength = 0.58;
+      this.bloomPass.radius = 0.48;
+      this.bloomPass.threshold = 0.72;
+      this.cinematicPass.uniforms.uSharpen.value = 0.34;
+      this.cinematicPass.uniforms.uChromatic.value = 0.0013;
+      this.cinematicPass.uniforms.uVignette.value = 0.24;
+      this.cinematicPass.uniforms.uVibrance.value = 0.15;
+      this.cinematicPass.uniforms.uContrast.value = 1.06;
+    }
+  }
+
+  private applyRenderScale(resetToSafeInitial = false): void {
+    if (!this.mountEl || !this.renderer) return;
+    const width = Math.max(320, this.mountEl.clientWidth);
+    const height = Math.max(260, this.mountEl.clientHeight);
+    const isHeavy = HEAVY_FRAGMENT_SCENES.has(this.sceneMode);
+    const rawDpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    if (resetToSafeInitial) {
+      this.renderScale = computeSafeInitialRenderScale(
+        width,
+        height,
+        rawDpr,
+        isHeavy,
+        this.isSoftwareGl
+      );
+      this.slowFrameStreak = 0;
+      this.fastFrameStreak = 0;
+      this.adaptiveThrottleActive = this.renderScale < 0.98;
+    }
+
+    const baseDpr = this.isSoftwareGl || isHeavy ? 1 : rawDpr;
+    const effectivePr = Math.max(0.35, Math.min(2, baseDpr * this.renderScale));
+    this.renderer.setPixelRatio(effectivePr);
+    this.renderer.setSize(width, height, false);
+    this.renderer.domElement.style.width = '100%';
+    this.renderer.domElement.style.height = '100%';
+    this.renderer.domElement.style.display = 'block';
+
+    const sz = new THREE.Vector2();
+    this.renderer.getDrawingBufferSize(sz);
+    this.metrics.renderWidth = Math.round(sz.x);
+    this.metrics.renderHeight = Math.round(sz.y);
+    this.metrics.renderScalePct = Math.round(this.renderScale * 100);
+    this.metrics.adaptiveThrottleActive = this.adaptiveThrottleActive;
+
+    if (this.composer) {
+      this.composer.setPixelRatio(effectivePr);
+      this.composer.setSize(width, height);
+    }
+    if (this.bloomPass) {
+      this.bloomPass.setSize(Math.max(1, Math.round(sz.x)), Math.max(1, Math.round(sz.y)));
+    }
+    if (this.cinematicPass) {
+      this.cinematicPass.uniforms.uResolution.value.set(Math.max(1, sz.x), Math.max(1, sz.y));
+    }
+    this.syncPostFxParams();
+
+    if (this.raymarchMat) {
+      this.raymarchMat.uniforms.uResolution.value.copy(sz);
+      this.raymarchMat.uniforms.uMaxSteps.value = computeAdaptiveRaymarchSteps(
+        this.baseRaymarchMaxSteps,
+        this.renderScale,
+        64
+      );
+    }
+    if (this.mengerMat) {
+      this.mengerMat.uniforms.uResolution.value.copy(sz);
+      this.mengerMat.uniforms.uMaxSteps.value = computeAdaptiveRaymarchSteps(
+        this.baseMengerMaxSteps,
+        this.renderScale,
+        48
+      );
+    }
+    if (this.nebulaMat) {
+      this.nebulaMat.uniforms.uResolution.value.copy(sz);
+      this.nebulaMat.uniforms.uMaxSteps.value = computeAdaptiveRaymarchSteps(
+        this.baseNebulaMaxSteps,
+        this.renderScale,
+        24
+      );
+    }
+    if (this.blackholeMat) {
+      this.blackholeMat.uniforms.uResolution.value.copy(sz);
+      this.blackholeMat.uniforms.uMaxSteps.value = computeAdaptiveRaymarchSteps(
+        this.baseBlackholeMaxSteps,
+        this.renderScale,
+        36
+      );
+    }
+    if (this.julia4dMat) {
+      this.julia4dMat.uniforms.uResolution.value.copy(sz);
+      this.julia4dMat.uniforms.uMaxSteps.value = computeAdaptiveRaymarchSteps(
+        this.baseJulia4dMaxSteps,
+        this.renderScale,
+        56
+      );
+    }
+    if (this.volumetricCloudMat) {
+      this.volumetricCloudMat.uniforms.uResolution.value.copy(sz);
+      if (this.volumetricCloudMat.uniforms.uSteps) {
+        this.volumetricCloudMat.uniforms.uSteps.value = computeAdaptiveRaymarchSteps(
+          this.baseVolumetricCloudSteps,
+          this.renderScale,
+          16
+        );
+      }
+    }
+  }
+
+  private updateOsdOverlay(): void {
+    const inFs = this.isInFullscreen();
+    const shouldShow = inFs || this.osdForceVisible;
+    const shell = this.getFullscreenTarget();
+    if (shell && shell !== this.mountEl) {
+      shell.classList.toggle('osd-active', shouldShow);
+    }
+    if (this.osdEl) {
+      this.osdEl.classList.toggle('visible', shouldShow);
+      if (shouldShow) {
+        const liveTemp = thermalMonitorService.getLiveGpuTempC();
+        this.osdEl.innerHTML = renderGpuOsdHtml(this.metrics, liveTemp, this.frameTimes, inFs);
+      }
+    }
+    if (this.fsBtnEl) {
+      this.fsBtnEl.innerHTML = inFs ? '✕ Wyjdź (ESC)' : '⛶ Pełny ekran';
+      this.fsBtnEl.classList.toggle('danger', inFs);
+    }
+    if (this.postFxBtnEl) {
+      const fxActive = this.postFxEnabled && !this.isSoftwareGl && Boolean(this.composer);
+      this.postFxBtnEl.classList.toggle('active', fxActive);
+      this.postFxBtnEl.textContent = fxActive ? '✨ Post-FX: ULTRA' : '✨ Post-FX: WYŁ.';
+    }
+    if (this.osdToggleBtnEl) {
+      this.osdToggleBtnEl.classList.toggle('active', shouldShow);
+      this.osdToggleBtnEl.textContent = shouldShow ? '📊 OSD: WŁ.' : '📊 OSD: WYŁ.';
+    }
+    if (this.fsStartStopBtnEl) {
+      this.fsStartStopBtnEl.style.display = 'inline-flex';
+      this.fsStartStopBtnEl.textContent = this.running ? '⏹ Stop' : '▶ Start';
+      this.fsStartStopBtnEl.classList.toggle('danger', this.running);
+    }
+    if (this.fsPrevBtnEl) this.fsPrevBtnEl.style.display = inFs ? 'inline-flex' : 'none';
+    if (this.fsNextBtnEl) this.fsNextBtnEl.style.display = inFs ? 'inline-flex' : 'none';
+  }
+
+  private cycleScene(delta: number): void {
+    const idx = GPU_SCENE_CATALOG.findIndex((s) => s.id === this.sceneMode);
+    const nextIdx = (idx + delta + GPU_SCENE_CATALOG.length) % GPU_SCENE_CATALOG.length;
+    this.setSceneMode(GPU_SCENE_CATALOG[nextIdx].id);
+  }
+
   public mount(container: HTMLElement, onMetrics: (m: GpuStressMetrics) => void): void {
     if (this.mountEl === container && this.renderer) {
       this.onMetrics = onMetrics;
+      this.updateOsdOverlay();
       onMetrics(this.getMetrics());
       return;
     }
@@ -1375,29 +1998,117 @@ export class GpuStressEngine {
     }
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.18;
-    renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
-    renderer.setSize(width, height);
+    renderer.toneMappingExposure = 1.2;
     renderer.shadowMap.enabled = !this.isSoftwareGl;
-    renderer.shadowMap.type = THREE.PCFShadowMap;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.innerHTML = '';
+    container.style.position = container.style.position || 'relative';
     container.appendChild(renderer.domElement);
     this.renderer = renderer;
 
+    // Live RTSS-style telemetry OSD mounted inside canvas container (always visible in fullscreen)
+    const osdEl = document.createElement('div');
+    osdEl.id = 'gpu-live-osd';
+    osdEl.className = 'gpu-live-osd';
+    osdEl.setAttribute('aria-live', 'polite');
+    container.appendChild(osdEl);
+    this.osdEl = osdEl;
+
+    // Top-right fullscreen + OSD + scene controls toolbar
+    const toolbar = document.createElement('div');
+    toolbar.className = 'gpu-fs-toolbar';
+
+    const prevBtn = document.createElement('button');
+    prevBtn.type = 'button';
+    prevBtn.className = 'gpu-fs-btn';
+    prevBtn.title = 'Poprzednia scena 3D';
+    prevBtn.textContent = '⏮';
+    prevBtn.style.display = 'none';
+    prevBtn.onclick = () => this.cycleScene(-1);
+    this.fsPrevBtnEl = prevBtn;
+
+    const nextBtn = document.createElement('button');
+    nextBtn.type = 'button';
+    nextBtn.className = 'gpu-fs-btn';
+    nextBtn.title = 'Następna scena 3D';
+    nextBtn.textContent = '⏭';
+    nextBtn.style.display = 'none';
+    nextBtn.onclick = () => this.cycleScene(1);
+    this.fsNextBtnEl = nextBtn;
+
+    const startStopBtn = document.createElement('button');
+    startStopBtn.type = 'button';
+    startStopBtn.className = 'gpu-fs-btn';
+    startStopBtn.title = 'Start / Stop stres-testu GPU';
+    startStopBtn.textContent = this.running ? '⏹ Stop' : '▶ Start';
+    startStopBtn.style.display = 'none';
+    startStopBtn.onclick = () => {
+      if (this.running) this.stop();
+      else this.start();
+    };
+    this.fsStartStopBtnEl = startStopBtn;
+
+    const postFxBtn = document.createElement('button');
+    postFxBtn.type = 'button';
+    postFxBtn.id = 'gpu-postfx-toggle-btn';
+    postFxBtn.className = 'gpu-fs-btn';
+    postFxBtn.title = 'Włącz / wyłącz HDR Bloom, wyostrzanie CAS i grading kinowy';
+    postFxBtn.textContent = '✨ Post-FX: ULTRA';
+    postFxBtn.onclick = () => {
+      this.postFxEnabled = !this.postFxEnabled;
+      this.updateOsdOverlay();
+      if (!this.running) {
+        this.renderSingleFrame();
+      }
+    };
+    this.postFxBtnEl = postFxBtn;
+
+    const osdToggleBtn = document.createElement('button');
+    osdToggleBtn.type = 'button';
+    osdToggleBtn.id = 'gpu-osd-toggle-btn';
+    osdToggleBtn.className = 'gpu-fs-btn';
+    osdToggleBtn.title = 'Pokaż / ukryj panel telemetrii FPS / GPU OSD';
+    osdToggleBtn.textContent = '📊 OSD';
+    osdToggleBtn.onclick = () => {
+      this.osdForceVisible = !this.osdForceVisible;
+      this.updateOsdOverlay();
+    };
+    this.osdToggleBtnEl = osdToggleBtn;
+
     const fsBtn = document.createElement('button');
     fsBtn.type = 'button';
-    fsBtn.className = 'btn btn-secondary btn-sm';
-    fsBtn.style.cssText = 'position:absolute;top:10px;right:10px;z-index:20;background:rgba(15,23,42,0.92);color:#38bdf8;border:1px solid rgba(56,189,248,0.5);padding:6px 12px;border-radius:6px;font-size:11.5px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;gap:6px;box-shadow:0 4px 12px rgba(0,0,0,0.5);';
+    fsBtn.className = 'gpu-fs-btn';
     fsBtn.innerHTML = '⛶ Pełny ekran';
     fsBtn.onclick = () => {
       if (!document.fullscreenElement) {
-        container.requestFullscreen?.().catch(() => {});
+        const target = this.getFullscreenTarget() || container;
+        target.requestFullscreen?.().catch(() => {
+          container.requestFullscreen?.().catch(() => {});
+        });
+        if (!this.running) {
+          this.start();
+        }
       } else {
         document.exitFullscreen?.().catch(() => {});
       }
     };
-    container.style.position = container.style.position || 'relative';
-    container.appendChild(fsBtn);
+    this.fsBtnEl = fsBtn;
+
+    toolbar.appendChild(prevBtn);
+    toolbar.appendChild(nextBtn);
+    toolbar.appendChild(startStopBtn);
+    toolbar.appendChild(postFxBtn);
+    toolbar.appendChild(osdToggleBtn);
+    toolbar.appendChild(fsBtn);
+    container.appendChild(toolbar);
+
+    this.fsChangeListener = () => {
+      this.applyRenderScale(true);
+      this.handleResize();
+      this.updateOsdOverlay();
+      this.emitMetrics();
+    };
+    document.addEventListener('fullscreenchange', this.fsChangeListener);
 
     renderer.domElement.addEventListener('webglcontextlost', (e) => {
       e.preventDefault();
@@ -1409,15 +2120,16 @@ export class GpuStressEngine {
     scene.fog = new THREE.FogExp2(0x060911, 0.032);
     this.scene = scene;
 
-    try {
-      const pmrem = new THREE.PMREMGenerator(renderer);
-      this.envRenderTarget = pmrem.fromScene(new RoomEnvironment(), 0.04);
+    this.envRenderTarget = createCinematicHdrEnvironment(renderer, 'studio_cyber');
+    if (this.envRenderTarget) {
       scene.environment = this.envRenderTarget.texture;
-      scene.environmentIntensity = 1.38;
-      pmrem.dispose();
-    } catch {
-      this.envRenderTarget = null;
+      scene.environmentIntensity = 1.85;
     }
+
+    const backdrop = createCinematicBackdropDome(0x040814, 0x0d2547, 0x06b6d4);
+    this.backdropDome = backdrop.mesh;
+    this.backdropMat = backdrop.material;
+    scene.add(backdrop.mesh);
 
     const camera = new THREE.PerspectiveCamera(48, width / height, 0.1, 160);
     camera.position.set(0, 3.3, 7.6);
@@ -1426,11 +2138,11 @@ export class GpuStressEngine {
 
     this.raymarchOrthoCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
-    // Shared balanced 3-point cinematic lighting rig
-    const hemi = new THREE.HemisphereLight(0xb8e2ff, 0x1a2639, 1.45);
+    // Shared balanced 3-point + dual studio softbox cinematic lighting rig
+    const hemi = new THREE.HemisphereLight(0xb8e2ff, 0x1a2639, 1.48);
     scene.add(hemi);
 
-    const keyLight = new THREE.DirectionalLight(0xfff1dc, 2.85);
+    const keyLight = new THREE.DirectionalLight(0xfff1dc, 2.95);
     keyLight.position.set(6, 9, 6);
     if (!this.isSoftwareGl) {
       keyLight.castShadow = true;
@@ -1441,22 +2153,43 @@ export class GpuStressEngine {
       keyLight.shadow.camera.bottom = -6;
       keyLight.shadow.bias = -0.0004;
       keyLight.shadow.normalBias = 0.02;
+      keyLight.shadow.radius = 3.5;
     }
     scene.add(keyLight);
 
-    const rimLight = new THREE.DirectionalLight(0x06b6d4, 2.15);
+    const rimLight = new THREE.DirectionalLight(0x06b6d4, 2.25);
     rimLight.position.set(-7, 4, -6);
     scene.add(rimLight);
 
-    const accentPoint = new THREE.PointLight(0x22d3ee, 2.4, 16);
+    const accentPoint = new THREE.PointLight(0x22d3ee, 2.6, 16);
     accentPoint.position.set(0, 2.4, 2.2);
     scene.add(accentPoint);
 
+    if (!this.isSoftwareGl) {
+      try {
+        RectAreaLightUniformsLib.init();
+        const topSoftbox = new THREE.RectAreaLight(0xe0f2fe, 3.2, 6.5, 2.8);
+        topSoftbox.position.set(0, 6.2, 1.8);
+        topSoftbox.lookAt(0, 0.6, 0);
+        scene.add(topSoftbox);
+
+        const sideSoftbox = new THREE.RectAreaLight(0x38bdf8, 2.4, 5.2, 2.2);
+        sideSoftbox.position.set(-5.8, 3.2, 2.4);
+        sideSoftbox.lookAt(0, 0.7, 0);
+        scene.add(sideSoftbox);
+      } catch {
+        // Fallback silently on constrained WebGL contexts
+      }
+    }
+
     this.buildActiveScene();
+    this.setupComposer(width, height);
+    this.applyRenderScale(true);
 
     this.renderSingleFrame();
     this.metrics.triangles = renderer.info.render.triangles;
     this.metrics.drawCalls = renderer.info.render.calls;
+    this.updateOsdOverlay();
     this.emitMetrics();
 
     this.resizeObserver = new ResizeObserver(() => this.handleResize());
@@ -1467,12 +2200,16 @@ export class GpuStressEngine {
     if (this.activeGroup && this.scene) {
       this.scene.remove(this.activeGroup);
       this.activeGroup.traverse((obj) => {
+        const disposable = obj as unknown as { dispose?: () => void };
+        if (typeof disposable.dispose === 'function') {
+          disposable.dispose();
+        }
         if ((obj as THREE.Mesh).isMesh || (obj as THREE.Points).isPoints) {
           const m = obj as THREE.Mesh;
           m.geometry?.dispose();
           const disposeMat = (mat: THREE.Material) => {
             const anyMat = mat as unknown as Record<string, unknown>;
-            for (const key of ['map', 'normalMap', 'roughnessMap', 'emissiveMap']) {
+            for (const key of ['map', 'normalMap', 'roughnessMap', 'emissiveMap', 'bumpMap']) {
               if (anyMat[key] && typeof (anyMat[key] as THREE.Texture).dispose === 'function') {
                 (anyMat[key] as THREE.Texture).dispose();
               }
@@ -1485,6 +2222,8 @@ export class GpuStressEngine {
       });
     }
     this.activeGroup = null;
+    this.animatedShaderMats = [];
+    this.holoRingGroup = null;
     this.fans = [];
     this.dieMaterial = null;
     this.vortexMesh = null;
@@ -1570,6 +2309,9 @@ export class GpuStressEngine {
     this.metrics.sceneMode = this.sceneMode;
     this.metrics.sceneLabel = meta.name;
     this.metrics.workloadNote = meta.targetUnit;
+    if (this.backdropDome) {
+      this.backdropDome.visible = !this.isFullscreenShaderScene();
+    }
 
     switch (this.sceneMode) {
       case 'vortex':
@@ -1719,37 +2461,147 @@ export class GpuStressEngine {
     }
   }
 
-  /* === SCENE 1: Classic GPU Core Rig + PBR Crystal Vortex (Upgraded) === */
+  /* === SCENE 1: Flagship GPU Core Rig + Real-Time Mirror Floor + Volumetric Studio + Crystal Vortex === */
   private buildVortexScene(group: THREE.Group): void {
     if (!this.renderer || !this.camera) return;
-    this.camera.position.set(0, 3.6, 8.8);
-    this.camera.lookAt(0, 0.78, 0);
-
-    const grid = new THREE.GridHelper(26, 36, 0x164e63, 0x0f172a);
-    grid.position.y = -0.02;
-    group.add(grid);
+    this.camera.position.set(0, 3.4, 8.6);
+    this.camera.lookAt(0, 0.85, 0);
 
     const maxAniso = this.renderer.capabilities.getMaxAnisotropy();
+
+    // Real-time planar mirror reflector beneath translucent obsidian glass studio deck
+    const mirror = createPlanarReflector({
+      geometry: new THREE.CircleGeometry(9.2, 64),
+      y: -0.036,
+      color: 0x6b84a8,
+      textureSize: 768,
+      isSoftwareGl: this.isSoftwareGl,
+    });
+    if (mirror) group.add(mirror);
+
+    // Reflective obsidian/titanium studio turntable deck with clearcoat PBR finish
+    const deckTex = createStudioFloorDeckTextures(maxAniso);
+    const deckMat = new THREE.MeshPhysicalMaterial({
+      map: deckTex.map,
+      roughnessMap: deckTex.roughnessMap,
+      metalness: 0.52,
+      roughness: 0.34,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.08,
+      transparent: Boolean(mirror),
+      opacity: mirror ? 0.56 : 1.0,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
+    });
+    const studioDeck = new THREE.Mesh(new THREE.CircleGeometry(9.2, 64), deckMat);
+    studioDeck.rotation.x = -Math.PI / 2;
+    studioDeck.position.y = -0.025;
+    studioDeck.receiveShadow = !this.isSoftwareGl;
+    group.add(studioDeck);
+
     group.add(this.buildGpuCoreRig(maxAniso));
 
-    // Sleek glowing perimeter ring around the GPU showcase deck
+    // Floating holographic telemetry rings + plasma energy core above GPU silicon die
+    const holoGroup = new THREE.Group();
+    holoGroup.position.set(0, 1.55, 0);
+    const holoCore = new THREE.Mesh(
+      new THREE.IcosahedronGeometry(0.24, 3),
+      new THREE.MeshPhysicalMaterial({
+        color: 0x38bdf8,
+        emissive: 0x06b6d4,
+        emissiveIntensity: 2.4,
+        roughness: 0.08,
+        metalness: 0.2,
+        clearcoat: 1.0,
+      })
+    );
+    holoGroup.add(holoCore);
+    for (let r = 0; r < 3; r++) {
+      const hRing = new THREE.Mesh(
+        new THREE.TorusGeometry(0.46 + r * 0.2, 0.012, 10, 64),
+        new THREE.MeshStandardMaterial({
+          color: r === 1 ? 0xf59e0b : 0x38bdf8,
+          emissive: r === 1 ? 0xf97316 : 0x06b6d4,
+          emissiveIntensity: 2.1,
+          roughness: 0.15,
+          metalness: 0.4,
+        })
+      );
+      hRing.rotation.set(r * 0.65, r * 0.9, 0);
+      holoGroup.add(hRing);
+    }
+    this.holoRingGroup = holoGroup;
+    group.add(holoGroup);
+
+    // 4 Fresnel-soft volumetric studio spotlight shafts illuminating the flagship GPU
+    const shafts = createVolumetricLightShafts({
+      count: 4,
+      ringRadius: 5.2,
+      height: 8.8,
+      topRadius: 0.26,
+      bottomRadius: 2.4,
+      colorHex: 0x38bdf8,
+      opacity: 0.22,
+      targetY: 0.4,
+    });
+    group.add(shafts.group);
+    this.animatedShaderMats.push(shafts.material);
+
+    // Floating HDR bokeh ember dust particles for cinematic depth
+    const bokeh = createFloatingEmberBokeh({
+      count: 220,
+      radius: 7.4,
+      height: 5.8,
+      colorAHex: 0x38bdf8,
+      colorBHex: 0xf59e0b,
+      size: 28,
+    });
+    group.add(bokeh.points);
+    this.animatedShaderMats.push(bokeh.material);
+
+    // Dual HDR emissive perimeter rings around the GPU showcase deck (bloom-ready)
     const deckRing = new THREE.Mesh(
-      new THREE.TorusGeometry(3.05, 0.022, 12, 96),
-      new THREE.MeshBasicMaterial({ color: 0x06b6d4, transparent: true, opacity: 0.48 })
+      new THREE.TorusGeometry(3.05, 0.026, 14, 96),
+      new THREE.MeshStandardMaterial({
+        color: 0x38bdf8,
+        emissive: 0x06b6d4,
+        emissiveIntensity: 2.1,
+        roughness: 0.16,
+        metalness: 0.35,
+      })
     );
     deckRing.rotation.x = Math.PI / 2;
-    deckRing.position.y = 0.03;
+    deckRing.position.y = 0.02;
     group.add(deckRing);
+
+    const outerRing = new THREE.Mesh(
+      new THREE.TorusGeometry(4.65, 0.016, 10, 96),
+      new THREE.MeshStandardMaterial({
+        color: 0x818cf8,
+        emissive: 0x6366f1,
+        emissiveIntensity: 1.65,
+        roughness: 0.22,
+        metalness: 0.4,
+      })
+    );
+    outerRing.rotation.x = Math.PI / 2;
+    outerRing.position.y = 0.01;
+    group.add(outerRing);
 
     const count = PRESET_CONFIG[this.preset].instances;
     // Keep crisp faceted crystals (never bloated spheres) and scale down slightly at 14k/32k
     const crystalRadius =
       this.preset === 'ultra' ? 0.038 : this.preset === 'extreme' ? 0.045 : 0.058;
     const geo = new THREE.OctahedronGeometry(crystalRadius, 0);
-    const mat = new THREE.MeshStandardMaterial({
+    const mat = new THREE.MeshPhysicalMaterial({
       color: 0xffffff,
-      metalness: 0.85,
-      roughness: 0.2,
+      metalness: 0.92,
+      roughness: 0.09,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.06,
+      iridescence: 0.78,
+      iridescenceIOR: 1.38,
     });
 
     const inst = new THREE.InstancedMesh(geo, mat, count);
@@ -1777,9 +2629,9 @@ export class GpuStressEngine {
       inst.setMatrixAt(i, _dummyObj.matrix);
 
       const t = i / count;
-      if (t < 0.62) _colorScratch.setHSL(0.52 + Math.random() * 0.05, 0.88, 0.54);
-      else if (t < 0.86) _colorScratch.setHSL(0.59, 0.38, 0.62);
-      else _colorScratch.setHSL(0.1, 0.92, 0.56);
+      if (t < 0.62) _colorScratch.setHSL(0.52 + Math.random() * 0.05, 0.88, 0.56);
+      else if (t < 0.86) _colorScratch.setHSL(0.59, 0.44, 0.66);
+      else _colorScratch.setHSL(0.1, 0.95, 0.58);
       inst.setColorAt(i, _colorScratch);
     }
 
@@ -1793,11 +2645,11 @@ export class GpuStressEngine {
     this.metrics.instanceCount = count;
   }
 
-  /* === SCENE 2: FurMark 3D Plasma Donut (16-48 Volumetric Shell Layers) === */
+  /* === SCENE 2: FurMark 3D Plasma Donut (16-48 Volumetric Shell Layers + Mirror Floor + Embers) === */
   private buildFurmarkScene(group: THREE.Group): void {
-    if (!this.camera) return;
-    this.camera.position.set(0, 0.8, 5.2);
-    this.camera.lookAt(0, 0, 0);
+    if (!this.camera || !this.renderer) return;
+    this.camera.position.set(0, 0.75, 5.4);
+    this.camera.lookAt(0, -0.1, 0);
 
     const shells =
       this.preset === 'ultra' ? 48 : this.preset === 'extreme' ? 34 : this.preset === 'high' ? 24 : 16;
@@ -1829,15 +2681,73 @@ export class GpuStressEngine {
       this.furmarkMaterials.push(mat);
     }
 
-    // Inner blazing plasma core ring
+    // Inner blazing HDR plasma core ring
     const coreRing = new THREE.Mesh(
-      new THREE.TorusGeometry(1.55, 0.14, 16, 80),
-      new THREE.MeshBasicMaterial({ color: 0xffd166 })
+      new THREE.TorusGeometry(1.55, 0.15, 16, 80),
+      new THREE.MeshStandardMaterial({
+        color: 0xffe082,
+        emissive: 0xff8c00,
+        emissiveIntensity: 3.2,
+        roughness: 0.12,
+      })
     );
     donutGroup.add(coreRing);
 
     this.furmarkDonutGroup = donutGroup;
     group.add(donutGroup);
+
+    // Real-time planar mirror floor directly under the blazing plasma torus
+    const mirror = createPlanarReflector({
+      geometry: new THREE.CircleGeometry(8.5, 64),
+      y: -2.42,
+      color: 0x7c5544,
+      textureSize: 640,
+      isSoftwareGl: this.isSoftwareGl,
+    });
+    if (mirror) group.add(mirror);
+
+    const deckTex = createStudioFloorDeckTextures(this.renderer.capabilities.getMaxAnisotropy());
+    const floorDisc = new THREE.Mesh(
+      new THREE.CircleGeometry(8.5, 64),
+      new THREE.MeshPhysicalMaterial({
+        map: deckTex.map,
+        roughnessMap: deckTex.roughnessMap,
+        metalness: 0.45,
+        roughness: 0.32,
+        clearcoat: 1.0,
+        clearcoatRoughness: 0.1,
+        transparent: Boolean(mirror),
+        opacity: mirror ? 0.54 : 1.0,
+      })
+    );
+    floorDisc.rotation.x = -Math.PI / 2;
+    floorDisc.position.y = -2.4;
+    group.add(floorDisc);
+
+    // Warm furnace volumetric light shafts + rising glowing ember bokeh sparks
+    const shafts = createVolumetricLightShafts({
+      count: 4,
+      ringRadius: 4.5,
+      height: 8.5,
+      colorHex: 0xf97316,
+      opacity: 0.18,
+      targetY: -1.8,
+    });
+    group.add(shafts.group);
+    this.animatedShaderMats.push(shafts.material);
+
+    const embers = createFloatingEmberBokeh({
+      count: 260,
+      radius: 5.5,
+      height: 6.2,
+      colorAHex: 0xf97316,
+      colorBHex: 0xfde047,
+      size: 32,
+    });
+    embers.points.position.y = -2.2;
+    group.add(embers.points);
+    this.animatedShaderMats.push(embers.material);
+
     this.metrics.instanceCount = shells;
   }
 
@@ -1849,6 +2759,7 @@ export class GpuStressEngine {
 
     const maxSteps =
       this.preset === 'ultra' ? 256 : this.preset === 'extreme' ? 192 : this.preset === 'high' ? 128 : 72;
+    this.baseRaymarchMaxSteps = maxSteps;
     const fractalIter =
       this.preset === 'ultra' ? 11 : this.preset === 'extreme' ? 9 : this.preset === 'high' ? 7 : 5;
 
@@ -2260,6 +3171,7 @@ export class GpuStressEngine {
 
     const maxSteps =
       this.preset === 'ultra' ? 200 : this.preset === 'extreme' ? 150 : this.preset === 'high' ? 110 : 72;
+    this.baseMengerMaxSteps = maxSteps;
     const iter = this.preset === 'ultra' ? 5 : this.preset === 'extreme' ? 4 : 3;
 
     const mat = new THREE.ShaderMaterial({
@@ -2385,6 +3297,7 @@ export class GpuStressEngine {
       ultra: 110,
     };
     const steps = this.isSoftwareGl ? 24 : stepsMap[this.preset];
+    this.baseNebulaMaxSteps = steps;
     const sz = new THREE.Vector2();
     this.renderer.getDrawingBufferSize(sz);
 
@@ -2492,6 +3405,7 @@ export class GpuStressEngine {
       ultra: 160,
     };
     const steps = this.isSoftwareGl ? 36 : stepsMap[this.preset];
+    this.baseBlackholeMaxSteps = steps;
     const sz = new THREE.Vector2();
     this.renderer.getDrawingBufferSize(sz);
 
@@ -3182,6 +4096,7 @@ export class GpuStressEngine {
 
     const maxSteps =
       this.preset === 'ultra' ? 220 : this.preset === 'extreme' ? 168 : this.preset === 'high' ? 116 : 68;
+    this.baseJulia4dMaxSteps = maxSteps;
     const fractalIter =
       this.preset === 'ultra' ? 12 : this.preset === 'extreme' ? 10 : this.preset === 'high' ? 8 : 6;
 
@@ -4586,6 +5501,7 @@ export class GpuStressEngine {
     if (size.x < 320 || size.y < 200) size.set(1280, 720);
     const steps =
       this.preset === 'ultra' ? 48 : this.preset === 'extreme' ? 38 : this.preset === 'high' ? 28 : 20;
+    this.baseVolumetricCloudSteps = steps;
 
     // 1. High-Contrast 4K Volumetric Raymarched Storm Sky Dome with Golden Anvil Rim & Internal Lightning
     const skyMat = new THREE.ShaderMaterial({
@@ -5091,10 +6007,18 @@ export class GpuStressEngine {
       bevelSegments: 3,
     });
     chassisGeo.rotateX(-Math.PI / 2);
-    const chassisMat = new THREE.MeshStandardMaterial({
-      color: 0x1a2232,
-      metalness: 0.85,
+    const carbonTex = createCarbonFiberTextures(maxAniso);
+    const chassisMat = new THREE.MeshPhysicalMaterial({
+      color: 0xd8e4f4,
+      map: carbonTex.map,
+      bumpMap: carbonTex.bumpMap,
+      bumpScale: 0.022,
+      roughnessMap: carbonTex.roughnessMap,
+      metalness: 0.82,
       roughness: 0.28,
+      anisotropy: 0.8,
+      clearcoat: 0.85,
+      clearcoatRoughness: 0.14,
     });
     const chassis = new THREE.Mesh(chassisGeo, chassisMat);
     chassis.position.y = 0.04;
@@ -5104,8 +6028,8 @@ export class GpuStressEngine {
 
     const pcbMat = new THREE.MeshStandardMaterial({
       map: createPcbTexture(maxAniso),
-      metalness: 0.22,
-      roughness: 0.68,
+      metalness: 0.24,
+      roughness: 0.62,
     });
     const pcb = new THREE.Mesh(new THREE.BoxGeometry(4.4, 0.07, 2.3), pcbMat);
     pcb.position.y = 0.33;
@@ -5114,7 +6038,7 @@ export class GpuStressEngine {
 
     const interposer = new THREE.Mesh(
       new THREE.BoxGeometry(1.18, 0.08, 1.18),
-      new THREE.MeshStandardMaterial({ color: 0x111827, metalness: 0.4, roughness: 0.5 })
+      new THREE.MeshStandardMaterial({ color: 0x111827, metalness: 0.42, roughness: 0.48 })
     );
     interposer.position.y = 0.4;
     group.add(interposer);
@@ -5122,20 +6046,24 @@ export class GpuStressEngine {
     this.dieMaterial = new THREE.MeshPhysicalMaterial({
       map: createDieTexture(maxAniso),
       emissive: new THREE.Color(0x06b6d4),
-      emissiveIntensity: 0.55,
-      metalness: 0.88,
-      roughness: 0.14,
+      emissiveIntensity: 0.85,
+      metalness: 0.9,
+      roughness: 0.12,
       clearcoat: 1.0,
-      clearcoatRoughness: 0.08,
+      clearcoatRoughness: 0.06,
+      iridescence: 0.45,
+      iridescenceIOR: 1.4,
     });
     const gpuDie = new THREE.Mesh(new THREE.BoxGeometry(0.78, 0.11, 0.78), this.dieMaterial);
     gpuDie.position.y = 0.48;
     group.add(gpuDie);
 
-    const copperMat = new THREE.MeshStandardMaterial({
-      color: 0xd97736,
-      metalness: 0.94,
-      roughness: 0.2,
+    const copperMat = new THREE.MeshPhysicalMaterial({
+      color: 0xe2813d,
+      metalness: 0.96,
+      roughness: 0.16,
+      clearcoat: 0.45,
+      clearcoatRoughness: 0.12,
     });
     for (const zOff of [-0.62, -0.22, 0.22, 0.62]) {
       const curve = new THREE.CatmullRomCurve3([
@@ -5174,11 +6102,11 @@ export class GpuStressEngine {
     const shroudMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, metalness: 0.72, roughness: 0.35 });
     const bladeMat = new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.35, roughness: 0.52 });
     const accentRingMat = new THREE.MeshStandardMaterial({
-      color: 0x06b6d4,
+      color: 0x22d3ee,
       emissive: 0x06b6d4,
-      emissiveIntensity: 0.45,
+      emissiveIntensity: 1.45,
       metalness: 0.5,
-      roughness: 0.3,
+      roughness: 0.22,
     });
 
     for (const fx of [-1.32, 1.32]) {
@@ -5228,12 +6156,12 @@ export class GpuStressEngine {
     bolts.instanceMatrix.needsUpdate = true;
     group.add(bolts);
 
-    // Dual front & rear glowing RGB shroud lightbars + twin 8-pin PCIe power connectors
+    // Dual front & rear glowing HDR RGB shroud lightbars + twin 8-pin PCIe power connectors
     const ledBarMat = new THREE.MeshStandardMaterial({
-      color: 0x22d3ee,
+      color: 0x38bdf8,
       emissive: 0x06b6d4,
-      emissiveIntensity: 1.4,
-      roughness: 0.18,
+      emissiveIntensity: 2.2,
+      roughness: 0.15,
       metalness: 0.2,
     });
     for (const zBar of [-1.24, 1.24]) {
@@ -5253,19 +6181,31 @@ export class GpuStressEngine {
 
   private renderSingleFrame(): void {
     if (!this.renderer || !this.scene || !this.camera) return;
-    try {
-      if (
-        (this.sceneMode === 'raymarching' ||
-          this.sceneMode === 'menger_sponge' ||
-          this.sceneMode === 'volumetric_nebula' ||
-          this.sceneMode === 'blackhole_lensing' ||
-          this.sceneMode === 'fractal_julia4d') &&
-        this.raymarchOrthoCam
-      ) {
-        this.renderer.render(this.scene, this.raymarchOrthoCam);
-      } else {
-        this.renderer.render(this.scene, this.camera);
+    const activeCam: THREE.Camera =
+      this.isFullscreenShaderScene() && this.raymarchOrthoCam
+        ? this.raymarchOrthoCam
+        : this.camera;
+
+    if (this.postFxEnabled && !this.isSoftwareGl && this.composer && this.renderPass) {
+      try {
+        this.renderPass.camera = activeCam;
+        this.composer.render();
+        return;
+      } catch {
+        this.composer?.dispose();
+        this.composer = null;
+        this.composerRT?.dispose();
+        this.composerRT = null;
+        this.bloomPass?.dispose();
+        this.bloomPass = null;
+        this.cinematicPass?.dispose();
+        this.cinematicPass = null;
+        this.renderPass = null;
       }
+    }
+
+    try {
+      this.renderer.render(this.scene, activeCam);
     } catch {
       this.stop();
     }
@@ -5281,11 +6221,13 @@ export class GpuStressEngine {
     this.allFpsSamples = [];
     this.windowFrames = 0;
     this.buildActiveScene();
+    this.applyRenderScale(true);
     this.renderSingleFrame();
     if (this.renderer) {
       this.metrics.triangles = this.renderer.info.render.triangles;
       this.metrics.drawCalls = this.renderer.info.render.calls;
     }
+    this.updateOsdOverlay();
     this.emitMetrics();
     if (wasRunning) this.start();
   }
@@ -5299,6 +6241,7 @@ export class GpuStressEngine {
     this.frameTimes = [];
     this.allFpsSamples = [];
     this.windowFrames = 0;
+    this.updateOsdOverlay();
     this.emitMetrics();
     if (wasRunning) this.start();
   }
@@ -5306,18 +6249,41 @@ export class GpuStressEngine {
   public setPreset(preset: GpuLoadPreset): void {
     this.preset = preset;
     this.metrics.preset = preset;
-    this.uncappedBatchSize = preset === 'ultra' || preset === 'extreme' ? 1 : 2;
+    this.uncappedBatchSize = 1;
     this.frameTimes = [];
     this.allFpsSamples = [];
     this.windowFrames = 0;
     this.lastMetricEmit = performance.now();
     this.buildActiveScene();
+    this.applyRenderScale(true);
     if (!this.running && this.renderer) {
       this.renderSingleFrame();
       this.metrics.triangles = this.renderer.info.render.triangles;
       this.metrics.drawCalls = this.renderer.info.render.calls;
     }
+    this.updateOsdOverlay();
     this.emitMetrics();
+  }
+
+  private cancelScheduledFrame(): void {
+    if (this.frameHandle) {
+      if (this.frameHandleIsRaf) {
+        cancelAnimationFrame(this.frameHandle);
+      } else {
+        clearTimeout(this.frameHandle);
+      }
+      this.frameHandle = 0;
+      this.frameHandleIsRaf = false;
+    }
+    if (this.pendingGpuSync && this.renderer) {
+      try {
+        const gl = this.renderer.getContext() as WebGL2RenderingContext;
+        gl.deleteSync?.(this.pendingGpuSync);
+      } catch {
+        // ignore lost context
+      }
+      this.pendingGpuSync = null;
+    }
   }
 
   public start(): void {
@@ -5328,7 +6294,9 @@ export class GpuStressEngine {
     this.lastMetricEmit = this.startTime;
     this.lastUiYieldTime = this.startTime;
     this.totalFramesRendered = 0;
-    this.uncappedBatchSize = this.preset === 'ultra' || this.preset === 'extreme' ? 1 : 2;
+    this.windowFrames = 0;
+    this.uncappedBatchSize = 1;
+    this.lastGpuFrameMs = 16;
     this.frameTimes = [];
     this.allFpsSamples = [];
     this.telemetry = [];
@@ -5337,22 +6305,19 @@ export class GpuStressEngine {
     this.metrics.running = true;
     this.metrics.fpsMode = this.fpsMode;
     this.metrics.verdict = 'STABILNY';
+    this.applyRenderScale(true);
 
-    if (!this.uncappedChannel && typeof MessageChannel !== 'undefined') {
-      this.uncappedChannel = new MessageChannel();
-      this.uncappedChannel.port1.onmessage = () => this.tick();
-    }
-
+    this.updateOsdOverlay();
     this.emitMetrics();
-    this.scheduleNextFrame();
+    this.scheduleNextTick(true);
   }
 
   public stop(): void {
     if (!this.running) return;
     this.running = false;
-    cancelAnimationFrame(this.frameHandle);
-    clearTimeout(this.frameHandle);
+    this.cancelScheduledFrame();
     this.metrics.running = false;
+    this.updateOsdOverlay();
     this.emitMetrics();
   }
 
@@ -5372,48 +6337,136 @@ export class GpuStressEngine {
     });
   }
 
-  private scheduleNextFrame(): void {
+  private scheduleNextTick(forceRaf = false): void {
     if (!this.running || !this.renderer) return;
     if (this.isSoftwareGl) {
-      const gl = this.renderer.getContext() as WebGL2RenderingContext;
-      const sync = gl.fenceSync?.(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
-      gl.flush();
-      const poll = () => {
-        if (!this.running) {
-          if (sync) gl.deleteSync(sync);
-          return;
-        }
-        const state = sync ? gl.getSyncParameter(sync, gl.SYNC_STATUS) : gl.SIGNALED;
-        if (state === gl.UNSIGNALED) {
-          this.frameHandle = window.setTimeout(poll, 6);
-        } else {
-          if (sync) gl.deleteSync(sync);
-          this.frameHandle = window.setTimeout(() => this.tick(), 60);
-        }
-      };
-      this.frameHandle = window.setTimeout(poll, 6);
-    } else if (this.fpsMode === 'uncapped') {
-      const now = performance.now();
-      if (now - this.lastUiYieldTime >= 16) {
-        this.lastUiYieldTime = now;
-        this.frameHandle = window.setTimeout(() => this.tick(), 0);
-      } else if (this.uncappedChannel) {
-        this.uncappedChannel.port2.postMessage(null);
-      } else {
-        this.frameHandle = window.setTimeout(() => this.tick(), 0);
-      }
+      this.frameHandleIsRaf = false;
+      this.frameHandle = window.setTimeout(() => this.tick(), 36);
+      return;
+    }
+    const now = performance.now();
+    const isHeavy = HEAVY_FRAGMENT_SCENES.has(this.sceneMode);
+    const isHeavyOrSlow = isHeavy || this.lastGpuFrameMs >= 26 || this.adaptiveThrottleActive;
+    if (this.fpsMode === 'uncapped' && !forceRaf && !isHeavyOrSlow && now - this.lastUiYieldTime < 16) {
+      this.frameHandleIsRaf = false;
+      this.frameHandle = window.setTimeout(() => this.tick(), 0);
     } else {
+      this.lastUiYieldTime = now;
+      this.frameHandleIsRaf = true;
       this.frameHandle = requestAnimationFrame(() => this.tick());
     }
   }
 
+  private waitForGpuFenceAndContinue(): void {
+    if (!this.running || !this.renderer) return;
+    const gl = this.renderer.getContext() as WebGL2RenderingContext;
+    const isHeavy = HEAVY_FRAGMENT_SCENES.has(this.sceneMode);
+    const isHeavyOrSlow = isHeavy || this.lastGpuFrameMs >= 26 || this.adaptiveThrottleActive;
+    const useFence =
+      typeof gl.fenceSync === 'function' &&
+      (this.isSoftwareGl || this.fpsMode === 'uncapped' || isHeavyOrSlow);
+
+    if (!useFence) {
+      const elapsedMs = Math.max(0.25, performance.now() - this.pendingSyncStartMs);
+      this.onGpuFrameCompleted(this.pendingFramesInSlice, elapsedMs);
+      this.scheduleNextTick(false);
+      return;
+    }
+
+    const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    gl.flush();
+    if (!sync) {
+      const elapsedMs = Math.max(0.25, performance.now() - this.pendingSyncStartMs);
+      this.onGpuFrameCompleted(this.pendingFramesInSlice, elapsedMs);
+      this.scheduleNextTick(true);
+      return;
+    }
+    this.pendingGpuSync = sync;
+
+    const pollFence = (fromRaf: boolean) => {
+      if (!this.running || !this.renderer || this.pendingGpuSync !== sync) {
+        try {
+          gl.deleteSync(sync);
+        } catch {
+          // ignore
+        }
+        return;
+      }
+
+      const waitedMs = performance.now() - this.pendingSyncStartMs;
+      let signaled = false;
+      try {
+        if (typeof gl.clientWaitSync === 'function') {
+          const waitRes = gl.clientWaitSync(sync, 0, 0);
+          signaled = waitRes === gl.ALREADY_SIGNALED || waitRes === gl.CONDITION_SATISFIED;
+        } else {
+          signaled = gl.getSyncParameter(sync, gl.SYNC_STATUS) === gl.SIGNALED;
+        }
+      } catch {
+        signaled = true;
+      }
+
+      // Release fence after 450ms max so slow ANGLE drivers never stall the loop
+      if (!signaled && waitedMs < 450) {
+        if (waitedMs >= 8) {
+          this.frameHandleIsRaf = true;
+          this.frameHandle = requestAnimationFrame(() => pollFence(true));
+        } else {
+          this.frameHandleIsRaf = false;
+          this.frameHandle = window.setTimeout(() => pollFence(false), 2);
+        }
+        return;
+      }
+
+      try {
+        gl.deleteSync(sync);
+      } catch {
+        // ignore
+      }
+      this.pendingGpuSync = null;
+
+      const gpuFrameMs = Math.max(0.25, waitedMs / Math.max(1, this.pendingFramesInSlice));
+      this.onGpuFrameCompleted(this.pendingFramesInSlice, gpuFrameMs);
+
+      // If we are already inside a fresh requestAnimationFrame callback, draw the next frame right away
+      // instead of skipping a full vblank (prevents half-rate 30fps stutter on 60Hz monitors!).
+      if (fromRaf && !this.isSoftwareGl) {
+        this.lastUiYieldTime = performance.now();
+        this.tick();
+      } else {
+        this.scheduleNextTick(waitedMs >= 14);
+      }
+    };
+
+    if (isHeavyOrSlow || this.isSoftwareGl) {
+      this.frameHandleIsRaf = true;
+      this.frameHandle = requestAnimationFrame(() => pollFence(true));
+    } else {
+      this.frameHandleIsRaf = false;
+      this.frameHandle = window.setTimeout(() => pollFence(false), 1);
+    }
+  }
+
   private animateScene(elapsedSec: number, dtSec: number, updateCpuHeavy = true): void {
+    if (this.backdropMat) {
+      this.backdropMat.uniforms.uTime.value = elapsedSec;
+    }
+    for (const mat of this.animatedShaderMats) {
+      if (mat.uniforms.uTime) mat.uniforms.uTime.value = elapsedSec;
+    }
     if (this.sceneMode === 'vortex') {
       const fanSpeed = 5.5 + (this.estTempC - 40) * 0.25;
       if (this.fans[0]) this.fans[0].rotation.y += dtSec * fanSpeed;
       if (this.fans[1]) this.fans[1].rotation.y -= dtSec * fanSpeed;
       if (this.dieMaterial) {
-        this.dieMaterial.emissiveIntensity = 0.55 + Math.sin(elapsedSec * 3.5) * 0.16;
+        this.dieMaterial.emissiveIntensity = 0.85 + Math.sin(elapsedSec * 3.5) * 0.26;
+      }
+      if (this.holoRingGroup) {
+        this.holoRingGroup.position.y = 1.55 + Math.sin(elapsedSec * 2.1) * 0.1;
+        this.holoRingGroup.children.forEach((child, idx) => {
+          child.rotation.x += dtSec * (0.45 + idx * 0.28);
+          child.rotation.y += dtSec * (0.65 - idx * 0.18);
+        });
       }
       if (updateCpuHeavy && this.vortexMesh) {
         const count = this.vortexMesh.count;
@@ -6253,12 +7306,13 @@ export class GpuStressEngine {
     if (!this.running || !this.renderer || !this.scene || !this.camera) return;
 
     this.animFrameTick++;
+    const tSliceStart = performance.now();
+    const isHeavy = HEAVY_FRAGMENT_SCENES.has(this.sceneMode);
+    const isHeavyOrSlow = isHeavy || this.lastGpuFrameMs >= 26 || this.adaptiveThrottleActive;
     let framesInSlice = 1;
 
-    if (!this.isSoftwareGl && this.fpsMode === 'uncapped') {
-      const gl = this.renderer.getContext();
-      const batch = Math.min(2, this.uncappedBatchSize);
-      const tSliceStart = performance.now();
+    if (!this.isSoftwareGl && this.fpsMode === 'uncapped' && !isHeavyOrSlow) {
+      const batch = this.lastGpuFrameMs < 5 ? Math.min(2, this.uncappedBatchSize) : 1;
       const baseElapsed = (tSliceStart - this.startTime) / 1000;
       const sliceDtSec = Math.min(0.05, Math.max(0.0005, (tSliceStart - this.lastFrameTime) / 1000));
 
@@ -6269,28 +7323,50 @@ export class GpuStressEngine {
         executed++;
         if (performance.now() - tSliceStart > 4.2) break;
       }
-      gl.flush();
 
-      const tSliceEnd = performance.now();
-      const sliceMs = Math.max(0.25, tSliceEnd - tSliceStart);
       framesInSlice = executed;
-      this.lastFrameTime = tSliceEnd;
-
-      if (sliceMs < 2.8 && this.uncappedBatchSize < 2) {
-        this.uncappedBatchSize = 2;
-      } else if (sliceMs > 4.5 && this.uncappedBatchSize > 1) {
-        this.uncappedBatchSize = 1;
-      }
+      this.lastFrameTime = performance.now();
     } else {
-      const now = performance.now();
-      const dtMs = Math.max(0.25, now - this.lastFrameTime);
+      const dtMs = Math.max(0.25, tSliceStart - this.lastFrameTime);
       const dtSec = Math.min(0.1, dtMs / 1000);
-      const elapsedSec = (now - this.startTime) / 1000;
-      this.lastFrameTime = now;
+      const elapsedSec = (tSliceStart - this.startTime) / 1000;
+      this.lastFrameTime = tSliceStart;
 
       this.animateScene(elapsedSec, dtSec);
       this.renderSingleFrame();
       framesInSlice = 1;
+    }
+
+    this.pendingSyncStartMs = tSliceStart;
+    this.pendingFramesInSlice = framesInSlice;
+    this.waitForGpuFenceAndContinue();
+  }
+
+  private onGpuFrameCompleted(framesInSlice: number, gpuFrameMs: number): void {
+    if (!this.running || !this.renderer) return;
+
+    this.lastGpuFrameMs = gpuFrameMs;
+    if (gpuFrameMs < 4 && this.uncappedBatchSize < 2) {
+      this.uncappedBatchSize = 2;
+    } else if (gpuFrameMs > 7 && this.uncappedBatchSize > 1) {
+      this.uncappedBatchSize = 1;
+    }
+
+    // Adaptive anti-freeze resolution scaling when actual GPU frame time spikes
+    const isHeavy = HEAVY_FRAGMENT_SCENES.has(this.sceneMode);
+    const adaptive = computeAdaptiveRenderScale(
+      this.renderScale,
+      gpuFrameMs,
+      isHeavy,
+      this.slowFrameStreak,
+      this.fastFrameStreak
+    );
+    this.slowFrameStreak = adaptive.slowFrames;
+    this.fastFrameStreak = adaptive.fastFrames;
+    this.adaptiveThrottleActive = adaptive.throttled;
+    if (Math.abs(adaptive.nextScale - this.renderScale) >= 0.02) {
+      this.renderScale = adaptive.nextScale;
+      this.applyRenderScale(false);
     }
 
     this.totalFramesRendered += framesInSlice;
@@ -6299,7 +7375,7 @@ export class GpuStressEngine {
     const elapsedSec = (now - this.startTime) / 1000;
     const windowElapsedMs = now - this.lastMetricEmit;
 
-    if (windowElapsedMs >= 320 && this.windowFrames > 0) {
+    if ((windowElapsedMs >= 240 || (this.allFpsSamples.length === 0 && windowElapsedMs >= 90)) && this.windowFrames > 0) {
       const curFps = Math.max(1, Math.min(2400, Math.round((this.windowFrames * 1000) / windowElapsedMs)));
       const windowFrameMs = Number((windowElapsedMs / Math.max(1, this.windowFrames)).toFixed(2));
       this.windowFrames = 0;
@@ -6323,7 +7399,7 @@ export class GpuStressEngine {
       const low1Idx = Math.max(0, Math.floor(sortedFps.length * 0.05));
       const low1PctFps = Math.round(sortedFps[low1Idx] ?? minFps);
 
-      // Compute frame-pacing stability across 320ms measurement windows
+      // Compute frame-pacing stability across measurement windows
       const sortedFt = [...this.frameTimes].sort((a, b) => a - b);
       const trimStart = Math.floor(sortedFt.length * 0.1);
       const trimEnd = Math.max(trimStart + 1, Math.ceil(sortedFt.length * 0.9));
@@ -6343,16 +7419,21 @@ export class GpuStressEngine {
       this.estTempC = Number((this.estTempC + (targetTemp - this.estTempC) * 0.14).toFixed(1));
       this.peakTempC = Math.max(this.peakTempC, this.estTempC);
 
+      const liveGpuTemp = thermalMonitorService.getLiveGpuTempC();
+      const effectiveTempC = liveGpuTemp !== null ? liveGpuTemp : this.estTempC;
+
       const allocatedVramMB = this.preset === 'ultra' || this.sceneMode === 'vram_fill' ? 16384 : 12288;
-      const textureVramMB = Math.round(allocatedVramMB * (0.55 + Math.sin(elapsedSec * 0.1) * 0.08 + (this.preset === 'ultra' ? 0.25 : 0.1)));
-      const thermalThrottleActive = this.estTempC >= 80;
+      const textureVramMB = Math.round(
+        allocatedVramMB * (0.55 + Math.sin(elapsedSec * 0.1) * 0.08 + (this.preset === 'ultra' ? 0.25 : 0.1))
+      );
+      const thermalThrottleActive = effectiveTempC >= 80;
       const coreClockMhz = thermalThrottleActive ? 1750 : 2550;
 
       this.telemetry.push({
         timeSec: Number(elapsedSec.toFixed(1)),
         fps: curFps,
         frameTimeMs: Number(avgFrameMs.toFixed(2)),
-        estTempC: this.estTempC,
+        estTempC: effectiveTempC,
         allocatedVramMB,
         textureVramMB,
         coreClockMhz,
@@ -6401,17 +7482,8 @@ export class GpuStressEngine {
       const triCount = this.renderer.info.render.triangles;
       const sz = new THREE.Vector2();
       this.renderer.getDrawingBufferSize(sz);
-      const pixels = Math.max(1280 * 720, sz.x * sz.y);
-      // Realistic FP32 TFLOPS estimation from pixel shader ALU instructions + vertex/triangle throughput
-      const shaderFlopsPerPx =
-        this.sceneMode === 'raymarching' ||
-        this.sceneMode === 'menger_sponge' ||
-        this.sceneMode === 'volumetric_nebula' ||
-        this.sceneMode === 'blackhole_lensing' ||
-        this.sceneMode === 'fractal_julia4d' ||
-        this.sceneMode === 'volumetric_clouds_4k'
-          ? 24800
-          : 8600;
+      const pixels = Math.max(640 * 360, sz.x * sz.y);
+      const shaderFlopsPerPx = isHeavy ? 24800 : 8600;
       const fp32Ops = curFps * (pixels * shaderFlopsPerPx + triCount * 420);
       const estFp32Tflops = Number((fp32Ops / 1e12).toFixed(2));
       const vramFillrateGBs = Number(((curFps * pixels * 32) / 1e9).toFixed(1));
@@ -6439,6 +7511,10 @@ export class GpuStressEngine {
         elapsedSec: Number(elapsedSec.toFixed(1)),
         isSoftwareGl: this.isSoftwareGl,
         rendererName: this.rendererName,
+        renderWidth: Math.round(sz.x),
+        renderHeight: Math.round(sz.y),
+        renderScalePct: Math.round(this.renderScale * 100),
+        adaptiveThrottleActive: this.adaptiveThrottleActive,
         allocatedVramMB,
         textureVramMB,
         coreClockMhz,
@@ -6450,10 +7526,9 @@ export class GpuStressEngine {
         vramFillrateGBs,
         verdict,
       };
+      this.updateOsdOverlay();
       this.emitMetrics();
     }
-
-    this.scheduleNextFrame();
   }
 
   private handleResize(): void {
@@ -6462,40 +7537,11 @@ export class GpuStressEngine {
     const h = Math.max(260, this.mountEl.clientHeight);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
-    this.renderer.setSize(w, h);
-    if (this.raymarchMat) {
-      const sz = new THREE.Vector2();
-      this.renderer.getDrawingBufferSize(sz);
-      this.raymarchMat.uniforms.uResolution.value.copy(sz);
-    }
-    if (this.mengerMat) {
-      const sz = new THREE.Vector2();
-      this.renderer.getDrawingBufferSize(sz);
-      this.mengerMat.uniforms.uResolution.value.copy(sz);
-    }
-    if (this.nebulaMat) {
-      const sz = new THREE.Vector2();
-      this.renderer.getDrawingBufferSize(sz);
-      this.nebulaMat.uniforms.uResolution.value.copy(sz);
-    }
-    if (this.blackholeMat) {
-      const sz = new THREE.Vector2();
-      this.renderer.getDrawingBufferSize(sz);
-      this.blackholeMat.uniforms.uResolution.value.copy(sz);
-    }
-    if (this.julia4dMat) {
-      const sz = new THREE.Vector2();
-      this.renderer.getDrawingBufferSize(sz);
-      this.julia4dMat.uniforms.uResolution.value.copy(sz);
-    }
-    if (this.volumetricCloudMat) {
-      const sz = new THREE.Vector2();
-      this.renderer.getDrawingBufferSize(sz);
-      this.volumetricCloudMat.uniforms.uResolution.value.copy(sz);
-    }
+    this.applyRenderScale(false);
     if (!this.running && this.scene) {
       this.renderSingleFrame();
     }
+    this.updateOsdOverlay();
   }
 
   private emitMetrics(): void {
@@ -6506,9 +7552,29 @@ export class GpuStressEngine {
 
   public unmount(): void {
     this.stop();
+    if (this.fsChangeListener) {
+      document.removeEventListener('fullscreenchange', this.fsChangeListener);
+      this.fsChangeListener = null;
+    }
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     this.clearActiveGroup();
+    if (this.backdropDome) {
+      this.backdropDome.geometry.dispose();
+      this.backdropDome.removeFromParent();
+      this.backdropDome = null;
+    }
+    this.backdropMat?.dispose();
+    this.backdropMat = null;
+    this.composer?.dispose();
+    this.composer = null;
+    this.composerRT?.dispose();
+    this.composerRT = null;
+    this.bloomPass?.dispose();
+    this.bloomPass = null;
+    this.cinematicPass?.dispose();
+    this.cinematicPass = null;
+    this.renderPass = null;
     this.envRenderTarget?.dispose();
     this.envRenderTarget = null;
     this.renderer?.dispose();
@@ -6516,6 +7582,13 @@ export class GpuStressEngine {
     this.scene = null;
     this.camera = null;
     this.raymarchOrthoCam = null;
+    this.osdEl = null;
+    this.fsBtnEl = null;
+    this.postFxBtnEl = null;
+    this.osdToggleBtnEl = null;
+    this.fsStartStopBtnEl = null;
+    this.fsPrevBtnEl = null;
+    this.fsNextBtnEl = null;
     this.mountEl = null;
   }
 }

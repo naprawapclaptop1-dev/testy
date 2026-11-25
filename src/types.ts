@@ -315,6 +315,10 @@ export interface GpuStressMetrics {
   rendererName: string;
   estFp32Tflops?: number;
   vramFillrateGBs?: number;
+  renderWidth?: number;
+  renderHeight?: number;
+  renderScalePct?: number;
+  adaptiveThrottleActive?: boolean;
   allocatedVramMB: number;
   textureVramMB: number;
   coreClockMhz: number;

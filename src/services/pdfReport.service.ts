@@ -1,17 +1,39 @@
 import { jsPDF } from 'jspdf';
 import {
   BatteryHealthState,
+  ComponentScanCard,
   CpuTestResult,
   DiskTestResult,
   GameBenchMetrics,
+  GpuSceneMode,
   GpuStressMetrics,
   NetworkTestResult,
   RamTestResult,
   SchedulerSummaryReport,
+  StressSessionRecord,
   SuiteScores,
   SystemSpecs,
+  ThermalHeatMapSnapshot,
 } from '../types';
 import { HardwareScanSnapshot } from './hardwareScanner.service';
+import {
+  computeHardwarePowerIndex,
+  evaluateGamePlayabilitySummary,
+  evaluatePcSuitability,
+  predictPlayableGames,
+} from '../ui/pcSuitabilityAndGamesReport';
+import { computePcRankingSnapshot } from '../ui/pcRankingReport';
+
+export interface GpuSuitePdfRow {
+  sceneId: GpuSceneMode;
+  name: string;
+  targetUnit: string;
+  avgFps: number;
+  low1PctFps: number;
+  triangles: number;
+  stabilityPct: number;
+  score: number;
+}
 
 export interface PdfReportPayload {
   specs: SystemSpecs | null;
@@ -25,6 +47,11 @@ export interface PdfReportPayload {
   battery: BatteryHealthState;
   realCpuTempC?: number | null;
   realGpuTempC?: number | null;
+  hardwareScan?: HardwareScanSnapshot | null;
+  componentScans?: ComponentScanCard[];
+  thermalState?: ThermalHeatMapSnapshot | null;
+  gpuSuiteResults?: GpuSuitePdfRow[];
+  stressHistory?: StressSessionRecord[];
 }
 
 const PL_MAP: Record<string, string> = {
@@ -51,91 +78,300 @@ const PL_MAP: Record<string, string> = {
   '–': '-',
   '·': '|',
   '≥': '>=',
-  '°': ' deg ',
+  '≤': '<=',
+  '°': ' ',
+  '✓': 'OK',
+  '✔': 'OK',
+  '⚠️': 'UWAGA:',
+  '⚠': 'UWAGA:',
 };
 
 function pdfText(input: string | number | null | undefined): string {
-  const s = String(input ?? '—');
-  return s.replace(/[ąćęłńóśźżĄĆĘŁŃÓŚŹŻ×—–·≥°]/g, (ch) => PL_MAP[ch] ?? ch);
+  const s = String(input ?? '-');
+  return s
+    .replace(/[ąćęłńóśźżĄĆĘŁŃÓŚŹŻ×—–·≥≤°✓✔⚠]/g, (ch) => PL_MAP[ch] ?? ch)
+    .replace(/[^\x20-\x7E]/g, '');
 }
 
 function truncateText(str: string, maxLen: number): string {
   if (str.length <= maxLen) return str;
-  return str.slice(0, maxLen - 3) + '...';
+  return str.slice(0, Math.max(4, maxLen - 3)) + '...';
 }
 
-export function generateDiagnosticPdfReport(payload: PdfReportPayload): void {
+function fitTextToWidth(doc: jsPDF, rawText: string, maxWidthMm: number): string {
+  const clean = pdfText(rawText);
+  if (doc.getTextWidth(clean) <= maxWidthMm) return clean;
+  let end = clean.length;
+  while (end > 3 && doc.getTextWidth(clean.slice(0, end) + '...') > maxWidthMm) {
+    end -= 1;
+  }
+  return clean.slice(0, Math.max(1, end)) + '...';
+}
+
+export function buildDiagnosticPdfDocument(payload: PdfReportPayload): jsPDF {
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const pageW = 210;
-  const margin = 14;
+  const pageH = 297;
+  const margin = 13;
   const contentW = pageW - margin * 2;
+  const bottomLimit = 276;
 
-  const { specs, scores, cpu, ram, disk, gpu, game, network, battery, realCpuTempC, realGpuTempC } = payload;
-  const nowStr = new Date().toLocaleString('pl-PL');
+  const {
+    specs,
+    scores,
+    cpu,
+    ram,
+    disk,
+    gpu,
+    game,
+    network,
+    battery,
+    realCpuTempC,
+    realGpuTempC,
+    hardwareScan,
+    componentScans = [],
+    thermalState,
+    gpuSuiteResults = [],
+    stressHistory = [],
+  } = payload;
 
-  // --- Header Band ---
+  const now = new Date();
+  const nowStr = now.toLocaleString('pl-PL');
+  const reportId = `SP-${now.toISOString().slice(0, 10).replace(/-/g, '')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
+
+  const suitabilityCtx = {
+    specs,
+    cpu,
+    ram,
+    disk,
+    gpu,
+    game: game ?? ({
+      avgFps: 0,
+      fps: 0,
+      low1PctFps: 0,
+      low01PctFps: 0,
+      overallScore: 0,
+      stabilityPct: 0,
+      preset: 'ultra',
+      fpsMode: 'uncapped',
+      verdict: 'OCZEKIWANIE',
+    } as GameBenchMetrics),
+  };
+
+  const hwIndex = computeHardwarePowerIndex(suitabilityCtx);
+  const gamesList = predictPlayableGames(suitabilityCtx);
+  const gamesSummary = evaluateGamePlayabilitySummary(gamesList);
+  const suitabilityList = evaluatePcSuitability(suitabilityCtx);
+  const rankingSnap = computePcRankingSnapshot({
+    ...suitabilityCtx,
+    scores,
+  });
+
+  // Determine overall service health verdict
+  const hasCriticalFault =
+    ram.errorsFound > 0 ||
+    disk.smartStatus === 'KRYTYCZNY' ||
+    battery.healthPct < 55 ||
+    (battery.psu?.status && battery.psu.status !== 'STABILNY');
+  const hasMinorWarning =
+    disk.smartStatus === 'UWAGA' ||
+    battery.healthPct < 75 ||
+    (gpu.avgFps > 0 && gpu.stabilityPct < 75) ||
+    (network && network.packetLossPct > 2);
+
+  const serviceVerdict = hasCriticalFault
+    ? 'WYKRYTO USTERKI / WYMAGA SERWISU'
+    : hasMinorWarning
+      ? 'SPRAWNY Z UWAGAMI (ZALECANA KONSERWACJA)'
+      : scores.overall > 0
+        ? 'SPRZET W PELNI SPRAWNY - ZALICZONO TESTY'
+        : 'RAPORT WSTEPNY (ZALECANY PELNY TEST)';
+
+  const verdictColor: [number, number, number] = hasCriticalFault
+    ? [225, 29, 72]
+    : hasMinorWarning
+      ? [217, 119, 6]
+      : [5, 150, 105];
+
+  let y = 42;
+
+  const drawContinuationHeader = (sectionBanner: string) => {
+    doc.setFillColor(12, 18, 30);
+    doc.rect(0, 0, pageW, 16, 'F');
+    doc.setFillColor(6, 182, 212);
+    doc.rect(0, 15.2, pageW, 0.8, 'F');
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9.5);
+    doc.setTextColor(241, 245, 249);
+    doc.text('SystemPulse Pro - Rozszerzony Raport Diagnostyczny PC / Laptopa', margin, 10);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(148, 163, 184);
+    doc.text(pdfText(`${sectionBanner} | ID: ${reportId}`), pageW - margin, 10, { align: 'right' });
+    y = 23;
+  };
+
+  const ensureSpace = (neededMm: number, nextBanner = 'Kontynuacja raportu') => {
+    if (y + neededMm > bottomLimit) {
+      doc.addPage();
+      drawContinuationHeader(nextBanner);
+    }
+  };
+
+  const drawSectionHeading = (title: string, subtitle?: string) => {
+    ensureSpace(subtitle ? 15 : 11, title);
+    doc.setFillColor(6, 182, 212);
+    doc.rect(margin, y - 3.6, 2.2, 4.8, 'F');
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10.5);
+    doc.setTextColor(15, 23, 42);
+    doc.text(pdfText(title), margin + 4.5, y);
+
+    doc.setDrawColor(203, 213, 225);
+    doc.setLineWidth(0.3);
+    doc.line(margin, y + 2, pageW - margin, y + 2);
+    y += 5.8;
+
+    if (subtitle) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.8);
+      doc.setTextColor(100, 116, 139);
+      doc.text(fitTextToWidth(doc, subtitle, contentW), margin, y);
+      y += 4.6;
+    }
+  };
+
+  const drawDetailCard = (
+    x: number,
+    topY: number,
+    w: number,
+    cardH: number,
+    title: string,
+    rows: Array<[string, string]>,
+    accentRgb: [number, number, number] = [6, 182, 212]
+  ) => {
+    doc.setFillColor(248, 250, 252);
+    doc.setDrawColor(203, 213, 225);
+    doc.setLineWidth(0.25);
+    doc.roundedRect(x, topY, w, cardH, 2, 2, 'FD');
+
+    doc.setFillColor(accentRgb[0], accentRgb[1], accentRgb[2]);
+    doc.rect(x, topY + 2, 1.5, 5.2, 'F');
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8.8);
+    doc.setTextColor(15, 23, 42);
+    doc.text(fitTextToWidth(doc, title, w - 8), x + 4.5, topY + 6);
+
+    doc.setDrawColor(226, 232, 240);
+    doc.line(x + 4, topY + 8, x + w - 4, topY + 8);
+
+    let ry = topY + 12.6;
+    const labelMaxW = w * 0.48;
+    const valMaxW = w * 0.46;
+    doc.setFontSize(7.6);
+    for (const [label, val] of rows) {
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(71, 85, 105);
+      doc.text(fitTextToWidth(doc, label, labelMaxW), x + 4, ry);
+
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(15, 23, 42);
+      doc.text(fitTextToWidth(doc, val, valMaxW), x + w - 4, ry, { align: 'right' });
+      ry += 4.9;
+    }
+  };
+
+  // =========================================================================
+  // STRONA 1: NAGLOWEK, WERDYKT, SPECYFIKACJA, WYNIKI, SKAN 12 PODZESPOLOW
+  // =========================================================================
   doc.setFillColor(12, 18, 30);
-  doc.rect(0, 0, pageW, 34, 'F');
-
+  doc.rect(0, 0, pageW, 35, 'F');
   doc.setFillColor(6, 182, 212);
-  doc.rect(0, 33, pageW, 1.2, 'F');
+  doc.rect(0, 34, pageW, 1.2, 'F');
 
   doc.setTextColor(241, 245, 249);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(17);
-  doc.text('SystemPulse Pro', margin, 14);
+  doc.text('SystemPulse Pro', margin, 13.5);
 
   doc.setFont('helvetica', 'normal');
-  doc.setFontSize(9.5);
+  doc.setFontSize(9);
   doc.setTextColor(148, 163, 184);
-  doc.text(pdfText('Raport diagnostyczny i benchmarkowy komputera / laptopa'), margin, 21);
-  doc.text(pdfText(`Wygenerowano: ${nowStr}`), margin, 27);
+  doc.text(pdfText('Kompleksowy Raport Diagnostyczny, Ranking PC i Wydajnosc w Grach (A4)'), margin, 20.5);
+  doc.text(pdfText(`Wygenerowano: ${nowStr}   |   Nr raportu: ${reportId}`), margin, 26.8);
 
-  // Overall Grade Badge in Header
+  // Ranking & Grade Badge in Header
   doc.setFillColor(20, 29, 46);
   doc.setDrawColor(6, 182, 212);
   doc.setLineWidth(0.5);
-  doc.roundedRect(pageW - margin - 42, 6, 42, 22, 2.5, 2.5, 'FD');
+  doc.roundedRect(pageW - margin - 52, 5.5, 52, 23, 2.5, 2.5, 'FD');
 
   doc.setTextColor(6, 182, 212);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(18);
-  doc.text(scores.overall > 0 ? scores.grade : '--', pageW - margin - 33, 18.5, { align: 'center' });
+  doc.text(scores.overall > 0 ? scores.grade : '--', pageW - margin - 42, 18.5, { align: 'center' });
 
   doc.setTextColor(241, 245, 249);
-  doc.setFontSize(10);
-  doc.text(scores.overall > 0 ? `${scores.overall}/100` : 'Brak', pageW - margin - 14, 15.5, { align: 'center' });
+  doc.setFontSize(10.5);
+  doc.text(
+    scores.overall > 0 ? `${scores.overall}/100` : `${rankingSnap.currentEntry.overallScore}/100`,
+    pageW - margin - 18,
+    14.5,
+    { align: 'center' }
+  );
+  doc.setTextColor(52, 211, 153);
+  doc.setFontSize(7.2);
+  doc.text(
+    pdfText(`POZ. #${rankingSnap.currentRank}/${rankingSnap.totalRanked} (TOP ${Math.max(1, 100 - rankingSnap.percentileBetterThan)}%)`),
+    pageW - margin - 18,
+    20.2,
+    { align: 'center' }
+  );
   doc.setTextColor(148, 163, 184);
   doc.setFont('helvetica', 'normal');
-  doc.setFontSize(7);
-  doc.text('INDEKS', pageW - margin - 14, 21.5, { align: 'center' });
+  doc.setFontSize(6.5);
+  doc.text('INDEKS & RANKING', pageW - margin - 18, 25.2, { align: 'center' });
 
-  let y = 42;
+  // Service Verdict Banner
+  y = 40;
+  doc.setFillColor(verdictColor[0], verdictColor[1], verdictColor[2]);
+  doc.roundedRect(margin, y, contentW, 9.5, 1.8, 1.8, 'F');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8.8);
+  doc.setTextColor(255, 255, 255);
+  doc.text(pdfText(`WERDYKT SERWISOWY: ${serviceVerdict}`), margin + 4, y + 6.2);
+  doc.setFontSize(8);
+  doc.text(
+    pdfText(`Gry 60+ FPS: ${gamesSummary.smoothOrBetterCount}/${gamesSummary.total} | Klasa: ${rankingSnap.tierBadge}`),
+    pageW - margin - 4,
+    y + 6.2,
+    { align: 'right' }
+  );
+  y += 15;
 
-  const drawSectionHeading = (title: string) => {
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(10.5);
-    doc.setTextColor(15, 23, 42);
-    doc.text(pdfText(title), margin, y);
-    doc.setDrawColor(203, 213, 225);
-    doc.setLineWidth(0.3);
-    doc.line(margin, y + 1.8, pageW - margin, y + 1.8);
-    y += 6.5;
-  };
+  // --- Section 1: Hardware Inventory (ZERO OVERLAP — Safe single/two-column rows) ---
+  drawSectionHeading(
+    '1. Pelna specyfikacja wykrytego sprzetu i srodowiska',
+    'Automatyczny odczyt GPU, CPU, pamieci, ekranu oraz danych z lokalnego mostka sprzetowego (jesli dostepny)'
+  );
 
-  // --- Section 1: Hardware Inventory ---
-  drawSectionHeading('1. Specyfikacja wykrytego sprzetu');
+  const fullWidthSpecs: Array<[string, string]> = [
+    ['System / Platforma', specs ? `${specs.os} (${specs.platform})` : 'Nieznany'],
+    ['Karta graficzna (GPU)', specs ? `${specs.gpuRenderer} [${specs.gpuVendor}]` : 'Nieznana'],
+  ];
 
-  const specRows: Array<[string, string, string, string]> = [
+  doc.setFillColor(248, 250, 252);
+  doc.setDrawColor(203, 213, 225);
+  doc.setLineWidth(0.25);
+  const specBoxY = y;
+  const pairedSpecs: Array<[string, string, string, string]> = [
     [
-      'System / Platforma',
-      specs ? `${specs.os} (${specs.platform})` : 'Nieznany',
       'Rdzenie logiczne CPU',
       specs ? `${specs.cpuCores} watkow` : '-',
-    ],
-    [
-      'Przegladarka',
-      specs ? specs.browser : '-',
       'Pamiec RAM (API)',
       specs ? (typeof specs.deviceMemory === 'number' ? `>= ${specs.deviceMemory} GB` : String(specs.deviceMemory)) : '-',
     ],
@@ -146,263 +382,830 @@ export function generateDiagnosticPdfReport(payload: PdfReportPayload): void {
       specs ? `${specs.webglVersion} | ${specs.maxTextureSize}px` : '-',
     ],
     [
-      'Karta graficzna (GPU)',
-      truncateText(specs ? specs.gpuRenderer : '-', 46),
-      'Pula dyskowa',
-      specs && specs.storageQuotaGB ? `${specs.storageQuotaGB} GB (uzyto ${specs.storageUsageMB ?? 0} MB)` : 'Dostepna',
+      'Przegladarka / Silnik',
+      specs ? specs.browser : '-',
+      'Pula dyskowa / OPFS',
+      specs && specs.storageQuotaGB
+        ? `${specs.storageQuotaGB} GB (uzyto ${specs.storageUsageMB ?? 0} MB)`
+        : 'Dostepna',
+    ],
+    [
+      'Klasa VRAM (szac.)',
+      `~${hwIndex.vramEstGb} GB VRAM`,
+      'Panel / Gamut',
+      hardwareScan?.panel
+        ? `${hardwareScan.panel.colorGamut} | ${hardwareScan.panel.hdrSupported ? 'HDR' : 'SDR'}`
+        : specs
+          ? `${specs.colorDepth}-bit SDR`
+          : '-',
     ],
   ];
 
-  doc.setFontSize(8.5);
-  for (const [k1, v1, k2, v2] of specRows) {
-    doc.setFont('helvetica', 'bold');
-    doc.setTextColor(71, 85, 105);
-    doc.text(pdfText(k1 + ':'), margin, y);
-    doc.setFont('helvetica', 'normal');
-    doc.setTextColor(15, 23, 42);
-    doc.text(pdfText(v1), margin + 35, y);
-
-    doc.setFont('helvetica', 'bold');
-    doc.setTextColor(71, 85, 105);
-    doc.text(pdfText(k2 + ':'), margin + 102, y);
-    doc.setFont('helvetica', 'normal');
-    doc.setTextColor(15, 23, 42);
-    doc.text(pdfText(v2), margin + 135, y);
-    y += 5.4;
+  // Add Deep Inventory row if available (Motherboard / BIOS / Physical Disks)
+  const deep = hardwareScan?.deepInventory;
+  if (deep?.motherboard) {
+    fullWidthSpecs.push([
+      'Plyta glowna / BIOS',
+      `${deep.motherboard} | BIOS: ${deep.bios || '-'}`,
+    ]);
+  }
+  if (deep?.disks && deep.disks.length > 0) {
+    const diskNames = deep.disks
+      .slice(0, 2)
+      .map((d) => `${d.model} (${d.sizeGB} GB ${d.interfaceType || ''})`)
+      .join(' ; ');
+    fullWidthSpecs.push(['Dyski fizyczne (WMI)', diskNames]);
   }
 
-  y += 4;
+  const specBoxH = fullWidthSpecs.length * 5.2 + pairedSpecs.length * 5.2 + 5.5;
+  doc.roundedRect(margin, specBoxY, contentW, specBoxH, 2, 2, 'FD');
+
+  let sy = specBoxY + 5.2;
+  doc.setFontSize(7.9);
+  for (const [k, v] of fullWidthSpecs) {
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(71, 85, 105);
+    doc.text(pdfText(k + ':'), margin + 3.5, sy);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(15, 23, 42);
+    doc.text(fitTextToWidth(doc, v, contentW - 43), margin + 39, sy);
+    sy += 5.2;
+  }
+
+  const leftColLabelX = margin + 3.5;
+  const leftColValX = margin + 39;
+  const leftValMaxW = 50;
+  const rightColLabelX = margin + 93;
+  const rightColValX = margin + 129;
+  const rightValMaxW = contentW - 132;
+
+  for (const [k1, v1, k2, v2] of pairedSpecs) {
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(71, 85, 105);
+    doc.text(fitTextToWidth(doc, k1 + ':', 34), leftColLabelX, sy);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(15, 23, 42);
+    doc.text(fitTextToWidth(doc, v1, leftValMaxW), leftColValX, sy);
+
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(71, 85, 105);
+    doc.text(fitTextToWidth(doc, k2 + ':', 34), rightColLabelX, sy);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(15, 23, 42);
+    doc.text(fitTextToWidth(doc, v2, rightValMaxW), rightColValX, sy);
+    sy += 5.2;
+  }
+
+  y = specBoxY + specBoxH + 6;
 
   // --- Section 2: Benchmark Score Bars ---
-  drawSectionHeading('2. Podsumowanie wynikow podzespolow (skala 0-100)');
+  drawSectionHeading('2. Podsumowanie wynikow wszystkich podzespolow (skala 0-100)');
+
+  const netScore =
+    network && network.pingAvgMs > 0
+      ? network.qualityGrade === 'WZOROWA'
+        ? 95
+        : network.qualityGrade === 'DOBRA'
+          ? 78
+          : 48
+      : 0;
 
   const barItems: Array<{ label: string; score: number; detail: string }> = [
     {
       label: 'Procesor (CPU)',
       score: scores.cpu,
-      detail: cpu.multiCoreScore > 0 ? `SC ${cpu.singleCoreScore} / MC ${cpu.multiCoreScore} pkt (${cpu.grade})` : 'Nie testowano',
+      detail:
+        cpu.multiCoreScore > 0
+          ? `SC ${cpu.singleCoreScore} / MC ${cpu.multiCoreScore} pkt (${cpu.grade}) | Skalowanie ${cpu.scalingRatio}x`
+          : 'Nie testowano',
     },
     {
       label: 'Pamiec RAM',
       score: scores.ram,
-      detail: ram.bandwidthReadMBs > 0 ? `Odczyt ${ram.bandwidthReadMBs} MB/s | Bledy: ${ram.errorsFound} (${ram.healthGrade})` : 'Nie testowano',
+      detail:
+        ram.bandwidthReadMBs > 0
+          ? `Odczyt ${ram.bandwidthReadMBs} / Zapis ${ram.bandwidthWriteMBs} MB/s | Bledy: ${ram.errorsFound} (${ram.healthGrade})`
+          : 'Nie testowano',
     },
     {
       label: 'Dysk SSD/HDD',
       score: scores.disk,
-      detail: disk.seqReadMBs > 0 ? `Seq ${disk.seqReadMBs}/${disk.seqWriteMBs} MB/s | SMART: ${disk.smartStatus}` : 'Nie testowano',
+      detail:
+        disk.seqReadMBs > 0
+          ? `Seq ${disk.seqReadMBs}/${disk.seqWriteMBs} MB/s | 4K: ${disk.rand4kIops} IOPS | SMART: ${disk.smartStatus}`
+          : 'Nie testowano',
     },
     {
       label: 'Grafika 3D (GPU)',
       score: scores.gpu,
-      detail: gpu.avgFps > 0 ? `Sr. ${gpu.avgFps} FPS (1% Low: ${gpu.low1PctFps}) | Stabilnosc ${gpu.stabilityPct}%` : 'Nie testowano',
+      detail:
+        gpu.avgFps > 0
+          ? `Sr. ${gpu.avgFps} FPS (Max ${gpu.maxFps} / 1% Low ${Math.min(gpu.avgFps, gpu.low1PctFps)}) | Stab. ${gpu.stabilityPct}%`
+          : 'Nie testowano',
     },
     {
-      label: 'Kondycja Baterii',
+      label: 'Gra 3D MAX',
+      score: game && game.overallScore > 0 ? game.overallScore : 0,
+      detail:
+        game && game.avgFps > 0
+          ? `${game.preset.toUpperCase()} | Sr. ${game.avgFps} FPS | 1% Low: ${Math.min(game.avgFps, game.low1PctFps)} FPS (${game.verdict})`
+          : 'Nie testowano',
+    },
+    {
+      label: 'Siec i Lacznosc',
+      score: netScore,
+      detail:
+        network && network.pingAvgMs > 0
+          ? `Ping ${network.pingAvgMs} ms | Jitter ${network.jitterMs} ms | Utrata ${network.packetLossPct}% (${network.qualityGrade})`
+          : 'Nie testowano',
+    },
+    {
+      label: 'Kondycja Baterii / PSU',
       score: scores.battery,
-      detail: `Zdrowie ${battery.healthPct}% | Zuzycie ${battery.wearLevelPct}% (${battery.condition})`,
+      detail: `Bateria: ${battery.healthPct}% (${battery.condition}) | PSU +12V: ${battery.psu.rail12V.toFixed(2)}V (${battery.psu.status})`,
     },
   ];
 
   for (const item of barItems) {
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(8.5);
+    doc.setFontSize(8.1);
     doc.setTextColor(15, 23, 42);
-    doc.text(pdfText(item.label), margin, y);
+    doc.text(fitTextToWidth(doc, item.label, 35), margin, y);
 
-    const barX = margin + 36;
-    const barW = 58;
-    const barH = 3.6;
+    const barX = margin + 37;
+    const barW = 50;
+    const barH = 3.5;
     doc.setFillColor(226, 232, 240);
-    doc.roundedRect(barX, y - 3, barW, barH, 1, 1, 'F');
+    doc.roundedRect(barX, y - 2.9, barW, barH, 1, 1, 'F');
 
-    const fillW = Math.max(0, Math.min(100, item.score)) / 100 * barW;
+    const fillW = (Math.max(0, Math.min(100, item.score)) / 100) * barW;
     if (fillW > 0) {
-      if (item.score >= 70) doc.setFillColor(16, 185, 129);
-      else if (item.score >= 45) doc.setFillColor(6, 182, 212);
+      if (item.score >= 75) doc.setFillColor(16, 185, 129);
+      else if (item.score >= 50) doc.setFillColor(6, 182, 212);
       else doc.setFillColor(245, 158, 11);
-      doc.roundedRect(barX, y - 3, fillW, barH, 1, 1, 'F');
+      doc.roundedRect(barX, y - 2.9, fillW, barH, 1, 1, 'F');
     }
 
     doc.setFont('helvetica', 'bold');
     doc.setTextColor(15, 23, 42);
-    doc.text(`${item.score}/100`, barX + barW + 3, y);
+    doc.text(item.score > 0 ? `${item.score}/100` : '--', barX + barW + 2.5, y);
 
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(8);
+    doc.setFontSize(7.5);
     doc.setTextColor(71, 85, 105);
-    doc.text(pdfText(item.detail), barX + barW + 17, y);
-    y += 6.8;
+    doc.text(fitTextToWidth(doc, item.detail, contentW - 102), barX + barW + 16, y);
+    y += 6.2;
   }
 
-  y += 4;
+  y += 3;
 
-  // --- Section 3: Detailed Diagnostics Grid (2 Columns) ---
-  drawSectionHeading('3. Szczegolowe pomiary diagnostyczne');
+  // --- Section 3: 12-Component Automatic Scan Matrix ---
+  if (componentScans.length > 0) {
+    drawSectionHeading(
+      '3. Automatyczny skan 12 podzespolow komputera (Certyfikat sprawnosci)',
+      'Szybka weryfikacja kazdego modulu sprzetowego oraz wykrytych interfejsow'
+    );
 
-  const colW = (contentW - 6) / 2;
-  const col1X = margin;
-  const col2X = margin + colW + 6;
+    const cellW = (contentW - 4) / 2;
+    const cellH = 10.5;
+    for (let i = 0; i < componentScans.length; i += 2) {
+      ensureSpace(cellH + 3, 'Skan 12 podzespolow');
+      for (let c = 0; c < 2; c++) {
+        const card = componentScans[i + c];
+        if (!card) continue;
+        const cx = margin + c * (cellW + 4);
+        doc.setFillColor(248, 250, 252);
+        doc.setDrawColor(203, 213, 225);
+        doc.setLineWidth(0.2);
+        doc.roundedRect(cx, y, cellW, cellH, 1.5, 1.5, 'FD');
 
-  const drawDetailCard = (
-    x: number,
-    topY: number,
-    cardH: number,
-    title: string,
-    rows: Array<[string, string]>
-  ) => {
-    doc.setFillColor(248, 250, 252);
-    doc.setDrawColor(203, 213, 225);
-    doc.setLineWidth(0.25);
-    doc.roundedRect(x, topY, colW, cardH, 2, 2, 'FD');
+        const statusRgb: [number, number, number] =
+          card.status === 'OK'
+            ? [5, 150, 105]
+            : card.status === 'UWAGA'
+              ? [217, 119, 6]
+              : [14, 165, 233];
+        doc.setFillColor(statusRgb[0], statusRgb[1], statusRgb[2]);
+        doc.rect(cx, y + 1.5, 1.4, cellH - 3, 'F');
 
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(9);
-    doc.setTextColor(15, 23, 42);
-    doc.text(pdfText(title), x + 4, topY + 6);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(7.6);
+        doc.setTextColor(15, 23, 42);
+        doc.text(fitTextToWidth(doc, card.title, cellW - 26), cx + 3.5, y + 4.3);
 
-    doc.setDrawColor(226, 232, 240);
-    doc.line(x + 4, topY + 8, x + colW - 4, topY + 8);
+        doc.setTextColor(statusRgb[0], statusRgb[1], statusRgb[2]);
+        doc.text(pdfText(`${card.status} ${card.score}%`), cx + cellW - 2.5, y + 4.3, { align: 'right' });
 
-    let ry = topY + 13;
-    doc.setFontSize(8);
-    for (const [label, val] of rows) {
-      doc.setFont('helvetica', 'normal');
-      doc.setTextColor(71, 85, 105);
-      doc.text(pdfText(label), x + 4, ry);
-
-      doc.setFont('helvetica', 'bold');
-      doc.setTextColor(15, 23, 42);
-      doc.text(pdfText(val), x + colW - 4, ry, { align: 'right' });
-      ry += 5.1;
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(6.9);
+        doc.setTextColor(71, 85, 105);
+        doc.text(fitTextToWidth(doc, card.headline || card.summary, cellW - 6), cx + 3.5, y + 8.6);
+      }
+      y += cellH + 2.2;
     }
-  };
+  }
+
+  // =========================================================================
+  // STRONA 2: SZCZEGOLOWE POMIARY CPU, RAM, DYSK + SMART, GPU 3D & GRA 3D MAX
+  // =========================================================================
+  doc.addPage();
+  drawContinuationHeader('Strona 2: Szczegolowe pomiary podzespolow');
+
+  drawSectionHeading(
+    '4. Szczegolowe pomiary diagnostyczne: CPU, RAM, Dysk i Grafika 3D',
+    'Kompletne parametry wydajnosci, integralnosci bitowej, stabilnosci klatek oraz czujnikow'
+  );
+
+  const colW = (contentW - 5) / 2;
+  const col1X = margin;
+  const col2X = margin + colW + 5;
 
   // Row A: CPU + RAM
-  const rowAH = 46;
-  drawDetailCard(col1X, y, rowAH, 'Procesor (CPU)', [
-    ['Single-Core / Multi-Core', `${cpu.singleCoreScore || '-'} / ${cpu.multiCoreScore || '-'} pkt`],
-    ['Skalowanie wielowatkowe', cpu.scalingRatio > 0 ? `${cpu.scalingRatio}x (${cpu.coresUsed} watkow)` : '-'],
-    ['Kompresja GZIP', cpu.compressionMBs > 0 ? `${cpu.compressionMBs} MB/s` : '-'],
-    ['Kryptografia SHA-256', cpu.cryptoSha256MBs > 0 ? `${cpu.cryptoSha256MBs} MB/s` : '-'],
-    ['Taktowanie / Obciazenie', `${cpu.coresUsed} watkow | Stabilnosc ${cpu.stabilityPct}%`],
-    ['Czujnik CPU (LIVE)', realCpuTempC != null ? `${realCpuTempC.toFixed(1)} C (prawdziwy)` : 'Brak czujnika (LHM/HWiNFO)'],
-  ]);
+  const rowAH = 49;
+  drawDetailCard(
+    col1X,
+    y,
+    colW,
+    rowAH,
+    'Procesor (CPU) - Wydajnosc i Stabilnosc',
+    [
+      ['Single-Core / Multi-Core', `${cpu.singleCoreScore || '-'} / ${cpu.multiCoreScore || '-'} pkt`],
+      ['Skalowanie wielowatkowe', cpu.scalingRatio > 0 ? `${cpu.scalingRatio}x (${cpu.coresUsed} watkow)` : '-'],
+      ['Kompresja GZIP', cpu.compressionMBs > 0 ? `${cpu.compressionMBs} MB/s` : '-'],
+      ['Kryptografia SHA-256', cpu.cryptoSha256MBs > 0 ? `${cpu.cryptoSha256MBs} MB/s` : '-'],
+      ['Stabilnosc / Ocena', `${cpu.stabilityPct}% | Klasa ${cpu.grade}`],
+      ['Czujnik CPU (LIVE)', realCpuTempC != null ? `${realCpuTempC.toFixed(1)} C (prawdziwy)` : 'Brak mostka (LHM/HWiNFO)'],
+      ['Wynik koncowy CPU', scores.cpu > 0 ? `${scores.cpu} / 100 pkt` : 'Nie testowano'],
+    ],
+    [6, 182, 212]
+  );
 
-  drawDetailCard(col2X, y, rowAH, 'Pamiec operacyjna (RAM)', [
-    ['Przetestowany bufor', `${ram.allocatedMB} MB`],
-    ['Odczyt / Zapis sekwencyjny', ram.bandwidthReadMBs > 0 ? `${ram.bandwidthReadMBs} / ${ram.bandwidthWriteMBs} MB/s` : '-'],
-    ['Czas dostepu losowego', ram.latencyNs > 0 ? `${ram.latencyNs} ns` : '-'],
-    ['Test szachownicy / PRNG', ram.status === 'completed' ? `${ram.patternErrors} / ${ram.randomErrors} bledow` : 'Oczekiwanie'],
-    ['Test Walking 1s/0s', ram.status === 'completed' ? `${ram.walkingBitErrors} bledow` : 'Oczekiwanie'],
-    ['Laczne bledy / Ocena', `${ram.errorsFound} | ${ram.healthGrade}`],
-  ]);
+  drawDetailCard(
+    col2X,
+    y,
+    colW,
+    rowAH,
+    'Pamiec operacyjna (RAM) - Integralnosc',
+    [
+      ['Przetestowany bufor', `${ram.allocatedMB} MB`],
+      ['Odczyt / Zapis sekwencyjny', ram.bandwidthReadMBs > 0 ? `${ram.bandwidthReadMBs} / ${ram.bandwidthWriteMBs} MB/s` : '-'],
+      ['Czas dostepu losowego', ram.latencyNs > 0 ? `${ram.latencyNs} ns` : '-'],
+      ['Test Szachownicy / PRNG', ram.status === 'completed' ? `${ram.patternErrors} / ${ram.randomErrors} bledow` : 'Oczekiwanie'],
+      ['Test Walking 1s/0s', ram.status === 'completed' ? `${ram.walkingBitErrors} bledow` : 'Oczekiwanie'],
+      ['Laczne bledy / Werdykt', `${ram.errorsFound} bledow | ${ram.healthGrade}`],
+      ['Wynik koncowy RAM', scores.ram > 0 ? `${scores.ram} / 100 pkt` : 'Nie testowano'],
+    ],
+    [99, 102, 241]
+  );
 
   y += rowAH + 5;
 
-  // Row B: Disk/SMART + GPU 3D
-  const rowBH = 46;
-  drawDetailCard(col1X, y, rowBH, 'Dysk (SSD/HDD) i SMART', [
-    ['Silnik pomiaru I/O', disk.backend],
-    ['Odczyt / Zapis sekwencyjny', disk.seqReadMBs > 0 ? `${disk.seqReadMBs} / ${disk.seqWriteMBs} MB/s` : '-'],
-    ['Losowe 4K IOPS', disk.rand4kIops > 0 ? `${disk.rand4kIops} IOPS` : '-'],
-    ['Czas dostepu (Sr. / P95)', disk.accessTimeAvgMs > 0 ? `${disk.accessTimeAvgMs} / ${disk.accessTimeP95Ms} ms` : '-'],
-    ['Weryfikacja CRC32', disk.status === 'completed' ? (disk.crcVerified ? 'Zgodna (OK)' : 'Niezgodna') : '-'],
+  // Row B: GPU 3D Stress + Gra 3D MAX (TWO FULL DEDICATED CARDS!)
+  const safeGpuLow1 = gpu.avgFps > 0 ? Math.min(gpu.avgFps, gpu.low1PctFps) : 0;
+  const safeGameLow1 = game && game.avgFps > 0 ? Math.min(game.avgFps, game.low1PctFps) : 0;
+  const safeGameLow01 = game && game.avgFps > 0 ? Math.min(safeGameLow1, game.low01PctFps) : 0;
+
+  const rowBH = 49;
+  drawDetailCard(
+    col1X,
+    y,
+    colW,
+    rowBH,
+    'Grafika 3D (WebGL2 Stress Benchmark)',
+    [
+      ['Tryb / Preset', `${gpu.fpsMode === 'uncapped' ? 'Bez limitu' : 'VSync'} | ${gpu.preset.toUpperCase()}`],
+      ['Srednie / Max FPS', gpu.avgFps > 0 ? `${gpu.avgFps} / ${gpu.maxFps || gpu.avgFps} FPS` : '-'],
+      ['1% Low / Min FPS', gpu.avgFps > 0 ? `${safeGpuLow1} / ${gpu.minFps} FPS` : '-'],
+      ['Czas klatki / Stabilnosc', gpu.avgFps > 0 ? `${gpu.frameTimeMs} ms | ${gpu.stabilityPct}%` : '-'],
+      ['Klatki / Trojkaty', gpu.avgFps > 0 ? `${gpu.totalFramesRendered} kl. | ${gpu.triangles.toLocaleString('pl-PL')}` : '-'],
+      ['Czujnik GPU (LIVE)', realGpuTempC != null ? `${realGpuTempC.toFixed(1)} C (prawdziwy)` : 'Brak czujnika temp.'],
+      ['Wynik GPU / Werdykt', gpu.avgFps > 0 ? `${gpu.overallScore}/100 | ${gpu.verdict}` : 'Nie testowano'],
+    ],
+    [16, 185, 129]
+  );
+
+  drawDetailCard(
+    col2X,
+    y,
+    colW,
+    rowBH,
+    'Gra 3D MAX (Silnik PBR / Ray Tracing)',
+    [
+      ['Preset / Rozdzielczosc', game && game.avgFps > 0 ? `${game.preset.toUpperCase()} | ${game.resolutionLabel || 'Auto'}` : 'Nie testowano'],
+      ['Srednie / Max FPS', game && game.avgFps > 0 ? `${game.avgFps} / ${game.maxFps || game.avgFps} FPS` : '-'],
+      ['1% Low / 0.1% Low FPS', game && game.avgFps > 0 ? `${safeGameLow1} / ${safeGameLow01} FPS` : '-'],
+      ['Czas klatki / Stabilnosc', game && game.avgFps > 0 ? `${game.frameTimeMs} ms | ${game.stabilityPct}%` : '-'],
+      ['Upscaling / Frame Gen', game && game.avgFps > 0 ? `${game.upscalingMode || 'Natywne'} | FG: ${game.frameGenMode || 'off'}` : '-'],
+      ['Trojkaty / Draw Calls', game && game.avgFps > 0 ? `${game.triangles.toLocaleString('pl-PL')} | ${game.drawCalls} DC` : '-'],
+      ['Wynik Gra 3D / Werdykt', game && game.avgFps > 0 ? `${game.overallScore}/100 | ${game.verdict}` : 'Nie testowano'],
+    ],
+    [245, 158, 11]
+  );
+
+  y += rowBH + 6;
+
+  // Section 5: Disk & Full SMART Attributes Table
+  drawSectionHeading(
+    '5. Dysk SSD/HDD - Wydajnosc I/O oraz Diagnostyka SMART',
+    `Silnik: ${disk.backend} | Odczyt: ${disk.seqReadMBs} MB/s | Zapis: ${disk.seqWriteMBs} MB/s | 4K: ${disk.rand4kIops} IOPS | Dostep Sr/P95: ${disk.accessTimeAvgMs}/${disk.accessTimeP95Ms} ms | CRC32: ${disk.crcVerified ? 'Zgodna' : 'Oczekiwanie'} | SMART: ${disk.smartStatus} (${disk.smartHealthPct}%)`
+  );
+
+  // Compact Disk KPI Strip
+  const diskKpis: Array<[string, string]> = [
+    ['Odczyt Seq.', disk.seqReadMBs > 0 ? `${disk.seqReadMBs} MB/s` : '-'],
+    ['Zapis Seq.', disk.seqWriteMBs > 0 ? `${disk.seqWriteMBs} MB/s` : '-'],
+    ['Losowe 4K', disk.rand4kIops > 0 ? `${disk.rand4kIops} IOPS` : '-'],
+    ['Dostep Sr/P95', disk.accessTimeAvgMs > 0 ? `${disk.accessTimeAvgMs}/${disk.accessTimeP95Ms} ms` : '-'],
     ['Kondycja SMART', `${disk.smartStatus} (${disk.smartHealthPct}%)`],
-  ]);
-
-  drawDetailCard(col2X, y, rowBH, 'Grafika 3D (WebGL Stress)', [
-    ['Tryb / Obciazenie', `${gpu.fpsMode === 'uncapped' ? 'Bez limitu' : 'VSync'} | ${gpu.preset.toUpperCase()} (${gpu.instanceCount})`],
-    ['Srednie / Max FPS', gpu.avgFps > 0 ? `${gpu.avgFps} / ${gpu.maxFps || gpu.avgFps} FPS` : '-'],
-    ['1% Low / Min FPS', gpu.avgFps > 0 ? `${gpu.low1PctFps} / ${gpu.minFps} FPS (${gpu.frameTimeMs} ms)` : '-'],
-    ['Stabilnosc / Klatki', gpu.avgFps > 0 ? `${gpu.stabilityPct}% (${gpu.totalFramesRendered || 0} kl.)` : '-'],
-    ['Czujnik GPU (LIVE)', realGpuTempC != null ? `${realGpuTempC.toFixed(1)} C (prawdziwy)` : `Czas klatki: ${gpu.frameTimeMs} ms`],
-    ['Werdykt stabilnosci', gpu.verdict],
-  ]);
-
-  y += rowBH + 5;
-
-  // Row C: Full-width Battery Health Panel
-  const batH = 34;
-  doc.setFillColor(248, 250, 252);
-  doc.setDrawColor(203, 213, 225);
-  doc.roundedRect(margin, y, contentW, batH, 2, 2, 'FD');
-
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(9);
-  doc.setTextColor(15, 23, 42);
-  doc.text('Bateria i zasilanie laptopa', margin + 4, y + 6);
-  doc.setDrawColor(226, 232, 240);
-  doc.line(margin + 4, y + 8, pageW - margin - 4, y + 8);
-
-  const curEst = battery.estimates[2]?.label || '-';
-  const officeEst = battery.estimates[0]?.label || '-';
-  const batLeft: Array<[string, string]> = [
-    ['Naladowanie / Stan', `${battery.levelPct}% (${battery.charging ? 'Ladowanie' : 'Bateria'})`],
-    ['Zdrowie / Zuzycie (Wear)', `${battery.healthPct}% | Wear ${battery.wearLevelPct}% (${battery.condition})`],
-    ['Pojemnosc obecna / fabryczna', `${battery.fullChargeCapacityMWh} / ${battery.designCapacityMWh} mWh`],
   ];
-  const batRight: Array<[string, string]> = [
-    ['Cykle / Degradacja', `~${battery.estimatedCycles} cykli (-${battery.avgDegradationPerCycleMWh} mWh/cykl)`],
-    ['Biezacy pobor mocy', `${battery.currentPowerDrawW} W (obciazenie ${battery.currentLoadPct}%)`],
-    ['Szac. czas pracy (Biuro / Biezacy)', `${officeEst} / ${curEst}`],
-  ];
-
-  doc.setFontSize(8);
-  let by = y + 14;
-  for (let i = 0; i < batLeft.length; i++) {
-    doc.setFont('helvetica', 'normal');
-    doc.setTextColor(71, 85, 105);
-    doc.text(pdfText(batLeft[i][0]), col1X + 4, by);
-    doc.setFont('helvetica', 'bold');
-    doc.setTextColor(15, 23, 42);
-    doc.text(pdfText(batLeft[i][1]), col1X + colW - 4, by, { align: 'right' });
-
-    doc.setFont('helvetica', 'normal');
-    doc.setTextColor(71, 85, 105);
-    doc.text(pdfText(batRight[i][0]), col2X + 4, by);
-    doc.setFont('helvetica', 'bold');
-    doc.setTextColor(15, 23, 42);
-    doc.text(pdfText(batRight[i][1]), col2X + colW - 4, by, { align: 'right' });
-    by += 6;
-  }
-
-  // Row D: Optional Game 3D MAX & Network summary line
-  if ((game && game.avgFps > 0) || (network && network.pingAvgMs > 0)) {
-    y += batH + 4;
+  const kpiW = (contentW - 8) / 5;
+  for (let i = 0; i < diskKpis.length; i++) {
+    const kx = margin + i * (kpiW + 2);
     doc.setFillColor(248, 250, 252);
     doc.setDrawColor(203, 213, 225);
-    doc.roundedRect(margin, y, contentW, 13, 2, 2, 'FD');
-    doc.setFontSize(8);
+    doc.roundedRect(kx, y, kpiW, 13.5, 1.5, 1.5, 'FD');
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(6.8);
+    doc.setTextColor(100, 116, 139);
+    doc.text(pdfText(diskKpis[i][0]), kx + kpiW / 2, y + 4.8, { align: 'center' });
     doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8.1);
     doc.setTextColor(15, 23, 42);
-    const parts: string[] = [];
-    if (game && game.avgFps > 0) {
-      parts.push(
-        `Gra 3D MAX (${game.preset.toUpperCase()}): Sr. ${game.avgFps} FPS | 1% Low: ${game.low1PctFps} | 0.1% Low: ${game.low01PctFps} (${game.verdict})`
-      );
+    doc.text(fitTextToWidth(doc, diskKpis[i][1], kpiW - 3), kx + kpiW / 2, y + 10.5, { align: 'center' });
+  }
+  y += 17;
+
+  if (disk.smartAttributes && disk.smartAttributes.length > 0) {
+    doc.setFillColor(241, 245, 249);
+    doc.rect(margin, y, contentW, 6.5, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.4);
+    doc.setTextColor(51, 65, 85);
+    doc.text('ID', margin + 2, y + 4.4);
+    doc.text('Atrybut SMART', margin + 15, y + 4.4);
+    doc.text('Wartosc', margin + 76, y + 4.4);
+    doc.text('Prog', margin + 108, y + 4.4);
+    doc.text('Status', margin + 128, y + 4.4);
+    doc.text('Komentarz', margin + 146, y + 4.4);
+    y += 7.5;
+
+    doc.setFontSize(7.2);
+    for (const attr of disk.smartAttributes.slice(0, 10)) {
+      ensureSpace(6, 'Atrybuty SMART dysku');
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(71, 85, 105);
+      doc.text(pdfText(attr.id), margin + 2, y + 3.2);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(15, 23, 42);
+      doc.text(fitTextToWidth(doc, attr.name, 58), margin + 15, y + 3.2);
+      doc.setFont('helvetica', 'bold');
+      doc.text(fitTextToWidth(doc, attr.value, 30), margin + 76, y + 3.2);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(71, 85, 105);
+      doc.text(fitTextToWidth(doc, attr.threshold, 18), margin + 108, y + 3.2);
+
+      if (attr.status === 'OK') doc.setTextColor(5, 150, 105);
+      else if (attr.status === 'UWAGA') doc.setTextColor(217, 119, 6);
+      else doc.setTextColor(225, 29, 72);
+      doc.setFont('helvetica', 'bold');
+      doc.text(pdfText(attr.status), margin + 128, y + 3.2);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(100, 116, 139);
+      doc.text(fitTextToWidth(doc, attr.note, contentW - 148), margin + 146, y + 3.2);
+
+      doc.setDrawColor(226, 232, 240);
+      doc.setLineWidth(0.18);
+      doc.line(margin, y + 4.8, pageW - margin, y + 4.8);
+      y += 5.4;
     }
-    if (network && network.pingAvgMs > 0) {
-      parts.push(
-        `Siec: Ping ${network.pingAvgMs} ms | Jitter ${network.jitterMs} ms | Utrata ${network.packetLossPct}% (${network.qualityGrade})`
-      );
-    }
-    doc.text(pdfText(truncateText(parts.join('   ||   '), 118)), margin + 4, y + 8);
   }
 
-  // --- Footer ---
-  doc.setDrawColor(226, 232, 240);
-  doc.line(margin, 282, pageW - margin, 282);
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(7.5);
-  doc.setTextColor(100, 116, 139);
-  doc.text(
-    pdfText('SystemPulse Pro | Raport wygenerowany lokalnie w przegladarce — dokument gotowy do wydruku A4.'),
-    margin,
-    287
-  );
-  doc.text('Strona 1 / 1', pageW - margin, 287, { align: 'right' });
+  // Optional Multi-Scene GPU Auto-Suite breakdown if run
+  if (gpuSuiteResults.length > 0) {
+    y += 4;
+    drawSectionHeading(
+      `5B. Wyniki wieloscenowego Auto-Suite GPU 3D (${gpuSuiteResults.length} scen)`,
+      'Pomiar poszczegolnych jednostek GPU (Raster, Shadery, Raymarching, Fizyka)'
+    );
+    doc.setFillColor(241, 245, 249);
+    doc.rect(margin, y, contentW, 6.2, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.2);
+    doc.setTextColor(51, 65, 85);
+    doc.text('Scena 3D', margin + 2, y + 4.2);
+    doc.text('Podsystem GPU', margin + 62, y + 4.2);
+    doc.text('Sr. FPS', margin + 112, y + 4.2);
+    doc.text('1% Low', margin + 132, y + 4.2);
+    doc.text('Stab.', margin + 150, y + 4.2);
+    doc.text('Wynik', margin + 168, y + 4.2);
+    y += 7;
 
+    for (const row of gpuSuiteResults.slice(0, 14)) {
+      ensureSpace(5.4, 'Wyniki scen GPU 3D');
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.1);
+      doc.setTextColor(15, 23, 42);
+      doc.text(fitTextToWidth(doc, row.name, 58), margin + 2, y + 3);
+      doc.setTextColor(71, 85, 105);
+      doc.text(fitTextToWidth(doc, row.targetUnit, 48), margin + 62, y + 3);
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(15, 23, 42);
+      doc.text(`${row.avgFps}`, margin + 112, y + 3);
+      doc.text(`${Math.min(row.avgFps, row.low1PctFps)}`, margin + 132, y + 3);
+      doc.text(`${row.stabilityPct}%`, margin + 150, y + 3);
+      doc.text(`${row.score}/100`, margin + 168, y + 3);
+      doc.setDrawColor(226, 232, 240);
+      doc.line(margin, y + 4.5, pageW - margin, y + 4.5);
+      y += 5.1;
+    }
+  }
+
+  // =========================================================================
+  // STRONA 3: JAKIE GRY OBSLUZY TEN PC (13 GIER) & PRZYDATNOSC PC (8 ZASTOSOWAN)
+  // =========================================================================
+  doc.addPage();
+  drawContinuationHeader('Strona 3: Kompatybilnosc gier i przeznaczenie PC');
+
+  drawSectionHeading(
+    `6. Jakie gry obsluzy ten PC? (${gamesSummary.smoothOrBetterCount}/${gamesSummary.total} plynnie 60+ FPS)`,
+    `Ultra 120+: ${gamesSummary.ultraCount} | Wysokie 60+: ${gamesSummary.smoothCount} | Srednie 35-59: ${gamesSummary.playableCount} | Niskie/Slabe: ${gamesSummary.lowCount} | Kalibracja: ${hwIndex.testedCount}/4 testow`
+  );
+
+  // Games Table Header
+  doc.setFillColor(15, 23, 42);
+  doc.rect(margin, y, contentW, 7, 'F');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7.3);
+  doc.setTextColor(241, 245, 249);
+  doc.text('Tytul gry / Silnik', margin + 2.5, y + 4.7);
+  doc.text('1080p', margin + 74, y + 4.7);
+  doc.text('1440p', margin + 91, y + 4.7);
+  doc.text('DLSS+FG', margin + 107, y + 4.7);
+  doc.text('Wykres FPS', margin + 124, y + 4.7);
+  doc.text('Werdykt', margin + 152, y + 4.7);
+  y += 8.2;
+
+  for (let i = 0; i < gamesList.length; i++) {
+    const g = gamesList[i];
+    ensureSpace(10.5, 'Kompatybilnosc gier PC');
+    if (i % 2 === 1) {
+      doc.setFillColor(248, 250, 252);
+      doc.rect(margin, y - 1, contentW, 9.2, 'F');
+    }
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.5);
+    doc.setTextColor(15, 23, 42);
+    doc.text(fitTextToWidth(doc, g.title, 70), margin + 2.5, y + 3);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(6.5);
+    doc.setTextColor(100, 116, 139);
+    doc.text(fitTextToWidth(doc, `${g.engine} | VRAM ${g.vramRecommendedGb} GB`, 70), margin + 2.5, y + 6.8);
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.5);
+    doc.setTextColor(2, 132, 199);
+    doc.text(`${g.fps1080pNative}`, margin + 74, y + 4.6);
+
+    doc.setTextColor(79, 70, 229);
+    doc.text(`${g.fps1440pQuality}`, margin + 91, y + 4.6);
+
+    doc.setTextColor(5, 150, 105);
+    doc.text(`${g.fpsDlssFg}`, margin + 107, y + 4.6);
+
+    // Mini FPS Bar (1080p native vs FG)
+    const bX = margin + 123;
+    const bW = 26;
+    doc.setFillColor(226, 232, 240);
+    doc.roundedRect(bX, y + 1.4, bW, 2.2, 0.7, 0.7, 'F');
+    doc.setFillColor(14, 165, 233);
+    doc.roundedRect(bX, y + 1.4, Math.max(1.5, (Math.min(360, g.fps1080pNative) / 360) * bW), 2.2, 0.7, 0.7, 'F');
+
+    doc.setFillColor(226, 232, 240);
+    doc.roundedRect(bX, y + 4.5, bW, 2.2, 0.7, 0.7, 'F');
+    doc.setFillColor(16, 185, 129);
+    doc.roundedRect(bX, y + 4.5, Math.max(1.5, (Math.min(360, g.fpsDlssFg) / 360) * bW), 2.2, 0.7, 0.7, 'F');
+
+    const tierRgb: [number, number, number] =
+      g.tier === 'ultra'
+        ? [5, 150, 105]
+        : g.tier === 'smooth'
+          ? [2, 132, 199]
+          : g.tier === 'playable'
+            ? [217, 119, 6]
+            : [225, 29, 72];
+    const shortTier =
+      g.tier === 'ultra'
+        ? 'ULTRA 120+'
+        : g.tier === 'smooth'
+          ? 'WYSOKIE 60+'
+          : g.tier === 'playable'
+            ? 'SREDNIE 35+'
+            : 'ZA SLABY (<35)';
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.1);
+    doc.setTextColor(tierRgb[0], tierRgb[1], tierRgb[2]);
+    doc.text(shortTier, margin + 152, y + 4.6);
+
+    doc.setDrawColor(226, 232, 240);
+    doc.setLineWidth(0.18);
+    doc.line(margin, y + 8.2, pageW - margin, y + 8.2);
+    y += 9.2;
+  }
+
+  y += 5;
+
+  // Section 7: 8-Category PC Suitability Assessment
+  drawSectionHeading(
+    '7. Do czego najlepiej nadaje sie ten PC / Laptop? (Ocena 8 zastosowan)',
+    'Klasyfikacja mozliwosci komputera w gamingu, montazu 4K, lokalnym AI, programowaniu i pracy 24/7'
+  );
+
+  const suitColW = (contentW - 4) / 2;
+  const suitCardH = 18.5;
+  for (let i = 0; i < suitabilityList.length; i += 2) {
+    ensureSpace(suitCardH + 3, 'Przydatnosc PC w 8 zastosowaniach');
+    for (let c = 0; c < 2; c++) {
+      const cat = suitabilityList[i + c];
+      if (!cat) continue;
+      const sx = margin + c * (suitColW + 4);
+      doc.setFillColor(248, 250, 252);
+      doc.setDrawColor(203, 213, 225);
+      doc.setLineWidth(0.22);
+      doc.roundedRect(sx, y, suitColW, suitCardH, 1.8, 1.8, 'FD');
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.6);
+      doc.setTextColor(15, 23, 42);
+      doc.text(fitTextToWidth(doc, cat.title, suitColW - 18), sx + 3, y + 4.6);
+
+      const sRgb: [number, number, number] =
+        cat.score >= 75 ? [5, 150, 105] : cat.score >= 55 ? [217, 119, 6] : [225, 29, 72];
+      doc.setTextColor(sRgb[0], sRgb[1], sRgb[2]);
+      doc.text(`${cat.score}%`, sx + suitColW - 3, y + 4.6, { align: 'right' });
+
+      // Progress bar
+      doc.setFillColor(226, 232, 240);
+      doc.roundedRect(sx + 3, y + 6.5, suitColW - 6, 2.3, 0.8, 0.8, 'F');
+      doc.setFillColor(sRgb[0], sRgb[1], sRgb[2]);
+      doc.roundedRect(sx + 3, y + 6.5, Math.max(2, ((suitColW - 6) * cat.score) / 100), 2.3, 0.8, 0.8, 'F');
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(6.7);
+      doc.setTextColor(71, 85, 105);
+      doc.text(fitTextToWidth(doc, `${cat.verdict} | ${cat.summary}`, suitColW - 6), sx + 3, y + 12.2);
+      doc.setTextColor(100, 116, 139);
+      doc.text(fitTextToWidth(doc, cat.bottleneckNote, suitColW - 6), sx + 3, y + 16.2);
+    }
+    y += suitCardH + 2.5;
+  }
+
+  // =========================================================================
+  // STRONA 4: RANKING KOMPUTEROW, ZASILANIE (BATERIA & PSU), SIEC, TERMIKA, WNIOSKI
+  // =========================================================================
+  doc.addPage();
+  drawContinuationHeader('Strona 4: Ranking komputerow, zasilanie i wnioski serwisowe');
+
+  drawSectionHeading(
+    `8. Ranking Komputerow - Ktory Najlepszy? (Pozycja #${rankingSnap.currentRank} z ${rankingSnap.totalRanked})`,
+    `Twoj komputer: ${rankingSnap.currentEntry.overallScore}/100 pkt (${rankingSnap.tierBadge}) | Lepszy niz ${rankingSnap.percentileBetterThan}% konfiguracji | Najmocniejszy: ${rankingSnap.strongestComponent} | Waskie gardlo: ${rankingSnap.bottleneckComponent}`
+  );
+
+  // Ranking Table Header
+  doc.setFillColor(15, 23, 42);
+  doc.rect(margin, y, contentW, 6.8, 'F');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7.2);
+  doc.setTextColor(241, 245, 249);
+  doc.text('Poz.', margin + 2, y + 4.6);
+  doc.text('Komputer / Konfiguracja', margin + 13, y + 4.6);
+  doc.text('CPU', margin + 106, y + 4.6);
+  doc.text('GPU', margin + 118, y + 4.6);
+  doc.text('RAM', margin + 130, y + 4.6);
+  doc.text('Dysk', margin + 142, y + 4.6);
+  doc.text('Wynik', margin + 155, y + 4.6);
+  y += 7.6;
+
+  const rankingRows = rankingSnap.leaderboard.slice(0, 14);
+  for (let i = 0; i < rankingRows.length; i++) {
+    const entry = rankingRows[i];
+    ensureSpace(6.8, 'Ranking komputerow');
+    if (entry.isCurrentPc) {
+      doc.setFillColor(224, 242, 254);
+      doc.setDrawColor(6, 182, 212);
+      doc.setLineWidth(0.35);
+      doc.rect(margin, y - 0.6, contentW, 6.2, 'FD');
+    } else if (entry.isUserSaved) {
+      doc.setFillColor(236, 253, 245);
+      doc.rect(margin, y - 0.6, contentW, 6.2, 'F');
+    } else if (i % 2 === 1) {
+      doc.setFillColor(248, 250, 252);
+      doc.rect(margin, y - 0.6, contentW, 6.2, 'F');
+    }
+
+    doc.setFont('helvetica', entry.isCurrentPc ? 'bold' : 'normal');
+    doc.setFontSize(7.2);
+    doc.setTextColor(entry.isCurrentPc ? 3 : 15, entry.isCurrentPc ? 105 : 23, entry.isCurrentPc ? 161 : 42);
+    doc.text(`#${i + 1}`, margin + 2.5, y + 3.6);
+    const nameLabel = entry.isCurrentPc
+      ? `>>> ${entry.name}`
+      : entry.isUserSaved
+        ? `[ZAPISANY] ${entry.name}`
+        : entry.name;
+    doc.text(fitTextToWidth(doc, nameLabel, 91), margin + 13, y + 3.6);
+    doc.text(`${entry.cpuScore}`, margin + 106, y + 3.6);
+    doc.text(`${entry.gpuScore}`, margin + 118, y + 3.6);
+    doc.text(`${entry.ramScore}`, margin + 130, y + 3.6);
+    doc.text(`${entry.diskScore}`, margin + 142, y + 3.6);
+
+    // Mini score bar + number
+    doc.setFillColor(226, 232, 240);
+    doc.roundedRect(margin + 154, y + 1.5, 16, 2.5, 0.7, 0.7, 'F');
+    doc.setFillColor(entry.isCurrentPc ? 6 : 16, entry.isCurrentPc ? 182 : 185, entry.isCurrentPc ? 212 : 129);
+    doc.roundedRect(margin + 154, y + 1.5, Math.max(1.5, (entry.overallScore / 100) * 16), 2.5, 0.7, 0.7, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.text(`${entry.overallScore}`, pageW - margin - 2, y + 3.6, { align: 'right' });
+
+    doc.setDrawColor(226, 232, 240);
+    doc.setLineWidth(0.15);
+    doc.line(margin, y + 5.6, pageW - margin, y + 5.6);
+    y += 6.2;
+  }
+
+  y += 5;
+
+  // Section 9: Power (Battery & PC PSU ATX) — CLEAN 2-COLUMN CARDS, ZERO OVERLAP!
+  drawSectionHeading(
+    '9. Zasilanie: Kondycja Baterii Laptopa i Zasilacz PC (PSU ATX)',
+    'Pomiar zuzycia ogniw, cykli ladowania, stabilnosci linii napieciowych +12V / +5V / +3.3V i tetnien'
+  );
+
+  ensureSpace(44, 'Zasilanie i Siec');
+  const curEst = battery.estimates[2]?.label || '-';
+  const officeEst = battery.estimates[0]?.label || '-';
+  const powerCardH = 40;
+
+  drawDetailCard(
+    col1X,
+    y,
+    colW,
+    powerCardH,
+    'Bateria Laptopa (Zdrowie & Degradacja)',
+    [
+      ['Naladowanie / Stan', `${battery.levelPct}% (${battery.charging ? 'Ladowanie' : 'Bateria'})`],
+      ['Zdrowie / Zuzycie (Wear)', `${battery.healthPct}% | Wear ${battery.wearLevelPct}% (${battery.condition})`],
+      ['Pojemnosc obecna / fabr.', `${battery.fullChargeCapacityMWh} / ${battery.designCapacityMWh} mWh`],
+      ['Cykle / Degradacja', `~${battery.estimatedCycles} cykli (-${battery.avgDegradationPerCycleMWh} mWh/c)`],
+      ['Czas pracy (Biuro / Biez.)', `${officeEst} / ${curEst}`],
+    ],
+    [16, 185, 129]
+  );
+
+  drawDetailCard(
+    col2X,
+    y,
+    colW,
+    powerCardH,
+    'Zasilacz PC (PSU ATX) & Linie Napiec',
+    [
+      ['Model / Klasa', `${battery.psu.model} (${battery.psu.rating80Plus})`],
+      ['Linia +12V / +5V / +3.3V', `${battery.psu.rail12V.toFixed(2)}V | ${battery.psu.rail5V.toFixed(2)}V | ${battery.psu.rail3P3V.toFixed(2)}V`],
+      ['Tetnienia (Ripple) / Temp.', `${battery.psu.rippleMv} mV | ${battery.psu.tempC} C`],
+      ['Pobor mocy / Sprawnosc', `${battery.currentPowerDrawW} W (${battery.currentLoadPct}%) | ${battery.psu.efficiencyPct}%`],
+      ['Status zasilacza PSU', `${battery.psu.status} | Alerty: ${battery.railAlertEvents.length}`],
+    ],
+    [245, 158, 11]
+  );
+
+  y += powerCardH + 5;
+
+  // Section 10: Network & Thermal Summary (2 Columns)
+  ensureSpace(38, 'Siec i Termika');
+  const netThermalH = 35;
+
+  drawDetailCard(
+    col1X,
+    y,
+    colW,
+    netThermalH,
+    'Siec, Opoznienia i Transfer',
+    [
+      ['Ping (Min / Sr. / Max)', network && network.pingAvgMs > 0 ? `${network.pingMinMs} / ${network.pingAvgMs} / ${network.pingMaxMs} ms` : 'Nie testowano'],
+      ['Jitter / Utrata pakietow', network && network.pingAvgMs > 0 ? `${network.jitterMs} ms | ${network.packetLossPct}%` : '-'],
+      ['Pobieranie / Wysylanie', network && network.downloadEstMbps > 0 ? `${network.downloadEstMbps} / ${network.uploadEstMbps ?? 0} Mbps` : '-'],
+      ['Ocena jakosci lacza', network && network.pingAvgMs > 0 ? `${network.qualityGrade} (${network.effectiveType})` : 'Oczekiwanie'],
+    ],
+    [14, 165, 233]
+  );
+
+  const hottestStr =
+    thermalState?.hottestTempC != null
+      ? `${thermalState.hottestTempC.toFixed(1)} C (${thermalState.hottestZoneLabel})`
+      : realGpuTempC != null
+        ? `${realGpuTempC.toFixed(1)} C (GPU)`
+        : 'Brak czujnika C (tryb obciazenia)';
+  const avgSysTempStr =
+    thermalState?.avgSystemTempC != null ? `${thermalState.avgSystemTempC.toFixed(1)} C` : 'Tryb obciazenia';
+
+  drawDetailCard(
+    col2X,
+    y,
+    colW,
+    netThermalH,
+    'Termika, Chlodzenie i Historia Sesji',
+    [
+      ['Status termiczny', thermalState ? thermalState.thermalStatus : 'Monitor gotowy'],
+      ['Najgoretsza strefa', hottestStr],
+      ['Srednia temp. systemu', avgSysTempStr],
+      ['Zapisane sesje stress-test', `${stressHistory.length} sesji w bazie lokalnej`],
+    ],
+    [244, 63, 94]
+  );
+
+  y += netThermalH + 5;
+
+  // Section 11: Service Conclusions, Bottlenecks & Technician Sign-Off
+  ensureSpace(46, 'Wnioski serwisowe');
+  drawSectionHeading('10. Wnioski serwisowe, zalecenia i potwierdzenie badania');
+
+  const recommendations: string[] = [];
+  if (ram.errorsFound > 0) {
+    recommendations.push(`[PILNE] Wykryto ${ram.errorsFound} bledow pamieci RAM - zalecana diagnostyka kosci DIMM / wymiana modulu.`);
+  } else if (ram.status === 'completed') {
+    recommendations.push('[OK] Pamiec RAM przeszla wszystkie 4 etapy weryfikacji bitowej bez zadnego bledu (0 bledow).');
+  }
+  if (disk.smartStatus !== 'ZDROWY') {
+    recommendations.push(`[UWAGA] Dysk wykazuje stan SMART: ${disk.smartStatus} (${disk.smartHealthPct}%) - zalecana kopia zapasowa danych.`);
+  } else if (disk.seqReadMBs > 0) {
+    recommendations.push(`[OK] Dysk SSD/HDD zdrowy (SMART ${disk.smartHealthPct}%), odczyt sekwencyjny ${disk.seqReadMBs} MB/s, weryfikacja CRC32 zgodna.`);
+  }
+  if (battery.healthPct < 75) {
+    recommendations.push(`[UWAGA] Kondycja baterii ponizej 75% (${battery.healthPct}%, zuzycie ${battery.wearLevelPct}%) - zalecana wymiana ogniwa.`);
+  }
+  recommendations.push(
+    `[RANKING] Komputer zajal miejsce #${rankingSnap.currentRank}/${rankingSnap.totalRanked} (${rankingSnap.tierBadge}). Najmocniejszy: ${rankingSnap.strongestComponent}; potencjal ulepszenia: ${rankingSnap.bottleneckComponent}.`
+  );
+  recommendations.push(
+    `[GRY 3D] Komputer obsluzy plynnie (60+ FPS) ${gamesSummary.smoothOrBetterCount} z ${gamesSummary.total} przetestowanych tytulow PC (${gamesSummary.ultraCount} w jakosci Ultra 120+ FPS).`
+  );
+
+  doc.setFillColor(248, 250, 252);
+  doc.setDrawColor(203, 213, 225);
+  const recBoxH = recommendations.length * 5.2 + 5;
+  doc.roundedRect(margin, y, contentW, recBoxH, 2, 2, 'FD');
+
+  let ry = y + 5;
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.6);
+  doc.setTextColor(30, 41, 59);
+  for (const line of recommendations) {
+    doc.text(fitTextToWidth(doc, `- ${line}`, contentW - 7), margin + 3.5, ry);
+    ry += 5.2;
+  }
+  y += recBoxH + 5;
+
+  // Technician Sign-off strip
+  ensureSpace(16, 'Potwierdzenie badania');
+  doc.setDrawColor(148, 163, 184);
+  doc.setLineWidth(0.25);
+  doc.roundedRect(margin, y, contentW, 14, 1.5, 1.5, 'S');
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.2);
+  doc.setTextColor(100, 116, 139);
+  doc.text(pdfText(`Data badania: ${nowStr}`), margin + 4, y + 5.5);
+  doc.text('Technik / Serwis: ................................................', margin + 62, y + 5.5);
+  doc.text('Podpis / Pieczatka: ...................................', margin + 132, y + 5.5);
+  doc.setFontSize(6.7);
+  doc.text(
+    pdfText(`Nr raportu: ${reportId} | Wygenerowano lokalnie przez SystemPulse Pro (bez wysylania danych w chmure)`),
+    margin + 4,
+    y + 11
+  );
+
+  // --- Stamp Consistent Footer on EVERY Page ---
+  const totalPages = doc.getNumberOfPages();
+  for (let p = 1; p <= totalPages; p++) {
+    doc.setPage(p);
+    doc.setDrawColor(226, 232, 240);
+    doc.setLineWidth(0.25);
+    doc.line(margin, pageH - 14, pageW - margin, pageH - 14);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.3);
+    doc.setTextColor(100, 116, 139);
+    doc.text(
+      pdfText(`SystemPulse Pro | Kompleksowy Raport Diagnostyczny i Ranking PC (${reportId}) - Dokument A4`),
+      margin,
+      pageH - 9.5
+    );
+    doc.text(`Strona ${p} / ${totalPages}`, pageW - margin, pageH - 9.5, { align: 'right' });
+  }
+
+  return doc;
+}
+
+export function generateDiagnosticPdfReport(payload: PdfReportPayload): void {
+  const doc = buildDiagnosticPdfDocument(payload);
   const dateTag = new Date().toISOString().slice(0, 10);
   doc.save(`systempulse-raport-${dateTag}.pdf`);
 }
@@ -470,7 +1273,7 @@ export function generateSchedulerPdfReport(
   y += 5;
   doc.text(
     pdfText(
-      `Zaliczone: ${report.passedCount} | Ostrzezenia: ${report.warningCount} | Bledy: ${report.failedCount} | Czujnik szczyt: ${report.peakSystemTempC > 0 ? `${report.peakSystemTempC.toFixed(1)} deg C` : 'brak mostka'}`
+      `Zaliczone: ${report.passedCount} | Ostrzezenia: ${report.warningCount} | Bledy: ${report.failedCount} | Czujnik szczyt: ${report.peakSystemTempC > 0 ? `${report.peakSystemTempC.toFixed(1)} C` : 'brak mostka'}`
     ),
     margin,
     y
@@ -572,16 +1375,16 @@ export function generateHardwareInventoryPdfReport(
     doc.text(pdfText(title), margin, y);
     doc.setDrawColor(203, 213, 225);
     doc.setLineWidth(0.3);
-    doc.line(margin, y + 1.8, pageW - margin, y + 1.8);
+    doc.line(margin, y + 1.8, margin + contentW, y + 1.8);
     y += 7;
   };
 
   drawHeading('1. Specyfikacja procesora i platformy systemowej');
   const cpuLines = [
     ['System operacyjny / Arch', specs ? `${specs.os} (${specs.platform})` : 'Nieznany'],
-    ['Wątki logiczne CPU', specs ? `${specs.cpuCores} wątków logicznych` : 'Nieznany'],
-    ['Przeglądarka / Środowisko', specs ? specs.browser : 'Nieznana'],
-    ['Pamięć RAM (API)', specs ? (typeof specs.deviceMemory === 'number' ? `>= ${specs.deviceMemory} GB` : String(specs.deviceMemory)) : 'Nieznana'],
+    ['Watki logiczne CPU', specs ? `${specs.cpuCores} watkow logicznych` : 'Nieznany'],
+    ['Przegladarka / Srodowisko', specs ? specs.browser : 'Nieznana'],
+    ['Pamiec RAM (API)', specs ? (typeof specs.deviceMemory === 'number' ? `>= ${specs.deviceMemory} GB` : String(specs.deviceMemory)) : 'Nieznana'],
   ];
   doc.setFontSize(8.5);
   for (const [k, v] of cpuLines) {
@@ -590,18 +1393,18 @@ export function generateHardwareInventoryPdfReport(
     doc.text(pdfText(k + ':'), margin, y);
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(15, 23, 42);
-    doc.text(pdfText(v), margin + 55, y);
+    doc.text(fitTextToWidth(doc, v, contentW - 58), margin + 55, y);
     y += 5.5;
   }
   y += 4;
 
-  drawHeading('2. Matryca i Parametry Wyświetlacza (EDID)');
+  drawHeading('2. Matryca i Parametry Wyswietlacza (EDID)');
   const panel = hardwareScan?.panel;
   const panelLines = [
     ['Model matrycy / Panel', panel ? panel.label : specs ? specs.screenResolution : 'Standardowy monitor'],
-    ['Rozdzielczość natywna', panel ? panel.nativeResolution : specs ? specs.screenResolution : '-'],
-    ['Odświeżanie ekranu', panel ? `${panel.refreshRateHz} Hz` : specs ? `~${specs.estimatedRefreshRate} Hz` : '-'],
-    ['Przestrzeń barw / HDR', panel ? `${panel.colorGamut} | ${panel.hdrSupported ? 'HDR obsługiwany' : 'SDR'}` : specs ? `${specs.colorDepth}-bit` : '-'],
+    ['Rozdzielczosc natywna', panel ? panel.nativeResolution : specs ? specs.screenResolution : '-'],
+    ['Odswiezanie ekranu', panel ? `${panel.refreshRateHz} Hz` : specs ? `~${specs.estimatedRefreshRate} Hz` : '-'],
+    ['Przestrzen barw / HDR', panel ? `${panel.colorGamut} | ${panel.hdrSupported ? 'HDR obslugiwany' : 'SDR'}` : specs ? `${specs.colorDepth}-bit` : '-'],
   ];
   for (const [k, v] of panelLines) {
     doc.setFont('helvetica', 'bold');
@@ -609,7 +1412,7 @@ export function generateHardwareInventoryPdfReport(
     doc.text(pdfText(k + ':'), margin, y);
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(15, 23, 42);
-    doc.text(pdfText(v), margin + 55, y);
+    doc.text(fitTextToWidth(doc, v, contentW - 58), margin + 55, y);
     y += 5.5;
   }
   y += 4;
@@ -619,7 +1422,7 @@ export function generateHardwareInventoryPdfReport(
     ['Renderer GPU', specs ? specs.gpuRenderer : 'Brak danych'],
     ['Dostawca (Vendor)', specs ? specs.gpuVendor : 'Brak danych'],
     ['Wersja WebGL', specs ? `${specs.webglVersion} | Max tekstura: ${specs.maxTextureSize}px` : 'Brak danych'],
-    ['WebGPU', hardwareScan?.webGpuSummary || 'Sprawdzono w przeglądarce'],
+    ['WebGPU', hardwareScan?.webGpuSummary || 'Sprawdzono w przegladarce'],
   ];
   for (const [k, v] of gpuLines) {
     doc.setFont('helvetica', 'bold');
@@ -627,17 +1430,17 @@ export function generateHardwareInventoryPdfReport(
     doc.text(pdfText(k + ':'), margin, y);
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(15, 23, 42);
-    doc.text(pdfText(truncateText(v, 78)), margin + 55, y);
+    doc.text(fitTextToWidth(doc, v, contentW - 58), margin + 55, y);
     y += 5.5;
   }
   y += 4;
 
-  drawHeading('4. Pamięć Masowa i Zasoby Dyskowe');
+  drawHeading('4. Pamiec Masowa i Zasoby Dyskowe');
   const storageLines = [
-    ['Pula magazynowa przeglądarki', hardwareScan && hardwareScan.storageSummary.quotaGB ? `${hardwareScan.storageSummary.quotaGB} GB` : specs && specs.storageQuotaGB ? `${specs.storageQuotaGB} GB` : 'Dostępna'],
-    ['Użycie przestrzeni', hardwareScan ? `${hardwareScan.storageSummary.usageMB} MB` : specs && specs.storageUsageMB ? `${specs.storageUsageMB} MB` : 'Brak danych'],
-    ['Obsługa OPFS (Native FS)', hardwareScan ? (hardwareScan.storageSummary.opfsSupported ? 'Tak (Wysoka wydajność I/O)' : 'Ograniczona (IndexedDB)') : 'Tak'],
-    ['Trwałość danych (Persisted)', hardwareScan ? (hardwareScan.storageSummary.persisted ? 'Trwałe (Chronione przed czyszczeniem)' : 'Standardowa') : 'Standardowa'],
+    ['Pula magazynowa przegladarki', hardwareScan && hardwareScan.storageSummary.quotaGB ? `${hardwareScan.storageSummary.quotaGB} GB` : specs && specs.storageQuotaGB ? `${specs.storageQuotaGB} GB` : 'Dostepna'],
+    ['Uzycie przestrzeni', hardwareScan ? `${hardwareScan.storageSummary.usageMB} MB` : specs && specs.storageUsageMB ? `${specs.storageUsageMB} MB` : 'Brak danych'],
+    ['Obsluga OPFS (Native FS)', hardwareScan ? (hardwareScan.storageSummary.opfsSupported ? 'Tak (Wysoka wydajnosc I/O)' : 'Ograniczona (IndexedDB)') : 'Tak'],
+    ['Trwalosc danych (Persisted)', hardwareScan ? (hardwareScan.storageSummary.persisted ? 'Trwale (Chronione przed czyszczeniem)' : 'Standardowa') : 'Standardowa'],
   ];
   for (const [k, v] of storageLines) {
     doc.setFont('helvetica', 'bold');
@@ -645,7 +1448,7 @@ export function generateHardwareInventoryPdfReport(
     doc.text(pdfText(k + ':'), margin, y);
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(15, 23, 42);
-    doc.text(pdfText(v), margin + 55, y);
+    doc.text(fitTextToWidth(doc, v, contentW - 58), margin + 55, y);
     y += 5.5;
   }
 
@@ -655,7 +1458,7 @@ export function generateHardwareInventoryPdfReport(
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(7.5);
   doc.setTextColor(100, 116, 139);
-  doc.text(pdfText('SystemPulse Pro | Szczegółowy inwentarz sprzętu wygenerowany lokalnie.'), margin, 287);
+  doc.text(pdfText('SystemPulse Pro | Szczegolowy inwentarz sprzetu wygenerowany lokalnie.'), margin, 287);
   doc.text('Strona 1 / 1', pageW - margin, 287, { align: 'right' });
 
   doc.save(`systempulse-inwentarz-sprzetu-${new Date().toISOString().slice(0, 10)}.pdf`);
@@ -694,12 +1497,12 @@ export function generateBatteryTrendReportPdf(
   doc.setTextColor(255, 255, 255);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(15);
-  doc.text('SystemPulse Pro — Battery Trend & Degradation Report', margin, 13);
+  doc.text('SystemPulse Pro - Battery Trend & Degradation Report', margin, 13);
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9);
   doc.setTextColor(148, 163, 184);
-  doc.text(pdfText(`Analiza trendu poboru mocy vs degradacja ogniw (ostatnie 30+ dni) · Wygenerowano: ${nowStr}`), margin, 21);
+  doc.text(pdfText(`Analiza trendu poboru mocy vs degradacja ogniw (ostatnie 30+ dni) | Wygenerowano: ${nowStr}`), margin, 21);
 
   let y = 38;
   let sectionIdx = 1;
@@ -715,15 +1518,15 @@ export function generateBatteryTrendReportPdf(
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(9.5);
     doc.setTextColor(51, 65, 85);
-    doc.text(pdfText(`Pojemność fabryczna (Design): ${battery.designCapacityMWh} mWh`), margin, y);
-    doc.text(pdfText(`Obecna pełna pojemność: ${battery.fullChargeCapacityMWh} mWh`), margin + 95, y);
+    doc.text(pdfText(`Pojemnosc fabryczna (Design): ${battery.designCapacityMWh} mWh`), margin, y);
+    doc.text(pdfText(`Obecna pelna pojemnosc: ${battery.fullChargeCapacityMWh} mWh`), margin + 95, y);
     y += 6;
-    doc.text(pdfText(`Stopień zużycia (Wear Level): ${battery.wearLevelPct}%`), margin, y);
+    doc.text(pdfText(`Stopien zuzycia (Wear Level): ${battery.wearLevelPct}%`), margin, y);
     doc.text(pdfText(`Kondycja ogniw: ${battery.condition}`), margin + 95, y);
     y += 6;
     if (opts.stats) {
       doc.text(pdfText(`Szacowany spadek na cykl: ${battery.avgDegradationPerCycleMWh} mWh / cykl`), margin, y);
-      doc.text(pdfText(`Łączna utrata pojemności: ${battery.totalCapacityLostMWh} mWh`), margin + 95, y);
+      doc.text(pdfText(`Laczna utrata pojemnosci: ${battery.totalCapacityLostMWh} mWh`), margin + 95, y);
       y += 6;
     }
     if (opts.forecast) {
@@ -743,7 +1546,7 @@ export function generateBatteryTrendReportPdf(
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(11);
     doc.setTextColor(15, 23, 42);
-    doc.text(pdfText(`${sectionIdx++}. Rejestr cykli ładowania i spadek pojemności (Power Cycle Log)`), margin, y);
+    doc.text(pdfText(`${sectionIdx++}. Rejestr cykli ladowania i spadek pojemnosci (Power Cycle Log)`), margin, y);
     y += 6;
 
     // Table Headers
@@ -756,8 +1559,8 @@ export function generateBatteryTrendReportPdf(
     doc.text('Cykl', margin + 45, y + 4.5);
     doc.text('Zakres (%)', margin + 65, y + 4.5);
     doc.text('Czas (min)', margin + 100, y + 4.5);
-    doc.text('Pojemność (mWh)', margin + 130, y + 4.5);
-    doc.text('Zużycie (%)', margin + 165, y + 4.5);
+    doc.text('Pojemnosc (mWh)', margin + 130, y + 4.5);
+    doc.text('Zuzycie (%)', margin + 165, y + 4.5);
     y += 8;
 
     doc.setFont('helvetica', 'normal');
@@ -795,6 +1598,3 @@ export function generateBatteryTrendReportPdf(
 
   doc.save(`systempulse-battery-trend-report-${new Date().toISOString().slice(0, 10)}.pdf`);
 }
-
-
-

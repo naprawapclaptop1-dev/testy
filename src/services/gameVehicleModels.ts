@@ -61,7 +61,7 @@ export function createArchitecturePbrTextures(
   roughnessMap: THREE.CanvasTexture;
   emissiveMap: THREE.CanvasTexture;
 } {
-  const size = 512;
+  const size = mode === 'dakar_rally' || mode === 'volcanic' || mode === 'snow_rally' || mode === 'glacial' || mode === 'soccer_stadium' || mode === 'starfighter_trench' || mode === 'tank_blitz' || mode === 'submarine_hunt' ? 512 : 1024;
   const albedo = document.createElement('canvas');
   albedo.width = size;
   albedo.height = size;
@@ -255,88 +255,89 @@ export function createArchitecturePbrTextures(
       }
     }
   } else {
-    // Realistic AAA Architectural Glass & Brushed Steel Skyscraper Facade (zero loud checkerboard!)
+    // High-Resolution 1024x1024 Architectural Glass Curtain-Wall & Brushed Steel Skyscraper Facade
     const grad = ctx.createLinearGradient(0, 0, 0, size);
-    grad.addColorStop(0, '#0c1524');
-    grad.addColorStop(0.5, '#111c2e');
-    grad.addColorStop(1, '#0a111d');
+    grad.addColorStop(0, '#0a1426');
+    grad.addColorStop(0.5, '#101d32');
+    grad.addColorStop(1, '#070e1c');
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, size, size);
 
-    // Low roughness dark reflective curtain glass
-    rctx.fillStyle = '#202020';
+    // Mirror-smooth dark curtain glass
+    rctx.fillStyle = '#181818';
     rctx.fillRect(0, 0, size, size);
-    bctx.fillStyle = '#787878';
+    bctx.fillStyle = '#727272';
     bctx.fillRect(0, 0, size, size);
     ectx.fillStyle = '#000000';
     ectx.fillRect(0, 0, size, size);
 
-    // Subtle dark architectural floor spandrels & slim steel mullions
-    const cols = 12;
-    const rows = 20;
+    const cols = 16;
+    const rows = 28;
     const cellW = size / cols;
     const cellH = size / rows;
 
     for (let row = 0; row < rows; row++) {
       const y = row * cellH;
-      // Floor band tint (realistic grouped office floors instead of random noisy checkerboard)
       const floorHash = deterministicHash(row * 131 + 19);
-      const isOccupiedFloor = floorHash > 0.44;
-      const isMechanicalFloor = row === 0 || row === 10 || row === 19;
+      const isOccupiedFloor = floorHash > 0.36;
+      const isMechanicalFloor = row === 0 || row === 14 || row === 27;
 
       for (let col = 0; col < cols; col++) {
         const x = col * cellW;
         const paneHash = deterministicHash(row * 73 + col * 29 + 5);
 
         if (!isMechanicalFloor) {
-          // Subtle glass sky reflection tint on every pane
-          const glassR = 14 + Math.floor(paneHash * 14);
-          const glassG = 24 + Math.floor(paneHash * 20);
-          const glassB = 42 + Math.floor(paneHash * 28);
+          const glassR = 12 + Math.floor(paneHash * 16);
+          const glassG = 22 + Math.floor(paneHash * 24);
+          const glassB = 42 + Math.floor(paneHash * 34);
           ctx.fillStyle = `rgb(${glassR}, ${glassG}, ${glassB})`;
-          ctx.fillRect(x + 3, y + 4, cellW - 6, cellH - 8);
+          ctx.fillRect(x + 4, y + 5, cellW - 8, cellH - 10);
 
-          // Realistic soft recessed interior lighting (warm tungsten or cool office white, muted luminance)
-          if (isOccupiedFloor && paneHash > 0.56) {
-            const innerGrad = ctx.createLinearGradient(x, y + 4, x, y + cellH - 4);
-            const warmOffice = paneHash > 0.78;
-            const cTop = warmOffice ? '#8c6d42' : '#4a6b8a';
-            const cBot = warmOffice ? '#4d3a21' : '#243a52';
+          if (isOccupiedFloor && paneHash > 0.48) {
+            const innerGrad = ctx.createLinearGradient(x, y + 5, x, y + cellH - 5);
+            const warmOffice = paneHash > 0.72;
+            const cTop = warmOffice ? '#e2b26b' : '#7ec4f2';
+            const cBot = warmOffice ? '#5c3f1c' : '#1e3c5c';
             innerGrad.addColorStop(0, cTop);
             innerGrad.addColorStop(1, cBot);
             ctx.fillStyle = innerGrad;
-            ctx.fillRect(x + 4, y + 6, cellW - 8, cellH - 11);
+            ctx.fillRect(x + 6, y + 7, cellW - 12, cellH - 14);
 
-            // Subtle emissive only for upper interior ceiling strip (prevents bloom blowout)
-            ectx.fillStyle = warmOffice ? '#7a5c32' : '#355675';
-            ectx.fillRect(x + 5, y + 6, cellW - 10, Math.max(3, (cellH - 11) * 0.52));
+            // Crisp recessed office ceiling illumination for rich skyline HDR bloom
+            ectx.fillStyle = warmOffice ? '#d89b48' : '#58a6df';
+            ectx.fillRect(x + 7, y + 7, cellW - 14, Math.max(4, (cellH - 14) * 0.48));
+            // Subtle interior desk silhouette dividers
+            ctx.fillStyle = 'rgba(8, 14, 24, 0.48)';
+            ctx.fillRect(x + 6, y + cellH - 12, cellW - 12, 4);
           }
         }
       }
 
-      // Horizontal structural concrete/aluminum floor slab
-      ctx.fillStyle = isMechanicalFloor ? '#1a2434' : '#162030';
-      ctx.fillRect(0, y, size, isMechanicalFloor ? 8 : 4);
-      rctx.fillStyle = '#787878';
-      rctx.fillRect(0, y, size, isMechanicalFloor ? 8 : 4);
-      bctx.fillStyle = '#d4d4d4';
-      bctx.fillRect(0, y, size, isMechanicalFloor ? 8 : 4);
+      // Horizontal brushed aluminum spandrel beams
+      ctx.fillStyle = isMechanicalFloor ? '#1e2c42' : '#162235';
+      ctx.fillRect(0, y, size, isMechanicalFloor ? 12 : 6);
+      rctx.fillStyle = '#707070';
+      rctx.fillRect(0, y, size, isMechanicalFloor ? 12 : 6);
+      bctx.fillStyle = '#d8d8d8';
+      bctx.fillRect(0, y, size, isMechanicalFloor ? 12 : 6);
     }
 
-    // Vertical slim steel curtain mullions
-    ctx.fillStyle = '#182334';
-    rctx.fillStyle = '#626262';
-    bctx.fillStyle = '#c8c8c8';
+    // Precision vertical steel curtain mullions
+    ctx.fillStyle = '#1b283d';
+    rctx.fillStyle = '#585858';
+    bctx.fillStyle = '#d0d0d0';
     for (let col = 0; col <= cols; col++) {
       const x = Math.round(col * cellW);
-      ctx.fillRect(x, 0, 3, size);
-      rctx.fillRect(x, 0, 3, size);
-      bctx.fillRect(x, 0, 3, size);
+      ctx.fillRect(x, 0, 5, size);
+      rctx.fillRect(x, 0, 5, size);
+      bctx.fillRect(x, 0, 5, size);
     }
 
-    // Crisp narrow architectural rooftop crown light strip (single fine accent line)
+    // Crisp narrow architectural rooftop crown light strip & mid-tower accent beacon
     ectx.fillStyle = accentCss;
-    ectx.fillRect(0, 2, size, 3);
+    ectx.fillRect(0, 3, size, 6);
+    ectx.fillStyle = accentCss;
+    ectx.fillRect(0, Math.round(size * 0.5), size, 3);
   }
 
   const setup = (c: HTMLCanvasElement, isSrgb: boolean) => {

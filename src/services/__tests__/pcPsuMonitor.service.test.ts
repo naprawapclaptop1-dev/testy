@@ -115,6 +115,8 @@ describe('PcPsuMonitor & BatteryHealthService PSU Extensions', () => {
     expect(text).toContain('<Compile Include="SystemPulseLauncher.cs" />');
     expect(text).toContain('<Compile Include="SystemPulseSetupGui.cs" />');
     expect(text).toContain('Odinstaluj-SystemPulse-Pro.cmd');
+    expect(text).toContain('start "" "!BROWSER_EXE!"');
+    expect(text).not.toContain('start "" %%~B');
     expect(text).toContain('--disable-frame-rate-limit');
     expect(text).toContain('127.0.0.1');
     expect(text).not.toContain('usercontent.goog');
@@ -122,6 +124,15 @@ describe('PcPsuMonitor & BatteryHealthService PSU Extensions', () => {
     expect(text).not.toContain('csc.exe');
     expect(text).not.toContain('ExecutionPolicy');
     expect(text).not.toContain('WScript.Shell');
+
+    // Verify the actual shipped offline bundle compiles with 0 SyntaxErrors as a classic <script>
+    const fs = await import('node:fs');
+    const vm = await import('node:vm');
+    const { sanitizePortableBundleJs } = await import('../portableExeBuilder.service');
+    const rawBundle = fs.readFileSync('public/portable-bundle.js', 'utf8');
+    const sanitized = sanitizePortableBundleJs(rawBundle);
+    expect(sanitized).not.toContain('import.meta');
+    expect(() => new vm.Script(sanitized)).not.toThrow();
   });
 
   it('resets rail deviation visual markers via clearRailAlertVisualMarkers without modifying railHistory data', () => {

@@ -53,7 +53,9 @@ export async function preloadPortableAssets(): Promise<void> {
   preloadInFlight = true;
   preloadPromise = (async () => {
     try {
-      const jsCandidates = ['./portable-bundle.js', '/portable-bundle.js'];
+      const isHttp = window.location.protocol === 'http:' || window.location.protocol === 'https:';
+      const bust = isHttp ? `?v=${Date.now()}` : '';
+      const jsCandidates = [`./portable-bundle.js${bust}`, `/portable-bundle.js${bust}`];
       for (const url of jsCandidates) {
         const jsRes = await fetch(url, { cache: 'no-store' }).catch(() => null);
         if (jsRes && jsRes.ok) {
@@ -70,7 +72,7 @@ export async function preloadPortableAssets(): Promise<void> {
         }
       }
 
-      const cssCandidates = ['./portable-styles.css', '/portable-styles.css'];
+      const cssCandidates = [`./portable-styles.css${bust}`, `/portable-styles.css${bust}`];
       for (const url of cssCandidates) {
         const cssRes = await fetch(url, { cache: 'no-store' }).catch(() => null);
         if (cssRes && cssRes.ok) {
@@ -207,18 +209,24 @@ export function buildZipArchive(entries: ZipEntryInput[]): Uint8Array {
   return out;
 }
 
+export function sanitizePortableBundleJs(rawBundle: string): string {
+  return rawBundle
+    .replace(/export\s*\{[^}]*\}\s*;?\s*$/u, '')
+    .replace(/\bimport\.meta\.env\b/gu, '({DEV:false,PROD:true,MODE:"production"})')
+    .replace(/\bimport\.meta\.url\b/gu, '(window.location.href)')
+    .replace(/\bimport\.meta\.resolve\b/gu, '(undefined)')
+    .replace(/\bimport\.meta\b/gu, '({url:window.location.href,env:{DEV:false,PROD:true,MODE:"production"}})');
+}
+
 export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
   const localServerUrl = 'http://127.0.0.1:45880/index.html';
   const stylesContent = cachedStylesCss || collectDocumentStylesFallback();
-  // Remove any trailing `export{...};` and replace `import.meta` references so the bundle executes cleanly
-  // both as a classic non-module <script> on file:/// (immune to CORS) and on http://127.0.0.1:45880
+  // Strip trailing ES module exports and replace all import.meta references (including import.meta.resolve)
+  // so the bundle executes cleanly as a classic <script> on both file:/// and http://127.0.0.1:45880
   const rawBundle =
     cachedBundleJs ||
     `console.log("SystemPulse Pro Standalone Offline Build Initialized");`;
-  const bundleJsContent = rawBundle
-    .replace(/export\s*\{[^}]*\}\s*;?\s*$/u, '')
-    .replace(/import\.meta\.env/gu, '({DEV:false,PROD:true,MODE:"production"})')
-    .replace(/import\.meta\.url/gu, '(window.location.href)');
+  const bundleJsContent = sanitizePortableBundleJs(rawBundle);
 
   const standaloneAppHtml = `<!doctype html>
 <html lang="pl" class="dark">
@@ -241,13 +249,18 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     </div>
     <script>
       window.__SYSTEMPULSE_STANDALONE_OFFLINE__ = true;
-      function __spShowBundleError() {
+      function __spShowBundleError(detail) {
         var el = document.getElementById('sp-offline-boot-msg');
         if (el) {
           el.style.color = '#fbbf24';
-          el.textContent = 'Nie znaleziono pliku app/portable-bundle.js. Najpierw rozpakuj całe archiwum .ZIP (kliknij prawym -> Wyodrębnij wszystkie), a następnie uruchom Instalator-SystemPulse-Pro-Setup.cmd lub SystemPulse-Pro-Portable.bat.';
+          el.textContent = detail || 'Nie znaleziono pliku app/portable-bundle.js. Najpierw rozpakuj całe archiwum .ZIP (kliknij prawym -> Wyodrębnij wszystkie), a następnie uruchom Instalator-SystemPulse-Pro-Setup.cmd lub SystemPulse-Pro-Portable.bat.';
         }
       }
+      window.addEventListener('error', function (ev) {
+        if (document.getElementById('sp-offline-boot-fallback') && ev && ev.message) {
+          __spShowBundleError('Błąd inicjalizacji aplikacji: ' + ev.message);
+        }
+      });
     </script>
     <script src="./portable-bundle.js" defer onerror="__spShowBundleError()"></script>
   </body>
@@ -334,12 +347,17 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     'set "DESK_DIR=%USERPROFILE%\\Desktop"',
     'if not exist "!DESK_DIR!" if defined OneDrive if exist "%OneDrive%\\Desktop" set "DESK_DIR=%OneDrive%\\Desktop"',
     'if not exist "!DESK_DIR!" if defined OneDriveConsumer if exist "%OneDriveConsumer%\\Desktop" set "DESK_DIR=%OneDriveConsumer%\\Desktop"',
+    'if not exist "!DESK_DIR!" if defined OneDrive if exist "%OneDrive%\\Pulpit" set "DESK_DIR=%OneDrive%\\Pulpit"',
     'if exist "!DESK_DIR!" (',
     '  if exist "!DESK_DIR!\\SystemPulse Pro.url" del /F /Q "!DESK_DIR!\\SystemPulse Pro.url" >nul 2>&1',
     '  (',
     '    echo @echo off',
-    '    echo if exist "%%LOCALAPPDATA%%\\Programs\\SystemPulsePro\\SystemPulse-Pro.exe" ^(start "" "%%LOCALAPPDATA%%\\Programs\\SystemPulsePro\\SystemPulse-Pro.exe" ^& exit /b 0^)',
+    '    echo if exist "%%LOCALAPPDATA%%\\Programs\\SystemPulsePro\\SystemPulse-Pro.exe" goto run_exe',
     '    echo call "%%LOCALAPPDATA%%\\Programs\\SystemPulsePro\\SystemPulse-Pro-Portable.bat"',
+    '    echo exit /b 0',
+    '    echo :run_exe',
+    '    echo start "" "%%LOCALAPPDATA%%\\Programs\\SystemPulsePro\\SystemPulse-Pro.exe"',
+    '    echo exit /b 0',
     '  ) > "!DESK_DIR!\\SystemPulse Pro.cmd"',
     ')',
     'set "START_DIR=%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\SystemPulse Pro"',
@@ -347,8 +365,12 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     'if exist "!START_DIR!" (',
     '  (',
     '    echo @echo off',
-    '    echo if exist "%%LOCALAPPDATA%%\\Programs\\SystemPulsePro\\SystemPulse-Pro.exe" ^(start "" "%%LOCALAPPDATA%%\\Programs\\SystemPulsePro\\SystemPulse-Pro.exe" ^& exit /b 0^)',
+    '    echo if exist "%%LOCALAPPDATA%%\\Programs\\SystemPulsePro\\SystemPulse-Pro.exe" goto run_exe',
     '    echo call "%%LOCALAPPDATA%%\\Programs\\SystemPulsePro\\SystemPulse-Pro-Portable.bat"',
+    '    echo exit /b 0',
+    '    echo :run_exe',
+    '    echo start "" "%%LOCALAPPDATA%%\\Programs\\SystemPulsePro\\SystemPulse-Pro.exe"',
+    '    echo exit /b 0',
     '  ) > "!START_DIR!\\SystemPulse Pro.cmd"',
     '  copy /Y "%INSTALL_DIR%\\Odinstaluj-SystemPulse-Pro.cmd" "!START_DIR!\\Odinstaluj SystemPulse Pro.cmd" >nul 2>&1',
     ')',
@@ -367,7 +389,7 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
 
   const batLauncher = [
     '@echo off',
-    'setlocal EnableExtensions EnableDelayedExpansion',
+    'setlocal EnableExtensions',
     'chcp 65001 >nul',
     'title SystemPulse Pro 64-bit - Standalone Desktop Edition',
     'echo ====================================================================',
@@ -380,28 +402,27 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     '  exit /b 0',
     ')',
     'set "LOCAL_APP_FILE=%~dp0app\\index.html"',
-    'if not exist "!LOCAL_APP_FILE!" (',
-    '  echo [BLAD] Nie znaleziono pliku "!LOCAL_APP_FILE!".',
+    'if not exist "%LOCAL_APP_FILE%" (',
+    '  echo [BLAD] Nie znaleziono pliku "%LOCAL_APP_FILE%".',
     '  echo Rozpakuj cale archiwum SystemPulse-Pro-Portable-Win64.zip przed uruchomieniem.',
     '  pause',
     '  exit /b 1',
     ')',
+    'setlocal EnableDelayedExpansion',
     'set "APP_URI=!LOCAL_APP_FILE:\\=/!"',
     'set "APP_URI=!APP_URI: =%%20!"',
     'set "PROFILE_DIR=%TEMP%\\SystemPulsePro_OfflineAppProfile_v6"',
-    'for %%B in (',
-    '  "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe"',
-    '  "%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe"',
-    '  "%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe"',
-    '  "%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe"',
-    '  "%LOCALAPPDATA%\\Google\\Chrome\\Application\\chrome.exe"',
-    '  "%ProgramFiles%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"',
-    '  "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"',
-    ') do (',
-    '  if exist %%~B (',
-    '    start "" %%~B --app="file:///!APP_URI!" --user-data-dir="!PROFILE_DIR!" --start-maximized --allow-file-access-from-files --enable-gpu-rasterization --ignore-gpu-blocklist --disable-frame-rate-limit --disable-gpu-vsync --no-first-run --no-default-browser-check',
-    '    exit /b 0',
-    '  )',
+    'set "BROWSER_EXE="',
+    'if not defined BROWSER_EXE if exist "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe" set "BROWSER_EXE=%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe"',
+    'if not defined BROWSER_EXE if exist "%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe" set "BROWSER_EXE=%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe"',
+    'if not defined BROWSER_EXE if exist "%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe" set "BROWSER_EXE=%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe"',
+    'if not defined BROWSER_EXE if exist "%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe" set "BROWSER_EXE=%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe"',
+    'if not defined BROWSER_EXE if exist "%LOCALAPPDATA%\\Google\\Chrome\\Application\\chrome.exe" set "BROWSER_EXE=%LOCALAPPDATA%\\Google\\Chrome\\Application\\chrome.exe"',
+    'if not defined BROWSER_EXE if exist "%ProgramFiles%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe" set "BROWSER_EXE=%ProgramFiles%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"',
+    'if not defined BROWSER_EXE if exist "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe" set "BROWSER_EXE=%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"',
+    'if defined BROWSER_EXE (',
+    '  start "" "!BROWSER_EXE!" --app="file:///!APP_URI!" --user-data-dir="!PROFILE_DIR!" --start-maximized --allow-file-access-from-files --enable-gpu-rasterization --ignore-gpu-blocklist --disable-frame-rate-limit --disable-gpu-vsync --no-first-run --no-default-browser-check',
+    '  exit /b 0',
     ')',
     'start "" "!LOCAL_APP_FILE!"',
     'exit /b 0',
@@ -1559,7 +1580,7 @@ export function downloadPortableExeZip(): string {
     document.body.appendChild(a);
     a.click();
     a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    setTimeout(() => URL.revokeObjectURL(url), 15000);
     return filename;
   };
 

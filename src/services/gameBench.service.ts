@@ -2,8 +2,20 @@ import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
+import {
+  createCarbonFiberTextures,
+  createCinematicHdrEnvironment,
+  createFloatingEmberBokeh,
+  createPlanarReflector,
+  createRelativisticAccretionDiskMaterial,
+  createVolumetricLightShafts,
+  createVolumetricPlasmaBeamMaterial,
+  HdrEnvVariant,
+} from './aaaVisuals';
+import { createCinematicGradePass } from './cinematicPostFx';
 import {
   GameAaMode,
   GameAiProfile,
@@ -1738,6 +1750,7 @@ export class GameBenchService {
   private composer: EffectComposer | null = null;
   private composerRT: THREE.WebGLRenderTarget | null = null;
   private bloomPass: UnrealBloomPass | null = null;
+  private cinematicPass: ShaderPass | null = null;
   private scene: THREE.Scene | null = null;
   private camera: THREE.PerspectiveCamera | null = null;
   private envRT: THREE.WebGLRenderTarget | null = null;
@@ -1748,6 +1761,7 @@ export class GameBenchService {
   private causticMat: THREE.ShaderMaterial | null = null;
   private lavaMat: THREE.ShaderMaterial | null = null;
   private plasmaMat: THREE.ShaderMaterial | null = null;
+  private animatedFxMats: THREE.ShaderMaterial[] = [];
   private coreGroup: THREE.Group | null = null;
   private droneMesh: THREE.InstancedMesh | null = null;
   private towerMesh: THREE.InstancedMesh | null = null;
@@ -1794,6 +1808,9 @@ export class GameBenchService {
 
   private rafId = 0;
   private uncappedTimer: number | null = null;
+  private pendingGpuSync: WebGLSync | null = null;
+  private lastUiYieldTs = 0;
+  private fsChangeListener: (() => void) | null = null;
   private startTs = 0;
   private lastTickTs = 0;
   private simTime = 0;
@@ -1809,9 +1826,9 @@ export class GameBenchService {
   private rocketCooldown = 0;
   private nitroBurstUntilTs = 0;
 
-  // 5-Category Contemporary PC Graphics Pipeline Settings (DLSS/FSR/XeSS, FG, AA, RT/Lumen, Geometry, Post-Process, Driver)
-  private upscalingMode: GameUpscalingMode = 'dlss_quality';
-  private upscalingPct = 67;
+  // 5-Category Contemporary PC Graphics Pipeline Settings (Native 100% crisp by default on hardware GPU)
+  private upscalingMode: GameUpscalingMode = 'native';
+  private upscalingPct = 100;
   private frameGenMode: GameFrameGenMode = 'fg_2x';
   private smoothMotionEnabled = true;
   private aaMode: GameAaMode = 'dlaa';
@@ -1942,6 +1959,10 @@ export class GameBenchService {
     for (const obj of toRemove) {
       scene.remove(obj);
       obj.traverse((child) => {
+        const disposable = child as unknown as { dispose?: () => void };
+        if (typeof disposable.dispose === 'function') {
+          disposable.dispose();
+        }
         if ((child as THREE.Mesh).isMesh || (child as THREE.Points).isPoints) {
           const m = child as THREE.Mesh;
           m.geometry?.dispose();
@@ -1965,6 +1986,7 @@ export class GameBenchService {
         }
       });
     }
+    this.animatedFxMats = [];
     this.dynLights = [];
     this.lasers = [];
     this.combatEnemies = [];
@@ -2215,7 +2237,7 @@ export class GameBenchService {
     renderer.info.autoReset = false;
     this.applyRendererToneMapping(renderer);
     renderer.shadowMap.enabled = this.shadowsEnabled;
-    renderer.shadowMap.type = THREE.PCFShadowMap;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.setSize(w, h);
     container.innerHTML = '';
     container.appendChild(renderer.domElement);
@@ -2223,16 +2245,37 @@ export class GameBenchService {
 
     const fsBtn = document.createElement('button');
     fsBtn.type = 'button';
-    fsBtn.className = 'btn btn-secondary btn-sm';
-    fsBtn.style.cssText = 'position:absolute;top:10px;right:10px;z-index:20;background:rgba(15,23,42,0.92);color:#38bdf8;border:1px solid rgba(56,189,248,0.5);padding:6px 12px;border-radius:6px;font-size:11.5px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;gap:6px;box-shadow:0 4px 12px rgba(0,0,0,0.5);';
+    fsBtn.className = 'gpu-fs-btn';
+    fsBtn.style.cssText = 'position:absolute;top:10px;right:10px;z-index:25;';
     fsBtn.innerHTML = '⛶ Pełny ekran';
+    const getFsTarget = () =>
+      (container.closest('.gpu-viewport-wrap') as HTMLElement | null) || container;
     fsBtn.onclick = () => {
       if (!document.fullscreenElement) {
-        container.requestFullscreen?.().catch(() => {});
+        const target = getFsTarget();
+        target.requestFullscreen?.().catch(() => {
+          container.requestFullscreen?.().catch(() => {});
+        });
+        if (!this.running) {
+          this.start();
+        }
       } else {
         document.exitFullscreen?.().catch(() => {});
       }
     };
+    this.fsChangeListener = () => {
+      const inFs = Boolean(
+        document.fullscreenElement &&
+          (document.fullscreenElement === container ||
+            document.fullscreenElement === getFsTarget() ||
+            document.fullscreenElement.contains(container))
+      );
+      fsBtn.innerHTML = inFs ? '✕ Wyjdź (ESC)' : '⛶ Pełny ekran';
+      fsBtn.classList.toggle('danger', inFs);
+      this.handleResize();
+      this.emitMetrics();
+    };
+    document.addEventListener('fullscreenchange', this.fsChangeListener);
     container.style.position = container.style.position || 'relative';
     container.appendChild(fsBtn);
 
@@ -2273,14 +2316,13 @@ export class GameBenchService {
     scene.fog = this.fogEnabled ? new THREE.FogExp2(gameMeta.fogColor, this.getFogDensity(gameMeta.layoutMode)) : null;
     this.scene = scene;
 
-    try {
-      const pmrem = new THREE.PMREMGenerator(renderer);
-      this.envRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
+    const initSkyMode = this.getSkyMode(gameMeta.layoutMode);
+    const initEnvVariant: HdrEnvVariant =
+      initSkyMode === 0 ? 'golden_day' : initSkyMode === 1 ? 'cyber_night' : 'deep_space';
+    this.envRT = createCinematicHdrEnvironment(renderer, initEnvVariant);
+    if (this.envRT) {
       scene.environment = this.envRT.texture;
-      scene.environmentIntensity = this.envIntensity;
-      pmrem.dispose();
-    } catch {
-      this.envRT = null;
+      scene.environmentIntensity = Math.max(1.75, this.envIntensity);
     }
 
     const camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 460);
@@ -2353,6 +2395,17 @@ export class GameBenchService {
     const gameMeta = this.getGameCatalogItem();
     const skyMode = this.getSkyMode(gameMeta.layoutMode);
 
+    if (this.renderer) {
+      const envVariant: HdrEnvVariant =
+        skyMode === 0 ? 'golden_day' : skyMode === 1 ? 'cyber_night' : 'deep_space';
+      this.envRT?.dispose();
+      this.envRT = createCinematicHdrEnvironment(this.renderer, envVariant);
+      if (this.envRT) {
+        scene.environment = this.envRT.texture;
+        scene.environmentIntensity = Math.max(1.75, this.envIntensity);
+      }
+    }
+
     // 1. Volumetric GPU Raymarched Atmospheric / Nebula Sky Dome tailored per genre
     this.skyMat = new THREE.ShaderMaterial({
       vertexShader: VOLUMETRIC_SKY_VERT,
@@ -2390,14 +2443,42 @@ export class GameBenchService {
     sun.shadow.camera.bottom = -d;
     sun.shadow.bias = -0.00035;
     sun.shadow.normalBias = 0.025;
+    sun.shadow.radius = 3.0;
     scene.add(sun);
 
-    const rimDir = new THREE.DirectionalLight(skyMode === 0 ? 0x7dd3fc : gameMeta.lightPalette[0], 1.38);
+    const rimDir = new THREE.DirectionalLight(skyMode === 0 ? 0x7dd3fc : gameMeta.lightPalette[0], 1.48);
     rimDir.position.set(-42, 24, 48);
     scene.add(rimDir);
 
+    if (!this.isSoftwareRenderer) {
+      try {
+        RectAreaLightUniformsLib.init();
+        const skySoftbox = new THREE.RectAreaLight(
+          skyMode === 0 ? 0xe0f2fe : gameMeta.lightPalette[0],
+          skyMode === 0 ? 2.4 : 2.9,
+          28,
+          10
+        );
+        skySoftbox.position.set(0, 26, 18);
+        skySoftbox.lookAt(0, 4, 0);
+        scene.add(skySoftbox);
+
+        const accentSoftbox = new THREE.RectAreaLight(
+          gameMeta.lightPalette[1] ?? 0x38bdf8,
+          2.0,
+          22,
+          8
+        );
+        accentSoftbox.position.set(-22, 14, -14);
+        accentSoftbox.lookAt(0, 4, 0);
+        scene.add(accentSoftbox);
+      } catch {
+        // Fallback silently on constrained WebGL contexts
+      }
+    }
+
     this.dynLights = gameMeta.lightPalette.map((col, idx) => {
-      const pl = new THREE.PointLight(col, 46, 70, 1.7);
+      const pl = new THREE.PointLight(col, 48, 72, 1.7);
       pl.position.set(Math.cos(idx * 1.57) * 20, 8, Math.sin(idx * 1.57) * 20);
       scene.add(pl);
       return pl;
@@ -2467,14 +2548,37 @@ export class GameBenchService {
         textures.bumpMap.repeat.set(1, 34);
         this.raceRoadTexture = textures.map;
 
+        const isReflectiveRoad =
+          gameMeta.layoutMode === 'corridor' ||
+          gameMeta.layoutMode === 'drift_touge' ||
+          gameMeta.layoutMode === 'maglev_track' ||
+          gameMeta.layoutMode === 'cyber_hoverbike' ||
+          gameMeta.layoutMode === 'bugatti_hypercar' ||
+          gameMeta.layoutMode === 'formula_gp';
+        const roadMirror = isReflectiveRoad
+          ? createPlanarReflector({
+              geometry: new THREE.PlaneGeometry(42, 460),
+              y: -0.025,
+              z: -125,
+              color: skyMode === 1 ? 0x6b84a8 : 0x5c708a,
+              textureSize: 768,
+              isSoftwareGl: this.isSoftwareRenderer,
+            })
+          : null;
+        if (roadMirror) scene.add(roadMirror);
+
         const roadGeo = new THREE.PlaneGeometry(42, 460, 8, 8);
-        const roadMat = new THREE.MeshStandardMaterial({
+        const roadMat = new THREE.MeshPhysicalMaterial({
           map: textures.map,
           roughnessMap: textures.roughnessMap,
           bumpMap: textures.bumpMap,
-          bumpScale: gameMeta.layoutMode === 'dakar_rally' || gameMeta.layoutMode === 'snow_rally' ? 0.14 : 0.04,
-          metalness: gameMeta.layoutMode === 'corridor' || gameMeta.layoutMode === 'maglev_track' ? 0.45 : 0.12,
-          roughness: gameMeta.layoutMode === 'dakar_rally' ? 0.88 : 0.52,
+          bumpScale: gameMeta.layoutMode === 'dakar_rally' || gameMeta.layoutMode === 'snow_rally' ? 0.14 : 0.045,
+          metalness: gameMeta.layoutMode === 'corridor' || gameMeta.layoutMode === 'maglev_track' ? 0.55 : 0.18,
+          roughness: gameMeta.layoutMode === 'dakar_rally' ? 0.88 : 0.36,
+          clearcoat: isReflectiveRoad ? 0.85 : 0.0,
+          clearcoatRoughness: 0.14,
+          transparent: Boolean(roadMirror),
+          opacity: roadMirror ? (skyMode === 1 || gameMeta.layoutMode === 'corridor' ? 0.68 : 0.78) : 1.0,
         });
         const roadMesh = new THREE.Mesh(roadGeo, roadMat);
         roadMesh.rotation.x = -Math.PI / 2;
@@ -2616,15 +2720,33 @@ export class GameBenchService {
           floorGeo.computeVertexNormals();
         }
 
+        const isReflectiveArenaFloor =
+          gameMeta.layoutMode === 'orbital' ||
+          gameMeta.layoutMode === 'colosseum' ||
+          gameMeta.layoutMode === 'clockwork' ||
+          gameMeta.layoutMode === 'glacial';
+        const arenaMirror = isReflectiveArenaFloor
+          ? createPlanarReflector({
+              geometry: new THREE.CircleGeometry(140, 72),
+              y: -0.04,
+              color: gameMeta.layoutMode === 'glacial' ? 0x8cc2e8 : 0x627ea3,
+              textureSize: 768,
+              isSoftwareGl: this.isSoftwareRenderer,
+            })
+          : null;
+        if (arenaMirror) scene.add(arenaMirror);
+
         const floor = new THREE.Mesh(
           floorGeo,
           new THREE.MeshPhysicalMaterial({
             map: floorTex,
             color: gameMeta.floorColor,
-            metalness: gameMeta.layoutMode === 'volcanic' ? 0.35 : 0.72,
-            roughness: 0.28,
-            clearcoat: 0.65,
-            clearcoatRoughness: 0.2,
+            metalness: gameMeta.layoutMode === 'volcanic' ? 0.35 : 0.78,
+            roughness: isReflectiveArenaFloor ? 0.18 : 0.28,
+            clearcoat: isReflectiveArenaFloor ? 1.0 : 0.65,
+            clearcoatRoughness: 0.1,
+            transparent: Boolean(arenaMirror),
+            opacity: arenaMirror ? 0.56 : 1.0,
             emissive: gameMeta.layoutMode === 'volcanic' ? 0x7c2d12 : 0x000000,
             emissiveIntensity: gameMeta.layoutMode === 'volcanic' ? 0.45 : 0,
           })
@@ -2811,50 +2933,79 @@ export class GameBenchService {
     });
 
     if (gameMeta.layoutMode === 'orbital') {
-      // GAME 1 (HYPERION): Quantum Black Hole Singularity with Horizontal Accretion Disk & Relativistic Polar Jets
-      coreGroup.position.set(0, 10.5, 0);
-      const eventHorizon = new THREE.Mesh(new THREE.IcosahedronGeometry(3.8, 5), this.plasmaMat);
+      // GAME 1 (HYPERION): Relativistic Quantum Black Hole with Animated GLSL Accretion Disk, Volumetric Jets & Arena God-Rays
+      coreGroup.position.set(0, 11.2, 0);
+      const eventHorizon = new THREE.Mesh(new THREE.IcosahedronGeometry(3.85, 5), this.plasmaMat);
       coreGroup.add(eventHorizon);
 
-      const accretionDisk = new THREE.Mesh(
-        new THREE.RingGeometry(4.8, 14.5, 96, 8),
-        new THREE.MeshBasicMaterial({
-          color: 0x38bdf8,
-          side: THREE.DoubleSide,
-          transparent: true,
-          opacity: 0.65,
-          blending: THREE.AdditiveBlending,
+      // Blazing gravitational lensing vertical photon halo
+      const lensingHalo = new THREE.Mesh(
+        new THREE.TorusGeometry(4.25, 0.14, 16, 96),
+        new THREE.MeshStandardMaterial({
+          color: 0xe0f2fe,
+          emissive: 0x38bdf8,
+          emissiveIntensity: 2.8,
+          roughness: 0.1,
         })
       );
+      lensingHalo.userData.ringIdx = 1;
+      coreGroup.add(lensingHalo);
+
+      const accretionDiskMat = createRelativisticAccretionDiskMaterial(0x38bdf8, 0xf97316);
+      this.animatedFxMats.push(accretionDiskMat);
+      const accretionDisk = new THREE.Mesh(
+        new THREE.RingGeometry(4.4, 15.2, 128, 12),
+        accretionDiskMat
+      );
       accretionDisk.rotation.x = Math.PI / 2 - 0.18;
-      accretionDisk.userData.ringIdx = 0;
       coreGroup.add(accretionDisk);
 
-      // Relativistic polar plasma jets shooting up & down
-      const jetMat = new THREE.MeshBasicMaterial({
-        color: 0xf97316,
-        transparent: true,
-        opacity: 0.55,
-        blending: THREE.AdditiveBlending,
-      });
-      const topJet = new THREE.Mesh(new THREE.ConeGeometry(1.8, 28, 24, 1, true), jetMat);
-      topJet.position.y = 16;
-      const botJet = new THREE.Mesh(new THREE.ConeGeometry(1.8, 28, 24, 1, true), jetMat);
-      botJet.position.y = -16;
-      botJet.rotation.x = Math.PI;
+      // Volumetric Fresnel-edged relativistic polar plasma jets
+      const jetMat = createVolumetricPlasmaBeamMaterial(0xf97316);
+      this.animatedFxMats.push(jetMat);
+      const topJet = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 2.1, 30, 32, 1, true), jetMat);
+      topJet.position.y = 16.5;
+      const botJet = new THREE.Mesh(new THREE.CylinderGeometry(2.1, 0.45, 30, 32, 1, true), jetMat);
+      botJet.position.y = -16.5;
       coreGroup.add(topJet, botJet);
+
+      // Volumetric spotlight beams descending onto the singularity arena
+      const shafts = createVolumetricLightShafts({
+        count: 4,
+        ringRadius: 24,
+        height: 44,
+        topRadius: 1.2,
+        bottomRadius: 8.5,
+        colorHex: 0x38bdf8,
+        opacity: 0.16,
+        targetY: 0,
+      });
+      scene.add(shafts.group);
+      this.animatedFxMats.push(shafts.material);
+
+      const embers = createFloatingEmberBokeh({
+        count: 260,
+        radius: 34,
+        height: 28,
+        colorAHex: 0x38bdf8,
+        colorBHex: 0xf97316,
+        size: 36,
+      });
+      scene.add(embers.points);
+      this.animatedFxMats.push(embers.material);
     } else if (gameMeta.layoutMode === 'corridor') {
       // GAME 2 (NEON OVERDRIVE): Cyberpunk Highway Holographic Gate Arches & Giant Wireframe Cyber-Head/Portal
       coreGroup.position.set(0, 0, 0);
-      const archMat = new THREE.MeshStandardMaterial({
+      const archMat = new THREE.MeshPhysicalMaterial({
         color: 0x0f172a,
-        metalness: 0.9,
-        roughness: 0.15,
+        metalness: 0.92,
+        roughness: 0.14,
+        clearcoat: 1.0,
         emissive: 0xec4899,
-        emissiveIntensity: 0.75,
+        emissiveIntensity: 1.35,
       });
       for (let a = -3; a <= 3; a++) {
-        const arch = new THREE.Mesh(new THREE.TorusGeometry(18, 0.45, 12, 48, Math.PI), archMat);
+        const arch = new THREE.Mesh(new THREE.TorusGeometry(18, 0.45, 14, 56, Math.PI), archMat);
         arch.position.set(0, 0, a * 22);
         coreGroup.add(arch);
       }
@@ -2872,7 +3023,7 @@ export class GameBenchService {
           roughness: 0.85,
           metalness: 0.2,
           emissive: 0x7c2d12,
-          emissiveIntensity: 0.35,
+          emissiveIntensity: 0.45,
           side: THREE.DoubleSide,
         })
       );
@@ -2884,54 +3035,89 @@ export class GameBenchService {
       magmaPool.userData.ringIdx = 0;
       coreGroup.add(magmaPool);
 
-      // Erupting Lava Plume Columns
-      const plumeMat = new THREE.MeshBasicMaterial({ color: 0xf97316, wireframe: true });
-      for (let k = 0; k < 3; k++) {
-        const plume = new THREE.Mesh(new THREE.CylinderGeometry(0.8 + k * 1.2, 3.2, 24, 16, 8, true), plumeMat);
+      // Volumetric Erupting Lava Plume Columns
+      const plumeMat = createVolumetricPlasmaBeamMaterial(0xf97316);
+      this.animatedFxMats.push(plumeMat);
+      for (let k = 0; k < 2; k++) {
+        const plume = new THREE.Mesh(new THREE.CylinderGeometry(1.1 + k * 1.4, 3.6, 26, 24, 1, true), plumeMat);
         plume.position.y = 20 + k * 3;
-        plume.userData.ringIdx = k + 1;
         coreGroup.add(plume);
       }
     } else if (gameMeta.layoutMode === 'colosseum') {
-      // GAME 4 (NEXUS MECH ARENA): Giant Articulated Combat Titan Mech Boss in Center of Hexagonal Arena
+      // GAME 4 (NEXUS MECH ARENA): Carbon-Fiber Clearcoat Articulated Combat Titan Mech Boss + Volumetric Spotlights
       coreGroup.position.set(0, 0, 0);
-      const armorMat = new THREE.MeshStandardMaterial({
-        color: 0x111e1a,
-        metalness: 0.92,
+      const carbonTex = createCarbonFiberTextures(this.anisotropy);
+      const armorMat = new THREE.MeshPhysicalMaterial({
+        color: 0xb8d4cb,
+        map: carbonTex.map,
+        bumpMap: carbonTex.bumpMap,
+        bumpScale: 0.08,
+        roughnessMap: carbonTex.roughnessMap,
+        metalness: 0.9,
         roughness: 0.22,
+        clearcoat: 0.9,
+        clearcoatRoughness: 0.14,
         emissive: 0x10b981,
-        emissiveIntensity: 0.28,
+        emissiveIntensity: 0.24,
       });
-      // Mech Legs
+      const trimMat = new THREE.MeshStandardMaterial({
+        color: 0x34d399,
+        emissive: 0x10b981,
+        emissiveIntensity: 2.2,
+        roughness: 0.18,
+      });
+      // Mech Legs + Armored Kneecaps
       const leftLeg = new THREE.Mesh(new THREE.BoxGeometry(2.4, 9.5, 2.8), armorMat);
       leftLeg.position.set(-3.4, 4.75, 0);
       const rightLeg = new THREE.Mesh(new THREE.BoxGeometry(2.4, 9.5, 2.8), armorMat);
       rightLeg.position.set(3.4, 4.75, 0);
+      const leftKnee = new THREE.Mesh(new THREE.CylinderGeometry(1.4, 1.2, 3.2, 16), trimMat);
+      leftKnee.rotation.z = Math.PI / 2;
+      leftKnee.position.set(-3.4, 5.2, 0.9);
+      const rightKnee = leftKnee.clone();
+      rightKnee.position.x = 3.4;
       // Mech Torso
       const torso = new THREE.Mesh(new THREE.BoxGeometry(9.6, 8.2, 5.4), armorMat);
       torso.position.set(0, 13.2, 0);
-      // Glowing Chest Arc Reactor
-      const chestCore = new THREE.Mesh(new THREE.CylinderGeometry(2.2, 2.2, 5.8, 24), this.plasmaMat);
+      // Glowing Chest Arc Reactor + Stabilizer Ring
+      const chestCore = new THREE.Mesh(new THREE.CylinderGeometry(2.2, 2.2, 5.8, 28), this.plasmaMat);
       chestCore.rotation.x = Math.PI / 2;
       chestCore.position.set(0, 13.5, 0);
-      // Shoulder Railgun Pods & Twin Laser Arms
+      const chestRing = new THREE.Mesh(new THREE.TorusGeometry(2.55, 0.22, 12, 48), trimMat);
+      chestRing.position.set(0, 13.5, 2.85);
+      // Shoulder Railgun Pods & Twin Glowing Muzzle Coils
       const leftPod = new THREE.Mesh(new THREE.BoxGeometry(3.2, 3.8, 7.5), armorMat);
       leftPod.position.set(-6.5, 17.5, -0.5);
       const rightPod = new THREE.Mesh(new THREE.BoxGeometry(3.2, 3.8, 7.5), armorMat);
       rightPod.position.set(6.5, 17.5, -0.5);
       const headVisor = new THREE.Mesh(
-        new THREE.BoxGeometry(3.6, 2.0, 3.2),
-        new THREE.MeshBasicMaterial({ color: 0x38bdf8 })
+        new THREE.BoxGeometry(3.6, 1.8, 3.2),
+        new THREE.MeshStandardMaterial({
+          color: 0x38bdf8,
+          emissive: 0x06b6d4,
+          emissiveIntensity: 2.6,
+          roughness: 0.1,
+        })
       );
       headVisor.position.set(0, 18.8, 0.6);
-      // Energy Shield Dome around Mech
-      const hexShield = new THREE.Mesh(
-        new THREE.IcosahedronGeometry(16.5, 2),
-        new THREE.MeshBasicMaterial({ color: 0x10b981, wireframe: true, transparent: true, opacity: 0.18 })
-      );
-      hexShield.position.y = 11;
-      hexShield.userData.ringIdx = 0;
-      coreGroup.add(leftLeg, rightLeg, torso, chestCore, leftPod, rightPod, headVisor, hexShield);
+      // Energy Shield Halo Ring around Mech
+      const shieldRing = new THREE.Mesh(new THREE.TorusGeometry(14.5, 0.18, 12, 72), trimMat);
+      shieldRing.rotation.x = Math.PI / 2;
+      shieldRing.position.y = 0.4;
+      coreGroup.add(leftLeg, rightLeg, leftKnee, rightKnee, torso, chestCore, chestRing, leftPod, rightPod, headVisor, shieldRing);
+
+      const shafts = createVolumetricLightShafts({
+        count: 4,
+        ringRadius: 20,
+        height: 40,
+        topRadius: 1.0,
+        bottomRadius: 7.2,
+        colorHex: 0x10b981,
+        opacity: 0.18,
+        targetY: 0,
+      });
+      scene.add(shafts.group);
+      this.animatedFxMats.push(shafts.material);
     } else if (gameMeta.layoutMode === 'abyss') {
       // GAME 5 (LEVIATHAN DEEP TRENCH): Colossal Bioluminescent Sea Leviathan (Coiled Serpent + Glowing Tentacles)
       coreGroup.position.set(0, 11.0, 0);
@@ -4566,39 +4752,52 @@ export class GameBenchService {
     this.composer = null;
     this.composerRT?.dispose();
     this.composerRT = null;
+    this.bloomPass?.dispose();
     this.bloomPass = null;
+    this.cinematicPass?.dispose();
+    this.cinematicPass = null;
     const effPixelRatio = Math.max(0.65, Math.min(2.5, (window.devicePixelRatio || 1) * GAME_PRESETS[this.preset].renderScale));
     const maxSamples = typeof this.renderer.capabilities?.maxSamples === 'number' ? this.renderer.capabilities.maxSamples : 0;
     const safeSamples = this.isSoftwareRenderer ? 0 : maxSamples >= 2 ? Math.min(4, maxSamples) : 0;
     try {
-      const composerRT = new THREE.WebGLRenderTarget(
-        Math.max(1, Math.round(w * effPixelRatio)),
-        Math.max(1, Math.round(h * effPixelRatio)),
-        {
-          type: THREE.HalfFloatType,
-          samples: safeSamples,
-        }
-      );
+      const drawW = Math.max(1, Math.round(w * effPixelRatio));
+      const drawH = Math.max(1, Math.round(h * effPixelRatio));
+      const composerRT = new THREE.WebGLRenderTarget(drawW, drawH, {
+        type: THREE.HalfFloatType,
+        samples: safeSamples,
+      });
       this.composerRT = composerRT;
       const composer = new EffectComposer(this.renderer, composerRT);
       composer.addPass(new RenderPass(this.scene, this.camera));
       const bloom = new UnrealBloomPass(
         new THREE.Vector2(w, h),
-        GAME_PRESETS[this.preset].bloomStrength * 0.65,
-        0.38,
-        0.96
+        GAME_PRESETS[this.preset].bloomStrength * 0.72,
+        0.46,
+        0.78
       );
       bloom.enabled = this.bloomEnabled;
       composer.addPass(bloom);
+      const cinematic = createCinematicGradePass(drawW, drawH, {
+        sharpen: Math.max(0.14, (this.driverSharpeningPct / 100) * 0.65),
+        chromatic: this.chromaticAberration ? 0.0024 : 0.001,
+        vignette: 0.22,
+        vibrance: 0.14,
+        contrast: 1.05,
+      });
+      composer.addPass(cinematic);
       composer.addPass(new OutputPass());
       this.composer = composer;
       this.bloomPass = bloom;
+      this.cinematicPass = cinematic;
     } catch {
       this.composer?.dispose();
       this.composer = null;
       this.composerRT?.dispose();
       this.composerRT = null;
+      this.bloomPass?.dispose();
       this.bloomPass = null;
+      this.cinematicPass?.dispose();
+      this.cinematicPass = null;
     }
   }
 
@@ -4622,12 +4821,17 @@ export class GameBenchService {
     this.renderer.setSize(w, h, false);
     this.composer?.setPixelRatio(effPixelRatio);
     this.composer?.setSize(w, h);
-    if (this.bloomPass) {
-      this.bloomPass.strength = cfg.bloomStrength * 0.65;
-      this.bloomPass.enabled = this.bloomEnabled;
-    }
     const drawW = Math.round(w * effPixelRatio);
     const drawH = Math.round(h * effPixelRatio);
+    if (this.bloomPass) {
+      this.bloomPass.strength = cfg.bloomStrength * 0.72;
+      this.bloomPass.enabled = this.bloomEnabled;
+    }
+    if (this.cinematicPass) {
+      this.cinematicPass.uniforms.uResolution.value.set(Math.max(1, drawW), Math.max(1, drawH));
+      this.cinematicPass.uniforms.uSharpen.value = Math.max(0.14, (this.driverSharpeningPct / 100) * 0.65);
+      this.cinematicPass.uniforms.uChromatic.value = this.chromaticAberration ? 0.0024 : 0.001;
+    }
     const upLabel =
       this.upscalingMode === 'native'
         ? 'Native 100%'
@@ -5800,6 +6004,9 @@ export class GameBenchService {
   public setDriverSharpeningPct(pct: number): void {
     this.driverSharpeningPct = Math.max(0, Math.min(100, Math.round(pct)));
     this.metrics.driverSharpeningPct = this.driverSharpeningPct;
+    if (this.cinematicPass) {
+      this.cinematicPass.uniforms.uSharpen.value = Math.max(0.14, (this.driverSharpeningPct / 100) * 0.65);
+    }
     this.emitMetrics();
   }
 
@@ -5811,6 +6018,9 @@ export class GameBenchService {
     this.metrics[filter] = enabled;
     if (filter === 'lensFlare') {
       this.setBloomEnabled(enabled);
+    }
+    if (filter === 'chromaticAberration' && this.cinematicPass) {
+      this.cinematicPass.uniforms.uChromatic.value = enabled ? 0.0024 : 0.001;
     }
     this.recomputeGraphicsPipelineMetrics();
     this.emitMetrics();
@@ -6223,6 +6433,15 @@ export class GameBenchService {
       clearTimeout(this.uncappedTimer);
       this.uncappedTimer = null;
     }
+    if (this.pendingGpuSync && this.renderer) {
+      try {
+        const gl = this.renderer.getContext() as WebGL2RenderingContext;
+        gl.deleteSync?.(this.pendingGpuSync);
+      } catch {
+        // ignore lost context
+      }
+      this.pendingGpuSync = null;
+    }
     this.metrics.running = false;
     this.emitMetrics();
   }
@@ -6239,11 +6458,13 @@ export class GameBenchService {
     return this.getMetrics();
   }
 
-  private scheduleLoop(): void {
+  private scheduleLoop(forceRaf = false): void {
     if (!this.running) return;
-    if (this.fpsMode === 'uncapped' && this.fpsCap === 0) {
+    const now = performance.now();
+    if (this.fpsMode === 'uncapped' && this.fpsCap === 0 && !forceRaf && now - this.lastUiYieldTs < 16) {
       this.uncappedTimer = window.setTimeout(() => this.tickLoop(), 0);
     } else {
+      this.lastUiYieldTs = now;
       this.rafId = requestAnimationFrame(() => this.tickLoop());
     }
   }
@@ -6407,7 +6628,10 @@ export class GameBenchService {
         this.composer = null;
         this.composerRT?.dispose();
         this.composerRT = null;
+        this.bloomPass?.dispose();
         this.bloomPass = null;
+        this.cinematicPass?.dispose();
+        this.cinematicPass = null;
         try {
           this.renderer.render(this.scene, this.camera);
         } catch {
@@ -6438,6 +6662,15 @@ export class GameBenchService {
     if (this.causticMat) this.causticMat.uniforms.uTime.value = this.simTime;
     if (this.lavaMat) this.lavaMat.uniforms.uTime.value = this.simTime;
     if (this.plasmaMat) this.plasmaMat.uniforms.uTime.value = this.simTime;
+    for (const fxMat of this.animatedFxMats) {
+      if (fxMat.uniforms.uTime) fxMat.uniforms.uTime.value = this.simTime;
+    }
+    if (this.cinematicPass) {
+      const baseCa = this.chromaticAberration ? 0.0024 : 0.001;
+      const targetCa = now < this.nitroBurstUntilTs ? baseCa + 0.0022 : baseCa;
+      const curCa = Number(this.cinematicPass.uniforms.uChromatic.value) || baseCa;
+      this.cinematicPass.uniforms.uChromatic.value = curCa + (targetCa - curCa) * Math.min(1, dt * 8);
+    }
 
     this.fireCooldown = Math.max(0, this.fireCooldown - dt);
     this.rocketCooldown = Math.max(0, this.rocketCooldown - dt);
@@ -7299,25 +7532,24 @@ export class GameBenchService {
       }
     }
 
-    // Hardware-synchronized GPU frame render & measurement
-    const gl = this.renderer.getContext();
+    // Non-blocking GPU frame submission (never stall main thread with synchronous gl.finish())
+    const gl = this.renderer.getContext() as WebGL2RenderingContext;
     const frameStart = performance.now();
     this.renderFrameOnce();
-    if (this.fpsMode === 'uncapped') {
-      gl.finish();
+    let activeSync: WebGLSync | null = null;
+    if (this.fpsMode === 'uncapped' && typeof gl.fenceSync === 'function') {
+      activeSync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+      gl.flush();
     }
-    const frameMs = Math.max(0.2, performance.now() - frameStart);
 
     this.windowFrames++;
+    const elapsedWindowMs = performance.now() - this.windowStartTs;
+    const frameMs = Math.max(0.25, elapsedWindowMs / Math.max(1, this.windowFrames));
     this.frameTimes.push(frameMs);
     if (this.frameTimes.length > 140) this.frameTimes.shift();
 
-    const elapsedWindowMs = performance.now() - this.windowStartTs;
-    if (elapsedWindowMs >= 350) {
-      const curFps =
-        this.fpsMode === 'uncapped'
-          ? Math.max(1, Math.round(1000 / Math.max(0.25, this.frameTimes.slice(-12).reduce((s, v) => s + v, 0) / Math.min(12, this.frameTimes.length))))
-          : Math.max(1, Math.round((this.windowFrames * 1000) / elapsedWindowMs));
+    if (elapsedWindowMs >= 260 || (this.fpsSamples.length === 0 && elapsedWindowMs >= 100)) {
+      const curFps = Math.max(1, Math.min(2400, Math.round((this.windowFrames * 1000) / elapsedWindowMs)));
       this.windowFrames = 0;
       this.windowStartTs = performance.now();
       this.fpsSamples.push(curFps);
@@ -7431,7 +7663,54 @@ export class GameBenchService {
       this.emitMetrics();
     }
 
-    this.scheduleLoop();
+    if (activeSync && this.renderer) {
+      this.pendingGpuSync = activeSync;
+      const pollFence = (fromRaf: boolean) => {
+        if (!this.running || !this.renderer || this.pendingGpuSync !== activeSync) {
+          try {
+            gl.deleteSync(activeSync);
+          } catch {
+            // ignore
+          }
+          return;
+        }
+        const waitedMs = performance.now() - frameStart;
+        let signaled = false;
+        try {
+          if (typeof gl.clientWaitSync === 'function') {
+            const waitRes = gl.clientWaitSync(activeSync, 0, 0);
+            signaled = waitRes === gl.ALREADY_SIGNALED || waitRes === gl.CONDITION_SATISFIED;
+          } else {
+            signaled = gl.getSyncParameter(activeSync, gl.SYNC_STATUS) === gl.SIGNALED;
+          }
+        } catch {
+          signaled = true;
+        }
+        if (!signaled && waitedMs < 450) {
+          if (waitedMs >= 8) {
+            this.rafId = requestAnimationFrame(() => pollFence(true));
+          } else {
+            this.uncappedTimer = window.setTimeout(() => pollFence(false), 2);
+          }
+          return;
+        }
+        try {
+          gl.deleteSync(activeSync);
+        } catch {
+          // ignore
+        }
+        this.pendingGpuSync = null;
+        if (fromRaf) {
+          this.lastUiYieldTs = performance.now();
+          this.tickLoop();
+        } else {
+          this.scheduleLoop(waitedMs >= 14);
+        }
+      };
+      this.uncappedTimer = window.setTimeout(() => pollFence(false), 1);
+    } else {
+      this.scheduleLoop();
+    }
   }
 
   private handleResize(): void {
@@ -7454,6 +7733,10 @@ export class GameBenchService {
 
   public unmount(): void {
     this.stop();
+    if (this.fsChangeListener) {
+      document.removeEventListener('fullscreenchange', this.fsChangeListener);
+      this.fsChangeListener = null;
+    }
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
 
@@ -7468,7 +7751,10 @@ export class GameBenchService {
     this.composer = null;
     this.composerRT?.dispose();
     this.composerRT = null;
+    this.bloomPass?.dispose();
     this.bloomPass = null;
+    this.cinematicPass?.dispose();
+    this.cinematicPass = null;
     this.envRT?.dispose();
     this.envRT = null;
     this.renderer?.dispose();
