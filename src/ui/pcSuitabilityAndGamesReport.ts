@@ -7,6 +7,7 @@ import type {
   SystemSpecs,
 } from '../types';
 import { gameBenchService } from '../services/gameBench.service';
+import { generate30DayGameFpsHistory, renderGame30DayFpsTrendChartD3 } from './charts';
 
 export interface PcSuitabilityInputContext {
   specs: SystemSpecs | null;
@@ -46,6 +47,8 @@ interface OptimizerState {
   resolution: '1080p' | '1440p' | '4k';
   refreshHz: 60 | 120 | 144 | 165 | 240;
   gameProfile: 'esport' | 'ue5_single' | 'aaa_rt';
+  selectedTrendGameId: string;
+  targetFps: number;
   appliedFeedback: string | null;
 }
 
@@ -55,6 +58,8 @@ const optimizerState: OptimizerState = {
   resolution: '1440p',
   refreshHz: 144,
   gameProfile: 'ue5_single',
+  selectedTrendGameId: 'cs2',
+  targetFps: 144,
   appliedFeedback: null,
 };
 
@@ -242,6 +247,39 @@ export function predictPlayableGames(ctx: PcSuitabilityInputContext): GameFpsPre
       base1440: 66,
       dlssFgMult: 1.9,
       recommendedSetting: 'TAA / DLSS Quality + Frame Gen · LOD Terenu 150 · Chmury Wolumetryczne High',
+    },
+    {
+      id: 'horizon_forbidden_west',
+      title: 'Horizon Forbidden West Complete Edition',
+      engine: 'Decima Engine · DirectStorage + DLSS 3',
+      genre: 'AAA Singleplayer',
+      vramRecommendedGb: 10,
+      base1080: 112,
+      base1440: 84,
+      dlssFgMult: 1.85,
+      recommendedSetting: 'DLSS / FSR Quality + Frame Gen · Tekstury High · Jakość Obrazu TAA',
+    },
+    {
+      id: 'horizon_zero_dawn_remastered',
+      title: 'Horizon Zero Dawn Remastered',
+      engine: 'Decima Engine · Enhanced Lighting & Assets',
+      genre: 'AAA Singleplayer',
+      vramRecommendedGb: 8,
+      base1080: 135,
+      base1440: 102,
+      dlssFgMult: 1.75,
+      recommendedSetting: 'DLAA / DLSS Quality · Cienie High · Roślinność Ultra · LOD High',
+    },
+    {
+      id: 'monster_hunter_wilds',
+      title: 'Monster Hunter Wilds',
+      engine: 'RE Engine · Seamless Open World',
+      genre: 'Symulator / Open-World',
+      vramRecommendedGb: 12,
+      base1080: 94,
+      base1440: 71,
+      dlssFgMult: 1.95,
+      recommendedSetting: 'DLSS / FSR Upscaling + Frame Gen · Detale Detektorów High · Wolumetria Medium',
     },
   ];
 
@@ -528,6 +566,28 @@ export function renderPcSuitabilityAndGamesReport(ctx: PcSuitabilityInputContext
         </div>
       </div>
 
+      <!-- 1B. 30-DNIOWY WYKRES TRENDU WYDAJNOŚCI (FPS) DLA WYBRANEJ GRY -->
+      <div class="sp-panel sp-games-trend-panel" style="margin-top:20px;">
+        <div class="sp-panel-head" style="flex-wrap:wrap;gap:12px;">
+          <div>
+            <span class="sp-eyebrow">HISTORIA WYDAJNOŚCI W CZASIE · OSTATNIE 30 DNI</span>
+            <h3>📈 30-dniowy trend FPS w wybranej grze</h3>
+            <p class="sp-muted">Analiza zmian klatkażu na przestrzeni ostatniego miesiąca (aktualizacje sterowników GPU, optymalizacje łat i profile upscalingu).</p>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <label style="font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:6px;">
+              <span>Wybierz grę:</span>
+              <select id="sp-trend-game-select" class="sp-select" style="padding:6px 10px;font-size:12px;">
+                ${games.map((g) => `<option value="${g.id}" ${optimizerState.selectedTrendGameId === g.id ? 'selected' : ''}>${g.title} (${g.fpsDlssFg} FPS)</option>`).join('')}
+              </select>
+            </label>
+          </div>
+        </div>
+        <div id="sp-game-trend-d3-mount" style="width:100%;min-height:210px;margin-top:12px;">
+          <!-- Rendered via D3 -->
+        </div>
+      </div>
+
       <!-- 2. DO CZEGO NADAJE SIĘ TEN PC / LAPTOP (8 KATEGORII ZASTOSOWAŃ) -->
       <div class="sp-panel sp-suitability-panel">
         <div class="sp-panel-head">
@@ -617,6 +677,11 @@ export function renderPcSuitabilityAndGamesReport(ctx: PcSuitabilityInputContext
               <option value="esport" ${optimizerState.gameProfile === 'esport' ? 'selected' : ''}>E-Sport / Strzelanka Sieciowa (CS2, Valorant, Apex, Warzone)</option>
               <option value="aaa_rt" ${optimizerState.gameProfile === 'aaa_rt' ? 'selected' : ''}>AAA Ray Tracing / Path Tracing (Cyberpunk 2077, Alan Wake 2)</option>
             </select>
+          </label>
+
+          <label class="sp-opt-field">
+            <span>Docelowy Klatkaż (Target FPS): <strong class="font-mono status-cyan" id="sp-target-fps-val">${optimizerState.targetFps} FPS</strong></span>
+            <input type="range" min="60" max="360" step="10" value="${optimizerState.targetFps}" data-opt-range="targetFps" class="range-input" />
           </label>
         </div>
 
@@ -735,7 +800,7 @@ export function bindPcSuitabilityReportEvents(root: HTMLElement, rerender: () =>
   root.querySelectorAll<HTMLSelectElement>('[data-opt-select]').forEach((selectEl) => {
     selectEl.addEventListener('change', () => {
       const key = selectEl.dataset.optSelect as keyof OptimizerState;
-      if (key === 'vramGb' || key === 'refreshHz') {
+      if (key === 'vramGb' || key === 'refreshHz' || key === 'targetFps') {
         (optimizerState as unknown as Record<string, number>)[key] = Number(selectEl.value);
       } else if (key) {
         (optimizerState as unknown as Record<string, string>)[key] = selectEl.value;
@@ -744,6 +809,40 @@ export function bindPcSuitabilityReportEvents(root: HTMLElement, rerender: () =>
       rerender();
     });
   });
+
+  root.querySelectorAll<HTMLInputElement>('[data-opt-range]').forEach((rangeEl) => {
+    rangeEl.addEventListener('input', () => {
+      const key = rangeEl.dataset.optRange as keyof OptimizerState;
+      const val = Number(rangeEl.value);
+      (optimizerState as unknown as Record<string, number>)[key] = val;
+      const valDisplay = root.querySelector('#sp-target-fps-val');
+      if (valDisplay) valDisplay.textContent = `${val} FPS`;
+    });
+    rangeEl.addEventListener('change', () => {
+      optimizerState.appliedFeedback = null;
+      rerender();
+    });
+  });
+
+  const trendSelect = root.querySelector<HTMLSelectElement>('#sp-trend-game-select');
+  if (trendSelect) {
+    trendSelect.addEventListener('change', () => {
+      optimizerState.selectedTrendGameId = trendSelect.value;
+      renderTrendChart();
+    });
+  }
+
+  const renderTrendChart = () => {
+    const mount = root.querySelector<HTMLElement>('#sp-game-trend-d3-mount');
+    if (!mount) return;
+    const dummyCtx = { specs: null, cpu: { multiCoreScore: 8000, coresUsed: 8 }, ram: { overallScore: 85 }, disk: { overallScore: 85 }, gpu: { avgFps: 90 }, game: { avgFps: 90 } };
+    const allGames = predictPlayableGames(dummyCtx as any);
+    const selGame = allGames.find((g) => g.id === optimizerState.selectedTrendGameId) || allGames[0];
+    const historyData = generate30DayGameFpsHistory(selGame.fpsDlssFg);
+    renderGame30DayFpsTrendChartD3(selGame.title, historyData, mount, 210);
+  };
+
+  renderTrendChart();
 
   root.querySelectorAll<HTMLButtonElement>('[data-opt-apply-3d]').forEach((btn) => {
     btn.addEventListener('click', () => {

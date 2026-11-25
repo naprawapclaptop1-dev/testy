@@ -234,6 +234,10 @@ export interface GpuTelemetryPoint {
   fps: number;
   frameTimeMs: number;
   estTempC: number;
+  allocatedVramMB: number;
+  textureVramMB: number;
+  coreClockMhz: number;
+  thermalThrottle: boolean;
 }
 
 export type GpuSceneMode =
@@ -311,6 +315,11 @@ export interface GpuStressMetrics {
   rendererName: string;
   estFp32Tflops?: number;
   vramFillrateGBs?: number;
+  allocatedVramMB: number;
+  textureVramMB: number;
+  coreClockMhz: number;
+  thermalThrottleActive: boolean;
+  thermalThrottleRecent60s: boolean;
   telemetry: GpuTelemetryPoint[];
   overallScore: number;
   verdict: 'STABILNY' | 'LEKKI SPADEK' | 'THROTTLING / PRZECIĄŻENIE' | 'OCZEKIWANIE';

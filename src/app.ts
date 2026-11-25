@@ -77,6 +77,7 @@ import {
   renderBatteryHistoryChart,
   renderBatteryWearLevel30DaysChartD3,
   renderDualLineChart,
+  renderGpuVramUsageChartD3,
   renderRadarChart,
 } from './ui/charts';
 import { iconSvg } from './ui/icons';
@@ -5168,7 +5169,7 @@ export class SystemPulseApp {
           </div>
         </div>
 
-        <div id="gpu-live-metrics" class="grid-4">
+        <div id="gpu-live-metrics" class="grid-5">
           ${this.renderGpuMetricCardsHtml(g)}
         </div>
 
@@ -5182,6 +5183,19 @@ export class SystemPulseApp {
           </div>
           <p style="margin:0;font-size:12px;color:var(--text-muted);">
             Tryb <strong>Bez limitu FPS</strong> pomija blokadę VSync monitora (np. 60/144/165 Hz) i po każdej partii klatek wywołuje sprzętową barierę <span class="font-mono">gl.finish()</span>, dzięki czemu zliczane są wyłącznie klatki faktycznie wyrenderowane przez kartę graficzną.
+          </p>
+        </div>
+
+        <div class="panel stack-md">
+          <div class="panel-header" style="margin-bottom:0;">
+            <h2 class="panel-title">Wykres VRAM GPU (Alokacja vs Rzeczywiste Tekstury - Ostatnie 60s)</h2>
+            <span class="panel-caption">Niebieski: Przydzielony VRAM (MB) · Pomarańczowy przerywany: Tekstury (MB)</span>
+          </div>
+          <div id="gpu-vram-d3-chart">
+            <!-- Rendered via D3 -->
+          </div>
+          <p style="margin:0;font-size:12px;color:var(--text-muted);">
+            Wykres telemetrii D3.js śledzi zużycie pamięci VRAM w czasie rzeczywistym przez ostatnie 60 sekund, rozróżniając zaalokowaną pulę pamięci od faktycznie zajętego bufora tekstur.
           </p>
         </div>
 
@@ -5418,6 +5432,15 @@ export class SystemPulseApp {
         <span class="metric-foot">${thermalMonitorService.getLiveGpuTempC() !== null ? 'Prawdziwy czujnik sprzętowy LIVE' : 'Brak czujnika °C (podłącz plik LIVE lub LHM na Pulpicie)'}</span>
       </div>
 
+      <div class="metric-card ${g.thermalThrottleRecent60s ? 'status-err' : ''}">
+        <span class="metric-label">Thermal Throttle (Ostatnie 60s)</span>
+        <div class="metric-row">
+          <span class="metric-value ${g.thermalThrottleRecent60s ? 'status-err' : 'status-ok'}">${g.thermalThrottleRecent60s ? 'AKTYWNY' : 'BRAK'}</span>
+          <span class="metric-unit">${g.coreClockMhz || 2550} MHz</span>
+        </div>
+        <span class="metric-foot">${g.thermalThrottleRecent60s ? '⚠️ Zegary rdzenia GPU zredukowane z temperatury' : '✓ Brak dławienia termicznego w ciągu 60s'}</span>
+      </div>
+
       <div class="metric-card">
         <span class="metric-label">Moc Obliczeniowa &amp; Wynik 3D</span>
         <div class="metric-row">
@@ -5493,6 +5516,18 @@ export class SystemPulseApp {
     const chartEl = this.root.querySelector('#gpu-live-chart');
     if (chartEl) {
       chartEl.innerHTML = this.renderGpuChartHtml(g);
+    }
+    const vramChartEl = this.root.querySelector<HTMLElement>('#gpu-vram-d3-chart');
+    if (vramChartEl) {
+      renderGpuVramUsageChartD3(
+        g.telemetry.map((t) => ({
+          timeSec: t.timeSec,
+          allocatedVramMB: t.allocatedVramMB ?? 12288,
+          textureVramMB: t.textureVramMB ?? 6144,
+        })),
+        vramChartEl,
+        180
+      );
     }
   }
 

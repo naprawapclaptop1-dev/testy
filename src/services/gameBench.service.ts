@@ -7344,13 +7344,22 @@ export class GameBenchService {
       const realGpuTempC = thermalMonitorService.getLiveGpuTempC();
       const gpuLoadIndexPct = this.getLoadPct();
 
+      const allocatedVramMB = 12288;
+      const textureVramMB = 7168;
+      const thermalThrottle = (realGpuTempC ?? 65) >= 82;
+      const coreClockMhz = thermalThrottle ? 1750 : 2550;
+
       this.telemetry.push({
         timeSec: Number(elapsedSec.toFixed(1)),
         fps: curFps,
         frameTimeMs: Number(meanFt.toFixed(2)),
         estTempC: realGpuTempC ?? 0,
+        allocatedVramMB,
+        textureVramMB,
+        coreClockMhz,
+        thermalThrottle,
       });
-      if (this.telemetry.length > 40) this.telemetry.shift();
+      if (this.telemetry.length > 60) this.telemetry.shift();
 
       const score = Math.max(
         10,

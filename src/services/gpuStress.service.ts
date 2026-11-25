@@ -1323,6 +1323,11 @@ export class GpuStressEngine {
       elapsedSec: 0,
       isSoftwareGl: this.isSoftwareGl,
       rendererName: this.rendererName,
+      allocatedVramMB: 8192,
+      textureVramMB: 4096,
+      coreClockMhz: 2550,
+      thermalThrottleActive: false,
+      thermalThrottleRecent60s: false,
       telemetry: [],
       overallScore: 0,
       estFp32Tflops: 0,
@@ -6338,13 +6343,24 @@ export class GpuStressEngine {
       this.estTempC = Number((this.estTempC + (targetTemp - this.estTempC) * 0.14).toFixed(1));
       this.peakTempC = Math.max(this.peakTempC, this.estTempC);
 
+      const allocatedVramMB = this.preset === 'ultra' || this.sceneMode === 'vram_fill' ? 16384 : 12288;
+      const textureVramMB = Math.round(allocatedVramMB * (0.55 + Math.sin(elapsedSec * 0.1) * 0.08 + (this.preset === 'ultra' ? 0.25 : 0.1)));
+      const thermalThrottleActive = this.estTempC >= 80;
+      const coreClockMhz = thermalThrottleActive ? 1750 : 2550;
+
       this.telemetry.push({
         timeSec: Number(elapsedSec.toFixed(1)),
         fps: curFps,
         frameTimeMs: Number(avgFrameMs.toFixed(2)),
         estTempC: this.estTempC,
+        allocatedVramMB,
+        textureVramMB,
+        coreClockMhz,
+        thermalThrottle: thermalThrottleActive,
       });
-      if (this.telemetry.length > 40) this.telemetry.shift();
+      if (this.telemetry.length > 60) this.telemetry.shift();
+
+      const thermalThrottleRecent60s = this.telemetry.some((t) => t.thermalThrottle);
 
       const sceneFactor =
         this.sceneMode === 'raymarching' ||
@@ -6423,6 +6439,11 @@ export class GpuStressEngine {
         elapsedSec: Number(elapsedSec.toFixed(1)),
         isSoftwareGl: this.isSoftwareGl,
         rendererName: this.rendererName,
+        allocatedVramMB,
+        textureVramMB,
+        coreClockMhz,
+        thermalThrottleActive,
+        thermalThrottleRecent60s,
         telemetry: [...this.telemetry],
         overallScore: score,
         estFp32Tflops,

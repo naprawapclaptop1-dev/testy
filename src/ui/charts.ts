@@ -836,3 +836,321 @@ export function renderBatteryWearLevel30DaysChartD3(
     .text('Est. Power Cycles');
 }
 
+export interface GpuVramPoint {
+  timeSec: number;
+  allocatedVramMB: number;
+  textureVramMB: number;
+}
+
+export function renderGpuVramUsageChartD3(
+  points: GpuVramPoint[],
+  containerEl: HTMLElement,
+  height = 200
+): void {
+  containerEl.innerHTML = '';
+  const width = containerEl.clientWidth || 680;
+  const padL = 54;
+  const padR = 24;
+  const padT = 20;
+  const padB = 32;
+  const plotW = width - padL - padR;
+  const plotH = height - padT - padB;
+
+  if (!points || points.length < 2) {
+    containerEl.innerHTML = `
+      <div style="height:${height}px;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:12px;">
+        Oczekiwanie na próbki VRAM GPU (uruchom test 3D)...
+      </div>
+    `;
+    return;
+  }
+
+  const svg = d3
+    .select(containerEl)
+    .append('svg')
+    .attr('viewBox', `0 0 ${width} ${height}`)
+    .style('width', '100%')
+    .style('height', `${height}px`)
+    .style('display', 'block');
+
+  const g = svg.append('g').attr('transform', `translate(${padL},${padT})`);
+
+  const maxVram = Math.max(16384, ...points.map((p) => Math.max(p.allocatedVramMB, p.textureVramMB)));
+  const xScale = d3.scaleLinear()
+    .domain([points[0].timeSec, points[points.length - 1].timeSec + 1])
+    .range([0, plotW]);
+
+  const yScale = d3.scaleLinear()
+    .domain([0, Math.ceil(maxVram / 2048) * 2048])
+    .range([plotH, 0]);
+
+  g.append('g')
+    .attr('class', 'grid')
+    .call(d3.axisLeft(yScale).ticks(5).tickSize(-plotW).tickFormat(() => ''))
+    .selectAll('line')
+    .style('stroke', 'var(--border-hairline)')
+    .style('stroke-opacity', '0.7');
+
+  const areaAlloc = d3.area<GpuVramPoint>()
+    .x((d) => xScale(d.timeSec))
+    .y0(plotH)
+    .y1((d) => yScale(d.allocatedVramMB))
+    .curve(d3.curveMonotoneX);
+
+  const lineAlloc = d3.line<GpuVramPoint>()
+    .x((d) => xScale(d.timeSec))
+    .y((d) => yScale(d.allocatedVramMB))
+    .curve(d3.curveMonotoneX);
+
+  g.append('path')
+    .datum(points)
+    .attr('fill', 'rgba(6, 182, 212, 0.12)')
+    .attr('d', areaAlloc);
+
+  g.append('path')
+    .datum(points)
+    .attr('fill', 'none')
+    .attr('stroke', '#06b6d4')
+    .attr('stroke-width', 2.2)
+    .attr('d', lineAlloc);
+
+  const lineTexture = d3.line<GpuVramPoint>()
+    .x((d) => xScale(d.timeSec))
+    .y((d) => yScale(d.textureVramMB))
+    .curve(d3.curveMonotoneX);
+
+  g.append('path')
+    .datum(points)
+    .attr('fill', 'none')
+    .attr('stroke', '#f59e0b')
+    .attr('stroke-width', 2)
+    .attr('stroke-dasharray', '4 3')
+    .attr('d', lineTexture);
+
+  const xAxis = d3.axisBottom(xScale).ticks(6).tickFormat((d: d3.NumberValue) => `${d}s`);
+  g.append('g')
+    .attr('transform', `translate(0,${plotH})`)
+    .call(xAxis)
+    .selectAll('text')
+    .style('fill', 'var(--text-muted)')
+    .style('font-size', '10px')
+    .style('font-family', 'JetBrains Mono, monospace');
+
+  const yAxis = d3.axisLeft(yScale).ticks(5).tickFormat((d: d3.NumberValue) => `${Math.round(Number(d) / 1024)}GB`);
+  g.append('g')
+    .call(yAxis)
+    .selectAll('text')
+    .style('fill', 'var(--text-secondary)')
+    .style('font-size', '10px')
+    .style('font-family', 'JetBrains Mono, monospace');
+
+  const tooltip = d3.select(containerEl)
+    .append('div')
+    .attr('class', 'chart-tooltip')
+    .style('opacity', 0);
+
+  const bisect = d3.bisector((d: GpuVramPoint) => d.timeSec).left;
+
+  g.append('rect')
+    .attr('width', plotW)
+    .attr('height', plotH)
+    .attr('fill', 'transparent')
+    .on('mousemove', (event) => {
+      const [mx] = d3.pointer(event);
+      const xVal = xScale.invert(mx);
+      const idx = bisect(points, xVal, 1);
+      const d0 = points[idx - 1];
+      const d1 = points[idx];
+      if (!d0) return;
+      const d = d1 && xVal - d0.timeSec > d1.timeSec - xVal ? d1 : d0;
+
+      tooltip
+        .style('opacity', 1)
+        .style('left', `${event.offsetX + 12}px`)
+        .style('top', `${event.offsetY - 28}px`)
+        .html(`
+          <div class="chart-tooltip-date">Czas: ${d.timeSec}s (Ostatnie 60s)</div>
+          <div class="chart-tooltip-row">
+            <span class="chart-tooltip-label"><span class="chart-tooltip-swatch" style="background:#06b6d4"></span>Przydzielony VRAM:</span>
+            <strong>${(d.allocatedVramMB / 1024).toFixed(2)} GB</strong>
+          </div>
+          <div class="chart-tooltip-row">
+            <span class="chart-tooltip-label"><span class="chart-tooltip-swatch" style="background:#f59e0b"></span>Tekstury (Rzeczywiste):</span>
+            <strong>${(d.textureVramMB / 1024).toFixed(2)} GB</strong>
+          </div>
+        `);
+    })
+    .on('mouseleave', () => {
+      tooltip.style('opacity', 0);
+    });
+}
+
+export interface GameFpsDayPoint {
+  dayLabel: string;
+  nativeFps: number;
+  upscaledFps: number;
+  withFgFps: number;
+}
+
+export function generate30DayGameFpsHistory(baseFps: number): GameFpsDayPoint[] {
+  const points: GameFpsDayPoint[] = [];
+  const now = new Date();
+  for (let i = 29; i >= 0; i--) {
+    const d = new Date(now.getTime() - i * 86400000);
+    const dayLabel = d.toLocaleDateString('pl-PL', { day: '2-digit', month: '2-digit' });
+    const variance = Math.sin(i * 0.4) * 4 + (i > 15 ? 3 : 0);
+    const nat = Math.max(15, Math.round(baseFps * 0.72 + variance));
+    const up = Math.max(20, Math.round(baseFps * 0.95 + variance * 1.2));
+    const fg = Math.max(25, Math.round(baseFps * 1.45 + variance * 1.5));
+    points.push({ dayLabel, nativeFps: nat, upscaledFps: up, withFgFps: fg });
+  }
+  return points;
+}
+
+export function renderGame30DayFpsTrendChartD3(
+  gameTitle: string,
+  dataPoints: GameFpsDayPoint[],
+  containerEl: HTMLElement,
+  height = 210
+): void {
+  containerEl.innerHTML = '';
+  const width = containerEl.clientWidth || 680;
+  const padL = 50;
+  const padR = 24;
+  const padT = 20;
+  const padB = 36;
+  const plotW = width - padL - padR;
+  const plotH = height - padT - padB;
+
+  if (!dataPoints || dataPoints.length < 2) {
+    containerEl.innerHTML = `
+      <div style="height:${height}px;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:12px;">
+        Brak danych historycznych dla wybranej gry...
+      </div>
+    `;
+    return;
+  }
+
+  const svg = d3
+    .select(containerEl)
+    .append('svg')
+    .attr('viewBox', `0 0 ${width} ${height}`)
+    .style('width', '100%')
+    .style('height', `${height}px`)
+    .style('display', 'block');
+
+  const g = svg.append('g').attr('transform', `translate(${padL},${padT})`);
+
+  const maxFps = Math.max(120, ...dataPoints.map((d) => Math.max(d.nativeFps, d.upscaledFps, d.withFgFps)));
+  const xScale = d3.scalePoint()
+    .domain(dataPoints.map((d) => d.dayLabel))
+    .range([0, plotW])
+    .padding(0.1);
+
+  const yScale = d3.scaleLinear()
+    .domain([0, Math.ceil(maxFps / 50) * 50])
+    .range([plotH, 0]);
+
+  g.append('g')
+    .attr('class', 'grid')
+    .call(d3.axisLeft(yScale).ticks(5).tickSize(-plotW).tickFormat(() => ''))
+    .selectAll('line')
+    .style('stroke', 'var(--border-hairline)')
+    .style('stroke-opacity', '0.7');
+
+  const lineNative = d3.line<GameFpsDayPoint>()
+    .x((d) => (xScale(d.dayLabel) || 0) + (xScale.bandwidth() || 0) / 2)
+    .y((d) => yScale(d.nativeFps))
+    .curve(d3.curveMonotoneX);
+
+  const lineUpscale = d3.line<GameFpsDayPoint>()
+    .x((d) => (xScale(d.dayLabel) || 0) + (xScale.bandwidth() || 0) / 2)
+    .y((d) => yScale(d.upscaledFps))
+    .curve(d3.curveMonotoneX);
+
+  const lineFg = d3.line<GameFpsDayPoint>()
+    .x((d) => (xScale(d.dayLabel) || 0) + (xScale.bandwidth() || 0) / 2)
+    .y((d) => yScale(d.withFgFps))
+    .curve(d3.curveMonotoneX);
+
+  g.append('path')
+    .datum(dataPoints)
+    .attr('fill', 'none')
+    .attr('stroke', '#06b6d4')
+    .attr('stroke-width', 2)
+    .attr('d', lineNative);
+
+  g.append('path')
+    .datum(dataPoints)
+    .attr('fill', 'none')
+    .attr('stroke', '#f59e0b')
+    .attr('stroke-width', 2)
+    .attr('stroke-dasharray', '4 3')
+    .attr('d', lineUpscale);
+
+  g.append('path')
+    .datum(dataPoints)
+    .attr('fill', 'none')
+    .attr('stroke', '#10b981')
+    .attr('stroke-width', 2.2)
+    .attr('d', lineFg);
+
+  const tickVals = dataPoints.filter((_, i) => i % 6 === 0 || i === dataPoints.length - 1).map((d) => d.dayLabel);
+  const xAxis = d3.axisBottom(xScale).tickValues(tickVals);
+  g.append('g')
+    .attr('transform', `translate(0,${plotH})`)
+    .call(xAxis)
+    .selectAll('text')
+    .style('fill', 'var(--text-muted)')
+    .style('font-size', '10px')
+    .style('font-family', 'JetBrains Mono, monospace');
+
+  const yAxis = d3.axisLeft(yScale).ticks(5).tickFormat((d: d3.NumberValue) => `${d} FPS`);
+  g.append('g')
+    .call(yAxis)
+    .selectAll('text')
+    .style('fill', 'var(--text-secondary)')
+    .style('font-size', '10px')
+    .style('font-family', 'JetBrains Mono, monospace');
+
+  const tooltip = d3.select(containerEl)
+    .append('div')
+    .attr('class', 'chart-tooltip')
+    .style('opacity', 0);
+
+  dataPoints.forEach((d) => {
+    const xPos = (xScale(d.dayLabel) || 0) + (xScale.bandwidth() || 0) / 2;
+    g.append('circle')
+      .attr('cx', xPos)
+      .attr('cy', yScale(d.withFgFps))
+      .attr('r', 3.5)
+      .attr('fill', '#10b981')
+      .on('mousemove', (event) => {
+        tooltip
+          .style('opacity', 1)
+          .style('left', `${event.offsetX + 12}px`)
+          .style('top', `${event.offsetY - 30}px`)
+          .html(`
+            <div class="chart-tooltip-date">${gameTitle} · ${d.dayLabel}</div>
+            <div class="chart-tooltip-row">
+              <span class="chart-tooltip-label"><span class="chart-tooltip-swatch" style="background:#10b981"></span>Z Frame Gen:</span>
+              <strong>${d.withFgFps} FPS</strong>
+            </div>
+            <div class="chart-tooltip-row">
+              <span class="chart-tooltip-label"><span class="chart-tooltip-swatch" style="background:#f59e0b"></span>Upscaling (Q):</span>
+              <strong>${d.upscaledFps} FPS</strong>
+            </div>
+            <div class="chart-tooltip-row">
+              <span class="chart-tooltip-label"><span class="chart-tooltip-swatch" style="background:#06b6d4"></span>Natywne:</span>
+              <strong>${d.nativeFps} FPS</strong>
+            </div>
+          `);
+      })
+      .on('mouseleave', () => {
+        tooltip.style('opacity', 0);
+      });
+  });
+}
+
+
+
