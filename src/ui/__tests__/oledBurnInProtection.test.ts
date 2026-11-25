@@ -3,6 +3,7 @@ import {
   DISPLAY_PATTERNS,
   DisplayDiagnosticController,
   OLED_PROTECTION_DURATION_SEC,
+  oledProtectionDurationSec,
   drawOledBurnInProtectionPattern,
   formatCountdownMmSs,
 } from '../displayDiagnostics';
@@ -233,5 +234,71 @@ describe('OLED Burn-in Protection Mode', () => {
     expect(onComplete).not.toHaveBeenCalled();
     expect(onStop).toHaveBeenCalledWith(false);
     expect(bodyChildren.length).toBe(0);
+  });
+
+  it('renders a visual remaining-time progress indicator inside .oled-protection-hud that depletes from 100% to 0%', () => {
+    const { bodyChildren } = setupFakeDom();
+    const controller = new DisplayDiagnosticController();
+
+    controller.startOledBurnInProtection({ durationSec: 100 });
+
+    const overlay = bodyChildren[0];
+    const hud = overlay.children.find((el) => el.className.includes('oled-protection-hud'));
+    expect(hud).toBeDefined();
+
+    const progressWrap = hud!.children.find((el) => el.className.includes('oled-hud-progress-wrap'));
+    expect(progressWrap).toBeDefined();
+
+    const track = progressWrap!.children.find((el) => el.className.includes('oled-hud-progress-track'));
+    const pctLabel = progressWrap!.children.find((el) => el.className.includes('oled-hud-remaining-pct'));
+    expect(track).toBeDefined();
+    expect(pctLabel).toBeDefined();
+
+    const fill = track!.children.find((el) => el.className.includes('oled-hud-progress-fill'));
+    expect(fill).toBeDefined();
+
+    // Initially 100% remaining
+    expect(fill!.style.width).toBe('100%');
+    expect(pctLabel!.textContent).toBe('100%');
+    expect(track!.dataset.remainingState).toBe('high');
+
+    // After 75s of 100s -> 25% remaining (mid state)
+    vi.advanceTimersByTime(75 * 1000);
+    expect(fill!.style.width).toBe('25.0%');
+    expect(pctLabel!.textContent).toBe('25%');
+    expect(track!.dataset.remainingState).toBe('mid');
+
+    // After 95s of 100s -> 5% remaining (low state)
+    vi.advanceTimersByTime(20 * 1000);
+    expect(fill!.style.width).toBe('5.0%');
+    expect(pctLabel!.textContent).toBe('5%');
+    expect(track!.dataset.remainingState).toBe('low');
+
+    controller.stopOledBurnInProtection(false);
+  });
+
+  it('displays a dynamic MM:SS countdown element inside .oled-protection-hud synced with oledProtectionDurationSec', () => {
+    const { bodyChildren } = setupFakeDom();
+    const controller = new DisplayDiagnosticController();
+
+    expect(oledProtectionDurationSec).toBe(OLED_PROTECTION_DURATION_SEC);
+    controller.startOledBurnInProtection();
+
+    const overlay = bodyChildren[0];
+    const hud = overlay.children.find((el) => el.className.includes('oled-protection-hud'));
+    const timer = hud!.children.find((el) => el.className.includes('oled-hud-timer'));
+    expect(timer).toBeDefined();
+    expect(timer!.dataset.durationSec).toBe(String(oledProtectionDurationSec));
+
+    const countdown = timer!.children.find((el) => el.className.includes('oled-hud-countdown'));
+    expect(countdown).toBeDefined();
+    expect(countdown!.textContent).toBe(formatCountdownMmSs(oledProtectionDurationSec));
+
+    // Advance 1 minute and 15 seconds (75s)
+    vi.advanceTimersByTime(75 * 1000);
+    expect(countdown!.textContent).toBe(formatCountdownMmSs(oledProtectionDurationSec - 75));
+    expect(countdown!.dataset.remainingMmss).toBe('58:45');
+
+    controller.stopOledBurnInProtection(false);
   });
 });

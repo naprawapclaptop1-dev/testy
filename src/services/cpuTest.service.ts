@@ -727,7 +727,7 @@ export class CpuTestService {
         const estClock = Number((baseClock * (0.88 + ratio * 0.18)).toFixed(2));
 
         state.telemetry = [
-          ...state.telemetry.slice(-29),
+          ...state.telemetry.slice(-599),
           {
             timeSec: tickNum,
             loadPct: Math.round(95 + Math.random() * 5),

@@ -18,6 +18,7 @@ interface ZipEntryInput {
 let cachedBundleJs = '';
 let cachedStylesCss = '';
 let preloadPromise: Promise<void> | null = null;
+let preloadInFlight = false;
 
 function collectDocumentStylesFallback(): string {
   if (typeof document === 'undefined') {
@@ -46,8 +47,10 @@ function collectDocumentStylesFallback(): string {
 
 export async function preloadPortableAssets(): Promise<void> {
   if (typeof window === 'undefined' || typeof fetch === 'undefined') return;
-  if (preloadPromise && cachedBundleJs.length > 1000) return preloadPromise;
+  if (cachedBundleJs.length > 1000 && cachedStylesCss.length > 200) return;
+  if (preloadPromise && preloadInFlight) return preloadPromise;
 
+  preloadInFlight = true;
   preloadPromise = (async () => {
     try {
       const jsCandidates = ['./portable-bundle.js', '/portable-bundle.js'];
@@ -80,6 +83,8 @@ export async function preloadPortableAssets(): Promise<void> {
       }
     } catch {
       // Fallback handled at zip build time
+    } finally {
+      preloadInFlight = false;
     }
   })();
 
@@ -214,8 +219,6 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     .replace(/export\s*\{[^}]*\}\s*;?\s*$/u, '')
     .replace(/import\.meta\.env/gu, '({DEV:false,PROD:true,MODE:"production"})')
     .replace(/import\.meta\.url/gu, '(window.location.href)');
-  const safeInlineStyle = stylesContent.replace(/<\/style/giu, '<\\/style');
-  const safeInlineScript = bundleJsContent.replace(/<\/script/giu, '<\\/script');
 
   const standaloneAppHtml = `<!doctype html>
 <html lang="pl" class="dark">
@@ -225,7 +228,6 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     <title>SystemPulse Pro — Diagnostyka Sprzętu i Benchmarki 3D (Standalone Desktop Edition)</title>
     <meta name="description" content="SystemPulse Pro — 40 scen GPU 3D WebGL, 28 światów i wyścigów Gra 3D MAX, Zasilacz PC ATX PSU, CPU 10-Test, RAM MemTest86+, Dysk QD64 i Speed Test 10 Gbps." />
     <link rel="stylesheet" href="./portable-styles.css" />
-    <style>${safeInlineStyle}</style>
   </head>
   <body style="margin:0;background:#070b14;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;">
     <div id="root">
@@ -233,60 +235,139 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
         <div style="max-width:640px;width:100%;background:#0f172a;border:1px solid #1e293b;border-radius:16px;padding:28px;box-shadow:0 20px 50px rgba(0,0,0,0.6);">
           <div style="display:inline-block;padding:4px 12px;border-radius:999px;background:rgba(6,182,212,0.15);color:#22d3ee;font-size:12px;font-weight:700;">SYSTEMPULSE PRO WIN64 DESKTOP EDITION</div>
           <h1 style="margin:14px 0 8px;font-size:22px;color:#f8fafc;">Inicjalizacja silnika diagnostycznego 3D WebGL2 &amp; WMI...</h1>
-          <p style="margin:0;color:#94a3b8;font-size:14px;line-height:1.6;">Trwa ładowanie modułów testowych CPU, RAM, Dysków, Zasilacza ATX PSU oraz 40 scen i gier 3D MAX.</p>
+          <p id="sp-offline-boot-msg" style="margin:0;color:#94a3b8;font-size:14px;line-height:1.6;">Trwa ładowanie modułów testowych CPU, RAM, Dysków, Zasilacza ATX PSU oraz 40 scen i gier 3D MAX.</p>
         </div>
       </div>
     </div>
     <script>
       window.__SYSTEMPULSE_STANDALONE_OFFLINE__ = true;
-    </script>
-    <script>${safeInlineScript}</script>
-    <script>
-      if (document.getElementById('sp-offline-boot-fallback')) {
-        var s = document.createElement('script');
-        s.src = './portable-bundle.js';
-        document.body.appendChild(s);
+      function __spShowBundleError() {
+        var el = document.getElementById('sp-offline-boot-msg');
+        if (el) {
+          el.style.color = '#fbbf24';
+          el.textContent = 'Nie znaleziono pliku app/portable-bundle.js. Najpierw rozpakuj całe archiwum .ZIP (kliknij prawym -> Wyodrębnij wszystkie), a następnie uruchom Instalator-SystemPulse-Pro-Setup.cmd lub SystemPulse-Pro-Portable.bat.';
+        }
       }
     </script>
+    <script src="./portable-bundle.js" defer onerror="__spShowBundleError()"></script>
   </body>
 </html>`;
 
   const installerSetupCmd = [
     '@echo off',
+    'setlocal EnableExtensions EnableDelayedExpansion',
     'chcp 65001 >nul',
     'title Kreator Instalacji SystemPulse Pro (Win64 Offline)',
     'echo ====================================================================',
     'echo   INSTALATOR SYSTEMPULSE PRO - WINDOWS 10 / 11 (64-BIT)',
-    'echo   Instalacja lokalna pakietu diagnostycznego Win64',
+    'echo   Instalacja lokalna pakietu diagnostycznego Win64 (.EXE / App-Mode)',
     'echo ====================================================================',
-    'if exist "%~dp0SystemPulse-Pro-Setup.exe" (',
+    'echo.',
+    'set "SRC_DIR=%~dp0"',
+    'if not exist "%SRC_DIR%app\\index.html" (',
+    '  echo [BLAD] Nie znaleziono katalogu "app\\index.html" obok instalatora!',
+    '  echo.',
+    '  echo Najpierw ROZPAKUJ cale archiwum .ZIP na dysk:',
+    '  echo   1. Kliknij prawym przyciskiem na SystemPulse-Pro-Portable-Win64.zip',
+    '  echo   2. Wybierz "Wyodrebnij wszystkie..." ^(Extract All^)',
+    '  echo   3. Otworz rozpakowany folder i uruchom ponownie ten instalator.',
+    '  echo.',
+    '  pause',
+    '  exit /b 1',
+    ')',
+    'if not exist "%SRC_DIR%app\\portable-bundle.js" (',
+    '  echo [BLAD] Brakuje pliku "app\\portable-bundle.js". Rozpakuj pelne archiwum .ZIP.',
+    '  pause',
+    '  exit /b 1',
+    ')',
+    'if exist "%SRC_DIR%SystemPulse-Pro-Setup.exe" (',
     '  echo [OK] Uruchamianie graficznego instalatora SystemPulse-Pro-Setup.exe...',
-    '  start "" "%~dp0SystemPulse-Pro-Setup.exe"',
+    '  start "" "%SRC_DIR%SystemPulse-Pro-Setup.exe"',
     '  exit /b 0',
     ')',
     'set "INSTALL_DIR=%LOCALAPPDATA%\\Programs\\SystemPulsePro"',
     'if not exist "%INSTALL_DIR%\\app" mkdir "%INSTALL_DIR%\\app"',
-    'xcopy /E /I /Y "%~dp0app" "%INSTALL_DIR%\\app" >nul',
-    'copy /Y "%~dp0SystemPulse-Pro-Portable.bat" "%INSTALL_DIR%\\" >nul',
-    'copy /Y "%~dp0SystemPulse-Portal.html" "%INSTALL_DIR%\\" >nul',
-    'copy /Y "%~dp0SystemPulseLauncher.cs" "%INSTALL_DIR%\\" >nul',
-    'copy /Y "%~dp0SystemPulsePro.csproj" "%INSTALL_DIR%\\" >nul',
-    'if exist "%~dp0SystemPulse-Pro.exe" copy /Y "%~dp0SystemPulse-Pro.exe" "%INSTALL_DIR%\\" >nul',
-    'set "DESK_SHORTCUT=%USERPROFILE%\\Desktop\\SystemPulse Pro.url"',
+    'if /I not "%SRC_DIR%"=="%INSTALL_DIR%\\" (',
+    '  echo [1/4] Kopiowanie plikow aplikacji do "%INSTALL_DIR%"...',
+    '  xcopy /E /I /Y "%SRC_DIR%app" "%INSTALL_DIR%\\app" >nul',
+    '  if errorlevel 1 (',
+    '    echo [BLAD] Nie udalo sie skopiowac katalogu app\\. Sprawdz uprawnienia zapisu.',
+    '    pause',
+    '    exit /b 1',
+    '  )',
+    '  for %%F in (SystemPulse-Pro-Portable.bat SystemPulse-Portal.html SystemPulseLauncher.cs SystemPulsePro.csproj SystemPulseSetupGui.cs SystemPulseSetup.csproj INSTRUKCJA-PORTABLE-EXE.txt SystemPulse-Pro.exe) do (',
+    '    if exist "%SRC_DIR%%%F" copy /Y "%SRC_DIR%%%F" "%INSTALL_DIR%\\" >nul',
+    '  )',
+    ') else (',
+    '  echo [1/4] Pliki juz znajduja sie w katalogu docelowym.',
+    ')',
+    'echo [2/4] Sprawdzanie kompilatora Microsoft .NET ^(opcjonalny natywny SystemPulse-Pro.exe^)...',
+    'if not exist "%INSTALL_DIR%\\SystemPulse-Pro.exe" (',
+    '  where dotnet >nul 2>&1',
+    '  if not errorlevel 1 (',
+    '    echo       Wykryto .NET SDK - budowanie natywnego SystemPulse-Pro.exe ^(WMI + serwer 127.0.0.1^)...',
+    '    dotnet publish "%INSTALL_DIR%\\SystemPulsePro.csproj" -c Release -r win-x64 -o "%INSTALL_DIR%" --nologo >nul 2>&1',
+    '    if exist "%INSTALL_DIR%\\SystemPulse-Pro.exe" (',
+    '      echo       [OK] Zbudowano natywny program SystemPulse-Pro.exe!',
+    '    ) else (',
+    '      echo       [INFO] Pominieto kompilacje .NET ^(uzyty zostanie tryb Standalone App-Mode^).',
+    '    )',
+    '  ) else (',
+    '    echo       [INFO] Brak .NET SDK - aplikacja dziala w pelnym trybie Standalone App-Mode Offline.',
+    '  )',
+    ')',
+    'echo [3/4] Tworzenie deinstalatora i skrotow na Pulpicie oraz w Menu Start...',
     '(',
-    '  echo [InternetShortcut]',
-    '  echo URL=file:///%INSTALL_DIR%\\app\\index.html',
-    '  echo IconFile=%SystemRoot%\\System32\\shell32.dll',
-    '  echo IconIndex=21',
-    ') > "%DESK_SHORTCUT%"',
-    'echo [OK] Zainstalowano w: %INSTALL_DIR%',
-    'echo [OK] Utworzono skrot na Pulpicie.',
+    '  echo @echo off',
+    '  echo chcp 65001 ^>nul',
+    '  echo title Odinstaluj SystemPulse Pro',
+    '  echo taskkill /F /IM SystemPulse-Pro.exe ^>nul 2^>^&1',
+    '  echo if exist "%%USERPROFILE%%\\Desktop\\SystemPulse Pro.cmd" del /F /Q "%%USERPROFILE%%\\Desktop\\SystemPulse Pro.cmd" ^>nul 2^>^&1',
+    '  echo if exist "%%USERPROFILE%%\\Desktop\\SystemPulse Pro.url" del /F /Q "%%USERPROFILE%%\\Desktop\\SystemPulse Pro.url" ^>nul 2^>^&1',
+    '  echo if defined OneDrive if exist "%%OneDrive%%\\Desktop\\SystemPulse Pro.cmd" del /F /Q "%%OneDrive%%\\Desktop\\SystemPulse Pro.cmd" ^>nul 2^>^&1',
+    '  echo if defined OneDrive if exist "%%OneDrive%%\\Desktop\\SystemPulse Pro.url" del /F /Q "%%OneDrive%%\\Desktop\\SystemPulse Pro.url" ^>nul 2^>^&1',
+    '  echo if exist "%%APPDATA%%\\Microsoft\\Windows\\Start Menu\\Programs\\SystemPulse Pro" rmdir /S /Q "%%APPDATA%%\\Microsoft\\Windows\\Start Menu\\Programs\\SystemPulse Pro" ^>nul 2^>^&1',
+    '  echo echo [OK] Usunieto skroty SystemPulse Pro. Usuwanie katalogu aplikacji...',
+    '  echo cd /d "%%TEMP%%"',
+    '  echo rmdir /S /Q "%%LOCALAPPDATA%%\\Programs\\SystemPulsePro" ^>nul 2^>^&1 ^& exit /b 0',
+    ') > "%INSTALL_DIR%\\Odinstaluj-SystemPulse-Pro.cmd"',
+    'set "DESK_DIR=%USERPROFILE%\\Desktop"',
+    'if not exist "!DESK_DIR!" if defined OneDrive if exist "%OneDrive%\\Desktop" set "DESK_DIR=%OneDrive%\\Desktop"',
+    'if not exist "!DESK_DIR!" if defined OneDriveConsumer if exist "%OneDriveConsumer%\\Desktop" set "DESK_DIR=%OneDriveConsumer%\\Desktop"',
+    'if exist "!DESK_DIR!" (',
+    '  if exist "!DESK_DIR!\\SystemPulse Pro.url" del /F /Q "!DESK_DIR!\\SystemPulse Pro.url" >nul 2>&1',
+    '  (',
+    '    echo @echo off',
+    '    echo if exist "%%LOCALAPPDATA%%\\Programs\\SystemPulsePro\\SystemPulse-Pro.exe" ^(start "" "%%LOCALAPPDATA%%\\Programs\\SystemPulsePro\\SystemPulse-Pro.exe" ^& exit /b 0^)',
+    '    echo call "%%LOCALAPPDATA%%\\Programs\\SystemPulsePro\\SystemPulse-Pro-Portable.bat"',
+    '  ) > "!DESK_DIR!\\SystemPulse Pro.cmd"',
+    ')',
+    'set "START_DIR=%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\SystemPulse Pro"',
+    'if not exist "!START_DIR!" mkdir "!START_DIR!" >nul 2>&1',
+    'if exist "!START_DIR!" (',
+    '  (',
+    '    echo @echo off',
+    '    echo if exist "%%LOCALAPPDATA%%\\Programs\\SystemPulsePro\\SystemPulse-Pro.exe" ^(start "" "%%LOCALAPPDATA%%\\Programs\\SystemPulsePro\\SystemPulse-Pro.exe" ^& exit /b 0^)',
+    '    echo call "%%LOCALAPPDATA%%\\Programs\\SystemPulsePro\\SystemPulse-Pro-Portable.bat"',
+    '  ) > "!START_DIR!\\SystemPulse Pro.cmd"',
+    '  copy /Y "%INSTALL_DIR%\\Odinstaluj-SystemPulse-Pro.cmd" "!START_DIR!\\Odinstaluj SystemPulse Pro.cmd" >nul 2>&1',
+    ')',
+    'echo [4/4] Instalacja zakonczona pomyslnie!',
+    'echo       Katalog: %INSTALL_DIR%',
+    'echo       Skrot:   !DESK_DIR!\\SystemPulse Pro.cmd',
+    'echo.',
+    'if exist "%INSTALL_DIR%\\SystemPulse-Pro.exe" (',
+    '  echo [OK] Uruchamianie natywnego SystemPulse-Pro.exe...',
+    '  start "" "%INSTALL_DIR%\\SystemPulse-Pro.exe"',
+    '  exit /b 0',
+    ')',
     'call "%INSTALL_DIR%\\SystemPulse-Pro-Portable.bat"',
     'exit /b 0',
   ].join('\r\n');
 
   const batLauncher = [
     '@echo off',
+    'setlocal EnableExtensions EnableDelayedExpansion',
     'chcp 65001 >nul',
     'title SystemPulse Pro 64-bit - Standalone Desktop Edition',
     'echo ====================================================================',
@@ -299,23 +380,34 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     '  exit /b 0',
     ')',
     'set "LOCAL_APP_FILE=%~dp0app\\index.html"',
+    'if not exist "!LOCAL_APP_FILE!" (',
+    '  echo [BLAD] Nie znaleziono pliku "!LOCAL_APP_FILE!".',
+    '  echo Rozpakuj cale archiwum SystemPulse-Pro-Portable-Win64.zip przed uruchomieniem.',
+    '  pause',
+    '  exit /b 1',
+    ')',
+    'set "APP_URI=!LOCAL_APP_FILE:\\=/!"',
+    'set "APP_URI=!APP_URI: =%%20!"',
     'set "PROFILE_DIR=%TEMP%\\SystemPulsePro_OfflineAppProfile_v6"',
-    'if exist "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe" (',
-    '  start "" "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe" --app="file:///%LOCAL_APP_FILE:\\=/%" --user-data-dir="%PROFILE_DIR%" --start-maximized --allow-file-access-from-files --enable-gpu-rasterization --ignore-gpu-blocklist --disable-frame-rate-limit --disable-gpu-vsync --no-first-run',
-    '  exit /b 0',
+    'for %%B in (',
+    '  "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe"',
+    '  "%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe"',
+    '  "%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe"',
+    '  "%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe"',
+    '  "%LOCALAPPDATA%\\Google\\Chrome\\Application\\chrome.exe"',
+    '  "%ProgramFiles%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"',
+    '  "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"',
+    ') do (',
+    '  if exist %%~B (',
+    '    start "" %%~B --app="file:///!APP_URI!" --user-data-dir="!PROFILE_DIR!" --start-maximized --allow-file-access-from-files --enable-gpu-rasterization --ignore-gpu-blocklist --disable-frame-rate-limit --disable-gpu-vsync --no-first-run --no-default-browser-check',
+    '    exit /b 0',
+    '  )',
     ')',
-    'if exist "%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe" (',
-    '  start "" "%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe" --app="file:///%LOCAL_APP_FILE:\\=/%" --user-data-dir="%PROFILE_DIR%" --start-maximized --allow-file-access-from-files --enable-gpu-rasterization --ignore-gpu-blocklist --disable-frame-rate-limit --disable-gpu-vsync --no-first-run',
-    '  exit /b 0',
-    ')',
-    'if exist "%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe" (',
-    '  start "" "%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe" --app="file:///%LOCAL_APP_FILE:\\=/%" --user-data-dir="%PROFILE_DIR%" --start-maximized --allow-file-access-from-files --enable-gpu-rasterization --ignore-gpu-blocklist --disable-frame-rate-limit --disable-gpu-vsync --no-first-run',
-    '  exit /b 0',
-    ')',
-    'start "" "%LOCAL_APP_FILE%"',
+    'start "" "!LOCAL_APP_FILE!"',
+    'exit /b 0',
   ].join('\r\n');
 
-  // Native WinForms GUI Setup Wizard (.CS source for optional Visual Studio / dotnet build)
+  // Native WinForms GUI Setup Wizard (.CS source for SystemPulseSetup.csproj)
   const csharpGuiInstallerSource = `using System;
 using System.Diagnostics;
 using System.Drawing;
@@ -327,7 +419,9 @@ namespace SystemPulseProSetup
     public class SetupForm : Form
     {
         private TextBox txtPath;
+        private Button btnBrowse;
         private CheckBox chkDesktop;
+        private CheckBox chkStartMenu;
         private CheckBox chkLaunch;
         private ProgressBar progressBar;
         private Label lblStatus;
@@ -335,8 +429,8 @@ namespace SystemPulseProSetup
 
         public SetupForm()
         {
-            this.Text = "Instalator SystemPulse Pro v4.0 (Win64 Desktop Edition)";
-            this.Size = new Size(580, 410);
+            this.Text = "Instalator SystemPulse Pro v5.0 (Win64 Desktop Edition)";
+            this.Size = new Size(600, 445);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
@@ -356,7 +450,7 @@ namespace SystemPulseProSetup
             lblSub.Text = "Pakiet diagnostyki PC/Laptopa: 40 scen GPU 3D, 28 światów i wyścigów Gra 3D MAX,\\r\\ntelemetria Zasilacza ATX PSU, Speed Test 10 Gbps oraz auto-detekcja EDID matrycy.";
             lblSub.ForeColor = Color.FromArgb(148, 163, 184);
             lblSub.Location = new Point(24, 54);
-            lblSub.Size = new Size(520, 42);
+            lblSub.Size = new Size(540, 42);
             this.Controls.Add(lblSub);
 
             Label lblDir = new Label();
@@ -368,37 +462,65 @@ namespace SystemPulseProSetup
             txtPath = new TextBox();
             txtPath.Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Programs\\SystemPulsePro");
             txtPath.Location = new Point(24, 132);
-            txtPath.Size = new Size(515, 26);
+            txtPath.Size = new Size(430, 26);
             txtPath.BackColor = Color.FromArgb(15, 23, 42);
             txtPath.ForeColor = Color.White;
             txtPath.BorderStyle = BorderStyle.FixedSingle;
             this.Controls.Add(txtPath);
 
+            btnBrowse = new Button();
+            btnBrowse.Text = "Przeglądaj...";
+            btnBrowse.BackColor = Color.FromArgb(30, 41, 59);
+            btnBrowse.ForeColor = Color.White;
+            btnBrowse.FlatStyle = FlatStyle.Flat;
+            btnBrowse.Location = new Point(462, 130);
+            btnBrowse.Size = new Size(98, 28);
+            btnBrowse.Click += (s, e) =>
+            {
+                using (FolderBrowserDialog fbd = new FolderBrowserDialog())
+                {
+                    fbd.Description = "Wybierz folder docelowy instalacji SystemPulse Pro";
+                    if (Directory.Exists(txtPath.Text)) fbd.SelectedPath = txtPath.Text;
+                    if (fbd.ShowDialog() == DialogResult.OK && !string.IsNullOrWhiteSpace(fbd.SelectedPath))
+                    {
+                        txtPath.Text = fbd.SelectedPath;
+                    }
+                }
+            };
+            this.Controls.Add(btnBrowse);
+
             chkDesktop = new CheckBox();
             chkDesktop.Text = "Utwórz skrót 'SystemPulse Pro' na Pulpicie";
             chkDesktop.Checked = true;
             chkDesktop.Location = new Point(24, 174);
-            chkDesktop.Size = new Size(515, 24);
+            chkDesktop.Size = new Size(535, 24);
             this.Controls.Add(chkDesktop);
+
+            chkStartMenu = new CheckBox();
+            chkStartMenu.Text = "Utwórz skrót i deinstalator w Menu Start";
+            chkStartMenu.Checked = true;
+            chkStartMenu.Location = new Point(24, 202);
+            chkStartMenu.Size = new Size(535, 24);
+            this.Controls.Add(chkStartMenu);
 
             chkLaunch = new CheckBox();
             chkLaunch.Text = "Uruchom SystemPulse Pro natychmiast po zakończeniu instalacji";
             chkLaunch.Checked = true;
-            chkLaunch.Location = new Point(24, 204);
-            chkLaunch.Size = new Size(515, 24);
+            chkLaunch.Location = new Point(24, 230);
+            chkLaunch.Size = new Size(535, 24);
             this.Controls.Add(chkLaunch);
 
             progressBar = new ProgressBar();
-            progressBar.Location = new Point(24, 246);
-            progressBar.Size = new Size(515, 22);
+            progressBar.Location = new Point(24, 270);
+            progressBar.Size = new Size(536, 22);
             progressBar.Value = 0;
             this.Controls.Add(progressBar);
 
             lblStatus = new Label();
             lblStatus.Text = "Gotowy do instalacji pakietu offline Win64.";
             lblStatus.ForeColor = Color.FromArgb(148, 163, 184);
-            lblStatus.Location = new Point(24, 276);
-            lblStatus.Size = new Size(515, 22);
+            lblStatus.Location = new Point(24, 300);
+            lblStatus.Size = new Size(536, 22);
             this.Controls.Add(lblStatus);
 
             btnInstall = new Button();
@@ -407,8 +529,8 @@ namespace SystemPulseProSetup
             btnInstall.BackColor = Color.FromArgb(6, 182, 212);
             btnInstall.ForeColor = Color.FromArgb(7, 11, 20);
             btnInstall.FlatStyle = FlatStyle.Flat;
-            btnInstall.Location = new Point(24, 312);
-            btnInstall.Size = new Size(275, 42);
+            btnInstall.Location = new Point(24, 340);
+            btnInstall.Size = new Size(285, 42);
             btnInstall.Click += new EventHandler(OnInstallClick);
             this.Controls.Add(btnInstall);
 
@@ -417,25 +539,50 @@ namespace SystemPulseProSetup
             btnCancel.BackColor = Color.FromArgb(30, 41, 59);
             btnCancel.ForeColor = Color.White;
             btnCancel.FlatStyle = FlatStyle.Flat;
-            btnCancel.Location = new Point(420, 312);
-            btnCancel.Size = new Size(119, 42);
+            btnCancel.Location = new Point(440, 340);
+            btnCancel.Size = new Size(120, 42);
             btnCancel.Click += (s, e) => this.Close();
             this.Controls.Add(btnCancel);
         }
 
-        private static void CopyDir(string src, string dst)
+        private static string NormalizePath(string p)
         {
-            Directory.CreateDirectory(dst);
-            foreach (string f in Directory.GetFiles(src))
+            return Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        }
+
+        private static void CopyDir(string src, string dst, string rootTargetNorm, string currentExeNorm)
+        {
+            string srcNorm = NormalizePath(src);
+            string dstNorm = NormalizePath(dst);
+            if (srcNorm.Equals(dstNorm, StringComparison.OrdinalIgnoreCase)) return;
+
+            Directory.CreateDirectory(dstNorm);
+            foreach (string f in Directory.GetFiles(srcNorm))
             {
-                string destFile = Path.Combine(dst, Path.GetFileName(f));
+                string fileNorm = NormalizePath(f);
+                if (!string.IsNullOrEmpty(currentExeNorm) && fileNorm.Equals(currentExeNorm, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                string destFile = Path.Combine(dstNorm, Path.GetFileName(f));
                 File.Copy(f, destFile, true);
             }
-            foreach (string d in Directory.GetDirectories(src))
+            foreach (string d in Directory.GetDirectories(srcNorm))
             {
-                string destSub = Path.Combine(dst, Path.GetFileName(d));
-                CopyDir(d, destSub);
+                string dirNorm = NormalizePath(d);
+                if (dirNorm.Equals(rootTargetNorm, StringComparison.OrdinalIgnoreCase)) continue;
+                string destSub = Path.Combine(dstNorm, Path.GetFileName(d));
+                CopyDir(dirNorm, destSub, rootTargetNorm, currentExeNorm);
             }
+        }
+
+        private static string BuildLauncherCmd(string targetDir)
+        {
+            string exePath = Path.Combine(targetDir, "SystemPulse-Pro.exe");
+            string batPath = Path.Combine(targetDir, "SystemPulse-Pro-Portable.bat");
+            return "@echo off\\r\\n"
+                + "if exist \\"" + exePath + "\\" (start \\"\\" \\"" + exePath + "\\" & exit /b 0)\\r\\n"
+                + "call \\"" + batPath + "\\"\\r\\n";
         }
 
         private void OnInstallClick(object sender, EventArgs e)
@@ -443,23 +590,49 @@ namespace SystemPulseProSetup
             try
             {
                 btnInstall.Enabled = false;
-                string srcDir = AppDomain.CurrentDomain.BaseDirectory;
-                string targetDir = txtPath.Text.Trim();
+                string srcDir = NormalizePath(AppDomain.CurrentDomain.BaseDirectory);
+                string targetDir = NormalizePath(txtPath.Text.Trim());
+
+                if (string.IsNullOrWhiteSpace(targetDir))
+                {
+                    throw new InvalidOperationException("Podaj poprawny folder docelowy instalacji.");
+                }
+                if (!File.Exists(Path.Combine(srcDir, "app", "index.html")))
+                {
+                    throw new FileNotFoundException("Nie znaleziono pliku app\\\\index.html. Rozpakuj najpierw całe archiwum .ZIP.");
+                }
+                if (targetDir.StartsWith(srcDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException("Folder docelowy nie może znajdować się wewnątrz folderu instalatora.");
+                }
 
                 progressBar.Value = 25;
                 lblStatus.Text = "Kopiowanie plików silnika 3D WebGL i pakietu offline...";
                 Application.DoEvents();
-                CopyDir(srcDir, targetDir);
+                string currentExe = "";
+                try { currentExe = NormalizePath(Process.GetCurrentProcess().MainModule.FileName); } catch {}
+                CopyDir(srcDir, targetDir, targetDir, currentExe);
 
                 progressBar.Value = 65;
-                string portalPath = Path.Combine(targetDir, "SystemPulse-Portal.html");
-                if (chkDesktop.Checked)
+                string launcherCmdContent = BuildLauncherCmd(targetDir);
+                string desktopDir = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+                if (chkDesktop.Checked && Directory.Exists(desktopDir))
                 {
                     lblStatus.Text = "Tworzenie skrótu SystemPulse Pro na Pulpicie...";
                     Application.DoEvents();
-                    string deskUrl = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "SystemPulse Pro.url");
-                    string urlContent = "[InternetShortcut]\\r\\nURL=file:///" + portalPath.Replace("\\\\", "/") + "\\r\\nIconIndex=21\\r\\n";
-                    File.WriteAllText(deskUrl, urlContent);
+                    string legacyUrl = Path.Combine(desktopDir, "SystemPulse Pro.url");
+                    if (File.Exists(legacyUrl)) try { File.Delete(legacyUrl); } catch {}
+                    File.WriteAllText(Path.Combine(desktopDir, "SystemPulse Pro.cmd"), launcherCmdContent);
+                }
+
+                if (chkStartMenu.Checked)
+                {
+                    string startMenuDir = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.Programs),
+                        "SystemPulse Pro"
+                    );
+                    Directory.CreateDirectory(startMenuDir);
+                    File.WriteAllText(Path.Combine(startMenuDir, "SystemPulse Pro.cmd"), launcherCmdContent);
                 }
 
                 progressBar.Value = 100;
@@ -469,8 +642,13 @@ namespace SystemPulseProSetup
 
                 if (chkLaunch.Checked)
                 {
+                    string exePath = Path.Combine(targetDir, "SystemPulse-Pro.exe");
                     string batPath = Path.Combine(targetDir, "SystemPulse-Pro-Portable.bat");
-                    if (File.Exists(batPath))
+                    if (File.Exists(exePath))
+                    {
+                        Process.Start(new ProcessStartInfo(exePath) { WorkingDirectory = targetDir, UseShellExecute = true });
+                    }
+                    else if (File.Exists(batPath))
                     {
                         Process.Start(new ProcessStartInfo(batPath) { WorkingDirectory = targetDir, UseShellExecute = true });
                     }
@@ -481,6 +659,7 @@ namespace SystemPulseProSetup
             catch (Exception ex)
             {
                 lblStatus.Text = "Błąd instalacji: " + ex.Message;
+                lblStatus.ForeColor = Color.FromArgb(248, 113, 113);
                 btnInstall.Enabled = true;
             }
         }
@@ -500,14 +679,36 @@ namespace SystemPulseProSetup
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
+    <RollForward>Major</RollForward>
     <AssemblyName>SystemPulse-Pro</AssemblyName>
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="SystemPulseLauncher.cs" />
     <PackageReference Include="System.Management" Version="8.0.0" />
+  </ItemGroup>
+</Project>
+`;
+
+  const setupCsprojContent = `<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RollForward>Major</RollForward>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>SystemPulse-Pro-Setup</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="SystemPulseSetupGui.cs" />
   </ItemGroup>
 </Project>
 `;
@@ -1027,6 +1228,8 @@ namespace SystemPulsePro
             }
         }
 
+        private static long lastActivityTicks = DateTime.UtcNow.Ticks;
+
         private static string GetMimeType(string ext)
         {
             switch (ext.ToLowerInvariant())
@@ -1038,8 +1241,30 @@ namespace SystemPulsePro
                 case ".json": return "application/json; charset=utf-8";
                 case ".svg": return "image/svg+xml";
                 case ".png": return "image/png";
+                case ".jpg":
+                case ".jpeg": return "image/jpeg";
+                case ".webp": return "image/webp";
+                case ".ico": return "image/x-icon";
+                case ".woff": return "font/woff";
+                case ".woff2": return "font/woff2";
+                case ".wasm": return "application/wasm";
                 default: return "application/octet-stream";
             }
+        }
+
+        private static int ParseContentLength(string headers)
+        {
+            string[] lines = headers.Split(new string[] { "\\r\\n" }, StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 1; i < lines.Length; i++)
+            {
+                int colon = lines[i].IndexOf(':');
+                if (colon > 0 && lines[i].Substring(0, colon).Trim().Equals("Content-Length", StringComparison.OrdinalIgnoreCase))
+                {
+                    int len;
+                    if (int.TryParse(lines[i].Substring(colon + 1).Trim(), out len) && len > 0) return len;
+                }
+            }
+            return 0;
         }
 
         [STAThread]
@@ -1048,10 +1273,12 @@ namespace SystemPulsePro
             string baseDir = AppDomain.CurrentDomain.BaseDirectory;
             string appDir = Path.Combine(baseDir, "app");
             if (!Directory.Exists(appDir)) appDir = baseDir;
+            string appDirFull = Path.GetFullPath(appDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
 
             int port = FindFreePort();
             TcpListener server = new TcpListener(IPAddress.Loopback, port);
             server.Start();
+            Interlocked.Exchange(ref lastActivityTicks, DateTime.UtcNow.Ticks);
 
             Thread serverThread = new Thread(() =>
             {
@@ -1064,15 +1291,19 @@ namespace SystemPulsePro
                         {
                             try
                             {
+                                Interlocked.Exchange(ref lastActivityTicks, DateTime.UtcNow.Ticks);
                                 using (client)
                                 using (NetworkStream stream = client.GetStream())
                                 {
-                                    byte[] reqBuf = new byte[4096];
+                                    stream.ReadTimeout = 5000;
+                                    byte[] reqBuf = new byte[8192];
                                     int read = stream.Read(reqBuf, 0, reqBuf.Length);
                                     if (read <= 0) return;
                                     string reqText = Encoding.ASCII.GetString(reqBuf, 0, read);
-                                    int lineEnd = reqText.IndexOf("\\r\\n");
-                                    string requestLine = lineEnd >= 0 ? reqText.Substring(0, lineEnd) : reqText;
+                                    int headerEnd = reqText.IndexOf("\\r\\n\\r\\n");
+                                    string headerBlock = headerEnd >= 0 ? reqText.Substring(0, headerEnd) : reqText;
+                                    int lineEnd = headerBlock.IndexOf("\\r\\n");
+                                    string requestLine = lineEnd >= 0 ? headerBlock.Substring(0, lineEnd) : headerBlock;
                                     string[] tokens = requestLine.Split(' ');
                                     string method = tokens.Length > 0 ? tokens[0].ToUpperInvariant() : "GET";
                                     string fullTarget = tokens.Length > 1 ? tokens[1] : "/";
@@ -1080,6 +1311,23 @@ namespace SystemPulsePro
                                     string rawQuery = "";
                                     int qIdx = fullTarget.IndexOf('?');
                                     if (qIdx >= 0) { rawPath = fullTarget.Substring(0, qIdx); rawQuery = fullTarget.Substring(qIdx + 1); }
+
+                                    if (method == "POST")
+                                    {
+                                        int contentLen = ParseContentLength(headerBlock);
+                                        int alreadyReadBody = headerEnd >= 0 ? Math.Max(0, read - (headerEnd + 4)) : 0;
+                                        int remaining = Math.Min(contentLen - alreadyReadBody, 64 * 1024 * 1024);
+                                        if (remaining > 0)
+                                        {
+                                            byte[] drainBuf = new byte[16384];
+                                            while (remaining > 0)
+                                            {
+                                                int n = stream.Read(drainBuf, 0, Math.Min(drainBuf.Length, remaining));
+                                                if (n <= 0) break;
+                                                remaining -= n;
+                                            }
+                                        }
+                                    }
 
                                     if (method == "OPTIONS")
                                     {
@@ -1135,7 +1383,7 @@ namespace SystemPulsePro
                                         body = speedtestPayload;
                                         mime = "application/octet-stream";
                                     }
-                                    else if (rawPath.Equals("/api/speedtest/upload", StringComparison.OrdinalIgnoreCase) || rawPath.Equals("/api/speedtest/ping", StringComparison.OrdinalIgnoreCase))
+                                    else if (rawPath.Equals("/api/speedtest/upload", StringComparison.OrdinalIgnoreCase) || rawPath.Equals("/api/speedtest/ping", StringComparison.OrdinalIgnoreCase) || rawPath.Equals("/api/ping", StringComparison.OrdinalIgnoreCase))
                                     {
                                         body = Encoding.UTF8.GetBytes("{\\"ok\\":true}");
                                         mime = "application/json; charset=utf-8";
@@ -1145,7 +1393,10 @@ namespace SystemPulsePro
                                         rawPath = Uri.UnescapeDataString(rawPath.TrimStart('/'));
                                         if (string.IsNullOrEmpty(rawPath)) rawPath = "index.html";
                                         string fullPath = Path.GetFullPath(Path.Combine(appDir, rawPath.Replace('/', Path.DirectorySeparatorChar)));
-                                        if (!File.Exists(fullPath)) fullPath = Path.Combine(appDir, "index.html");
+                                        if (!fullPath.StartsWith(appDirFull, StringComparison.OrdinalIgnoreCase) || !File.Exists(fullPath))
+                                        {
+                                            fullPath = Path.Combine(appDir, "index.html");
+                                        }
                                         body = File.Exists(fullPath) ? File.ReadAllBytes(fullPath) : Encoding.UTF8.GetBytes("<h1>SystemPulse Pro Offline</h1>");
                                         mime = GetMimeType(Path.GetExtension(fullPath));
                                     }
@@ -1167,7 +1418,7 @@ namespace SystemPulsePro
             serverThread.Start();
 
             string url = "http://127.0.0.1:" + port + "/index.html";
-            string profileDir = Path.Combine(Path.GetTempPath(), "SystemPulsePro_DesktopProfile_v5");
+            string profileDir = Path.Combine(Path.GetTempPath(), "SystemPulsePro_DesktopProfile_" + port);
             string gpuFlags = "--app=\\"" + url + "\\" --user-data-dir=\\"" + profileDir + "\\" --start-maximized --enable-gpu-rasterization --ignore-gpu-blocklist --disable-frame-rate-limit --disable-gpu-vsync --no-first-run --no-default-browser-check";
 
             string[] candidates = new string[]
@@ -1175,7 +1426,9 @@ namespace SystemPulsePro
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), @"Microsoft\\Edge\\Application\\msedge.exe"),
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"Microsoft\\Edge\\Application\\msedge.exe"),
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"Google\\Chrome\\Application\\chrome.exe"),
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), @"Google\\Chrome\\Application\\chrome.exe")
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), @"Google\\Chrome\\Application\\chrome.exe"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Google\\Chrome\\Application\\chrome.exe"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"BraveSoftware\\Brave-Browser\\Application\\brave.exe")
             };
 
             Process browserProc = null;
@@ -1190,11 +1443,28 @@ namespace SystemPulsePro
                 }
             }
 
-            if (browserProc != null) browserProc.WaitForExit();
+            if (browserProc != null)
+            {
+                Stopwatch lifeSw = Stopwatch.StartNew();
+                browserProc.WaitForExit();
+                lifeSw.Stop();
+                // Edge/Chrome Startup Boost can hand off the app window to an existing browser process and exit immediately.
+                // Keep the local HTTP/WMI server alive while active so the app never hits ERR_CONNECTION_REFUSED.
+                if (lifeSw.Elapsed.TotalSeconds < 5.0)
+                {
+                    while ((DateTime.UtcNow - new DateTime(Interlocked.Read(ref lastActivityTicks), DateTimeKind.Utc)).TotalMinutes < 15.0)
+                    {
+                        Thread.Sleep(2000);
+                    }
+                }
+            }
             else
             {
                 Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
-                Thread.Sleep(3600000);
+                while ((DateTime.UtcNow - new DateTime(Interlocked.Read(ref lastActivityTicks), DateTimeKind.Utc)).TotalMinutes < 15.0)
+                {
+                    Thread.Sleep(2000);
+                }
             }
         }
     }
@@ -1232,19 +1502,27 @@ namespace SystemPulsePro
     '  100% AUTO-DETEKCJA SPRZETU (CZYSTE WMI .NET, ZERO POWERSHELL.EXE!)',
     '========================================================================',
     '',
-    'JAK URUCHOMIC NA PC / LAPTOPIE (BEZ PRZEGLADARKI I BEZ BLOKAD ANTYWIRUSA):',
-    '  OPCJA A (NATYCHMIASTOWA - 1 KLIK):',
+    'KROK 1 (WYMAGANY):',
+    '  Najpierw ROZPAKUJ cale archiwum SystemPulse-Pro-Portable-Win64.zip',
+    '  (kliknij prawym -> Wyodrebnij wszystkie / Extract All).',
+    '  NIE uruchamiaj skryptow bezposrednio z podgladu spakowanego pliku .ZIP!',
+    '',
+    'KROK 2 - INSTALACJA NA PC / LAPTOPIE:',
+    '  OPCJA A (PELNA INSTALACJA + SKROTY PULPIT / MENU START + DEINSTALATOR):',
+    '    Uruchom "Instalator-SystemPulse-Pro-Setup.cmd".',
+    '    - Kopiuje aplikacje do %LOCALAPPDATA%\\Programs\\SystemPulsePro',
+    '    - Jesli masz .NET SDK, automatycznie kompiluje natywny SystemPulse-Pro.exe',
+    '    - Tworzy skroty na Pulpicie i w Menu Start oraz Odinstaluj-SystemPulse-Pro.cmd',
+    '',
+    '  OPCJA B (TRYB PORTABLE BEZ INSTALACJI - 1 KLIK):',
     '    Uruchom "SystemPulse-Pro-Portable.bat" -> otwiera dedykowane okno',
     '    aplikacji offline bez paska adresu z odblokowanym FPS GPU.',
     '',
-    '  OPCJA B (NATYWNY PLIK SystemPulse-Pro.exe Z PELNYM AUTO-SKANEM WMI):',
-    '    W katalogu paczki znajduje sie czysty projekt .NET "SystemPulsePro.csproj".',
-    '    Otworz Terminal w tym folderze i wpisz oficjalna komende Microsoft .NET:',
+    '  OPCJA C (RECZNA KOMPILACJA NATYWNYCH .EXE PRZEZ MICROSOFT .NET SDK):',
+    '    Natywny launcher WMI + serwer HTTP:',
     '      dotnet publish SystemPulsePro.csproj -c Release -r win-x64 -o .',
-    '    Powstanie natywny plik "SystemPulse-Pro.exe", ktory AUTOMATYCZNIE wykrywa:',
-    '      - Wszystkie partycje i dyski (C:\\, D:\\, G:\\, NVMe, SSD, USB) + testy I/O',
-    '      - Dokladny CPU, plyte glowna, BIOS, kazda kosc RAM DIMM (MHz/DDR5)',
-    '      - Model matrycy EDID, predkosc kabla LAN/Wi-Fi PHY, baterie WMI i czujniki!',
+    '    Graficzny kreator instalacji GUI (WinForms):',
+    '      dotnet publish SystemPulseSetup.csproj -c Release -r win-x64 -o .',
     '',
     `LOKALNY ADRES MOSTKA DESKTOPOWEGO: ${localServerUrl}`,
     '========================================================================',
@@ -1254,6 +1532,7 @@ namespace SystemPulsePro
     { name: 'SystemPulse-Pro-Portable/Instalator-SystemPulse-Pro-Setup.cmd', content: installerSetupCmd },
     { name: 'SystemPulse-Pro-Portable/SystemPulse-Pro-Portable.bat', content: batLauncher },
     { name: 'SystemPulse-Pro-Portable/SystemPulsePro.csproj', content: csprojContent },
+    { name: 'SystemPulse-Pro-Portable/SystemPulseSetup.csproj', content: setupCsprojContent },
     { name: 'SystemPulse-Pro-Portable/SystemPulseLauncher.cs', content: csharpSource },
     { name: 'SystemPulse-Pro-Portable/SystemPulseSetupGui.cs', content: csharpGuiInstallerSource },
     { name: 'SystemPulse-Pro-Portable/SystemPulse-Portal.html', content: portalHtml },

@@ -1152,5 +1152,326 @@ export function renderGame30DayFpsTrendChartD3(
   });
 }
 
+export interface GpuFrameTimePoint {
+  timeSec: number;
+  frameTimeMs: number;
+}
+
+export function renderGpuFrameTimeConsistencyChartD3(
+  points: GpuFrameTimePoint[],
+  containerEl: HTMLElement,
+  height = 190
+): void {
+  containerEl.innerHTML = '';
+  const width = containerEl.clientWidth || 680;
+  const padL = 50;
+  const padR = 24;
+  const padT = 20;
+  const padB = 32;
+  const plotW = width - padL - padR;
+  const plotH = height - padT - padB;
+
+  if (!points || points.length < 2) {
+    containerEl.innerHTML = `
+      <div style="height:${height}px;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:12px;">
+        Oczekiwanie na próbki czasu klatki (uruchom stres-test GPU)...
+      </div>
+    `;
+    return;
+  }
+
+  const svg = d3
+    .select(containerEl)
+    .append('svg')
+    .attr('viewBox', `0 0 ${width} ${height}`)
+    .style('width', '100%')
+    .style('height', `${height}px`)
+    .style('display', 'block');
+
+  const g = svg.append('g').attr('transform', `translate(${padL},${padT})`);
+
+  const maxFt = Math.max(33.3, ...points.map((p) => p.frameTimeMs));
+  const xScale = d3.scaleLinear()
+    .domain([points[0].timeSec, points[points.length - 1].timeSec + 1])
+    .range([0, plotW]);
+
+  const yScale = d3.scaleLinear()
+    .domain([0, Math.ceil(maxFt / 10) * 10])
+    .range([plotH, 0]);
+
+  g.append('g')
+    .attr('class', 'grid')
+    .call(d3.axisLeft(yScale).ticks(5).tickSize(-plotW).tickFormat(() => ''))
+    .selectAll('line')
+    .style('stroke', 'var(--border-hairline)')
+    .style('stroke-opacity', '0.7');
+
+  const area = d3.area<GpuFrameTimePoint>()
+    .x((d) => xScale(d.timeSec))
+    .y0(plotH)
+    .y1((d) => yScale(d.frameTimeMs))
+    .curve(d3.curveMonotoneX);
+
+  const line = d3.line<GpuFrameTimePoint>()
+    .x((d) => xScale(d.timeSec))
+    .y((d) => yScale(d.frameTimeMs))
+    .curve(d3.curveMonotoneX);
+
+  g.append('path')
+    .datum(points)
+    .attr('fill', 'rgba(245, 158, 11, 0.14)')
+    .attr('d', area);
+
+  g.append('path')
+    .datum(points)
+    .attr('fill', 'none')
+    .attr('stroke', '#f59e0b')
+    .attr('stroke-width', 2.2)
+    .attr('d', line);
+
+  g.append('line')
+    .attr('x1', 0)
+    .attr('y1', yScale(16.6))
+    .attr('x2', plotW)
+    .attr('y2', yScale(16.6))
+    .attr('stroke', '#10b981')
+    .attr('stroke-dasharray', '3 3')
+    .attr('stroke-width', 1);
+
+  g.append('text')
+    .attr('x', plotW - 4)
+    .attr('y', yScale(16.6) - 4)
+    .attr('text-anchor', 'end')
+    .style('fill', '#10b981')
+    .style('font-size', '10px')
+    .text('60 FPS (16.6ms)');
+
+  const xAxis = d3.axisBottom(xScale).ticks(6).tickFormat((d: d3.NumberValue) => `${d}s`);
+  g.append('g')
+    .attr('transform', `translate(0,${plotH})`)
+    .call(xAxis)
+    .selectAll('text')
+    .style('fill', 'var(--text-muted)')
+    .style('font-size', '10px')
+    .style('font-family', 'JetBrains Mono, monospace');
+
+  const yAxis = d3.axisLeft(yScale).ticks(5).tickFormat((d: d3.NumberValue) => `${d}ms`);
+  g.append('g')
+    .call(yAxis)
+    .selectAll('text')
+    .style('fill', 'var(--text-secondary)')
+    .style('font-size', '10px')
+    .style('font-family', 'JetBrains Mono, monospace');
+
+  const tooltip = d3.select(containerEl)
+    .append('div')
+    .attr('class', 'chart-tooltip')
+    .style('opacity', 0);
+
+  const bisect = d3.bisector((d: GpuFrameTimePoint) => d.timeSec).left;
+
+  g.append('rect')
+    .attr('width', plotW)
+    .attr('height', plotH)
+    .attr('fill', 'transparent')
+    .on('mousemove', (event) => {
+      const [mx] = d3.pointer(event);
+      const xVal = xScale.invert(mx);
+      const idx = bisect(points, xVal, 1);
+      const d0 = points[idx - 1];
+      const d1 = points[idx];
+      if (!d0) return;
+      const d = d1 && xVal - d0.timeSec > d1.timeSec - xVal ? d1 : d0;
+      const fpsCalc = d.frameTimeMs > 0 ? (1000 / d.frameTimeMs).toFixed(1) : '0';
+
+      tooltip
+        .style('opacity', 1)
+        .style('left', `${event.offsetX + 12}px`)
+        .style('top', `${event.offsetY - 28}px`)
+        .html(`
+          <div class="chart-tooltip-date">Czas: ${d.timeSec}s</div>
+          <div class="chart-tooltip-row">
+            <span class="chart-tooltip-label"><span class="chart-tooltip-swatch" style="background:#f59e0b"></span>Czas klatki (Frame-Time):</span>
+            <strong>${d.frameTimeMs} ms</strong>
+          </div>
+          <div class="chart-tooltip-row">
+            <span class="chart-tooltip-label">Odpowiada FPS:</span>
+            <strong>${fpsCalc} FPS</strong>
+          </div>
+        `);
+    })
+    .on('mouseleave', () => {
+      tooltip.style('opacity', 0);
+    });
+}
+
+export interface GpuThermalPoint {
+  timeSec: number;
+  estTempC: number;
+  coreClockMhz: number;
+  thermalThrottle: boolean;
+}
+
+export function renderGpuThermalLoadChartD3(
+  points: GpuThermalPoint[],
+  containerEl: HTMLElement,
+  height = 200
+): void {
+  containerEl.innerHTML = '';
+  const width = containerEl.clientWidth || 680;
+  const padL = 54;
+  const padR = 54;
+  const padT = 20;
+  const padB = 32;
+  const plotW = width - padL - padR;
+  const plotH = height - padT - padB;
+
+  if (!points || points.length < 2) {
+    containerEl.innerHTML = `
+      <div style="height:${height}px;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:12px;">
+        Oczekiwanie na próbki termiczne GPU (uruchom stres-test)...
+      </div>
+    `;
+    return;
+  }
+
+  const svg = d3
+    .select(containerEl)
+    .append('svg')
+    .attr('viewBox', `0 0 ${width} ${height}`)
+    .style('width', '100%')
+    .style('height', `${height}px`)
+    .style('display', 'block');
+
+  const g = svg.append('g').attr('transform', `translate(${padL},${padT})`);
+
+  const maxTemp = Math.max(100, ...points.map((p) => p.estTempC));
+  const maxClock = Math.max(3000, ...points.map((p) => p.coreClockMhz));
+
+  const xScale = d3.scaleLinear()
+    .domain([points[0].timeSec, points[points.length - 1].timeSec + 1])
+    .range([0, plotW]);
+
+  const yTempScale = d3.scaleLinear()
+    .domain([30, Math.ceil(maxTemp / 10) * 10])
+    .range([plotH, 0]);
+
+  const yClockScale = d3.scaleLinear()
+    .domain([0, Math.ceil(maxClock / 500) * 500])
+    .range([plotH, 0]);
+
+  g.append('g')
+    .attr('class', 'grid')
+    .call(d3.axisLeft(yTempScale).ticks(5).tickSize(-plotW).tickFormat(() => ''))
+    .selectAll('line')
+    .style('stroke', 'var(--border-hairline)')
+    .style('stroke-opacity', '0.7');
+
+  const lineTemp = d3.line<GpuThermalPoint>()
+    .x((d) => xScale(d.timeSec))
+    .y((d) => yTempScale(d.estTempC))
+    .curve(d3.curveMonotoneX);
+
+  const lineClock = d3.line<GpuThermalPoint>()
+    .x((d) => xScale(d.timeSec))
+    .y((d) => yClockScale(d.coreClockMhz))
+    .curve(d3.curveMonotoneX);
+
+  g.append('path')
+    .datum(points)
+    .attr('fill', 'none')
+    .attr('stroke', '#f59e0b')
+    .attr('stroke-width', 2.4)
+    .attr('d', lineTemp);
+
+  g.append('path')
+    .datum(points)
+    .attr('fill', 'none')
+    .attr('stroke', '#38bdf8')
+    .attr('stroke-width', 2)
+    .attr('stroke-dasharray', '4 3')
+    .attr('d', lineClock);
+
+  points.forEach((d) => {
+    if (d.thermalThrottle) {
+      g.append('circle')
+        .attr('cx', xScale(d.timeSec))
+        .attr('cy', yTempScale(d.estTempC))
+        .attr('r', 4.5)
+        .attr('fill', '#f43f5e')
+        .attr('stroke', '#ffffff')
+        .attr('stroke-width', 1.5);
+    }
+  });
+
+  const xAxis = d3.axisBottom(xScale).ticks(6).tickFormat((d: d3.NumberValue) => `${d}s`);
+  g.append('g')
+    .attr('transform', `translate(0,${plotH})`)
+    .call(xAxis)
+    .selectAll('text')
+    .style('fill', 'var(--text-muted)')
+    .style('font-size', '10px')
+    .style('font-family', 'JetBrains Mono, monospace');
+
+  const yAxisLeft = d3.axisLeft(yTempScale).ticks(5).tickFormat((d: d3.NumberValue) => `${d}°C`);
+  g.append('g')
+    .call(yAxisLeft)
+    .selectAll('text')
+    .style('fill', '#f59e0b')
+    .style('font-size', '10px')
+    .style('font-family', 'JetBrains Mono, monospace');
+
+  const yAxisRight = d3.axisRight(yClockScale).ticks(5).tickFormat((d: d3.NumberValue) => `${d}MHz`);
+  g.append('g')
+    .attr('transform', `translate(${plotW},0)`)
+    .call(yAxisRight)
+    .selectAll('text')
+    .style('fill', '#38bdf8')
+    .style('font-size', '10px')
+    .style('font-family', 'JetBrains Mono, monospace');
+
+  const tooltip = d3.select(containerEl)
+    .append('div')
+    .attr('class', 'chart-tooltip')
+    .style('opacity', 0);
+
+  const bisect = d3.bisector((d: GpuThermalPoint) => d.timeSec).left;
+
+  g.append('rect')
+    .attr('width', plotW)
+    .attr('height', plotH)
+    .attr('fill', 'transparent')
+    .on('mousemove', (event) => {
+      const [mx] = d3.pointer(event);
+      const xVal = xScale.invert(mx);
+      const idx = bisect(points, xVal, 1);
+      const d0 = points[idx - 1];
+      const d1 = points[idx];
+      if (!d0) return;
+      const d = d1 && xVal - d0.timeSec > d1.timeSec - xVal ? d1 : d0;
+
+      tooltip
+        .style('opacity', 1)
+        .style('left', `${event.offsetX + 12}px`)
+        .style('top', `${event.offsetY - 28}px`)
+        .html(`
+          <div class="chart-tooltip-date">Czas: ${d.timeSec}s</div>
+          <div class="chart-tooltip-row">
+            <span class="chart-tooltip-label"><span class="chart-tooltip-swatch" style="background:#f59e0b"></span>Temperatura GPU:</span>
+            <strong>${d.estTempC}°C ${d.thermalThrottle ? '<span class="status-err">(THROTTLING)</span>' : ''}</strong>
+          </div>
+          <div class="chart-tooltip-row">
+            <span class="chart-tooltip-label"><span class="chart-tooltip-swatch" style="background:#38bdf8"></span>Zegar rdzenia:</span>
+            <strong>${d.coreClockMhz} MHz</strong>
+          </div>
+        `);
+    })
+    .on('mouseleave', () => {
+      tooltip.style('opacity', 0);
+    });
+}
+
+
+
 
 

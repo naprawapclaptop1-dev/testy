@@ -77,6 +77,7 @@ import {
   renderBatteryHistoryChart,
   renderBatteryWearLevel30DaysChartD3,
   renderDualLineChart,
+  renderGpuThermalLoadChartD3,
   renderGpuVramUsageChartD3,
   renderRadarChart,
 } from './ui/charts';
@@ -311,6 +312,20 @@ export class SystemPulseApp {
   private ramState: RamTestResult = ramTestService.createInitialState(256);
   private diskState: DiskTestResult = diskTestService.createInitialState();
   private gpuState: GpuStressMetrics = gpuStressEngine.createInitialMetrics();
+  private gpuFpsSmoothing = false;
+  private recentFpsWindow: number[] = [];
+
+  private processGpuMetrics(m: GpuStressMetrics): GpuStressMetrics {
+    if (!this.gpuFpsSmoothing) return m;
+    this.recentFpsWindow.push(m.fps);
+    if (this.recentFpsWindow.length > 5) this.recentFpsWindow.shift();
+    const smoothedFps = Math.round(this.recentFpsWindow.reduce((a, b) => a + b, 0) / this.recentFpsWindow.length);
+    return {
+      ...m,
+      fps: smoothedFps,
+      avgFps: smoothedFps > 0 ? Math.round((m.avgFps + smoothedFps) / 2) : m.avgFps,
+    };
+  }
   private batteryState: BatteryHealthState = batteryHealthService.getState();
   private networkState: NetworkTestResult = networkTestService.createInitialState();
   private thermalState: ThermalHeatMapSnapshot = thermalMonitorService.getSnapshot();
@@ -5151,6 +5166,12 @@ export class SystemPulseApp {
               </button>
             </div>
 
+            <div class="segmented" role="group" aria-label="Wygładzanie FPS">
+              <button type="button" class="segmented-btn ${this.gpuFpsSmoothing ? 'active' : ''}" id="gpu-fps-smoothing-toggle" title="Wygładzanie FPS (Średnia krocząca SMA)">
+                Wygładzanie: ${this.gpuFpsSmoothing ? 'WŁ.' : 'WYŁ.'}
+              </button>
+            </div>
+
             <div class="segmented" role="group" aria-label="Poziom obciążenia GPU">
               ${(['standard', 'high', 'extreme', 'ultra'] as GpuLoadPreset[])
                 .map(
@@ -5188,14 +5209,27 @@ export class SystemPulseApp {
 
         <div class="panel stack-md">
           <div class="panel-header" style="margin-bottom:0;">
-            <h2 class="panel-title">Wykres VRAM GPU (Alokacja vs Rzeczywiste Tekstury - Ostatnie 60s)</h2>
+            <h2 class="panel-title">Wykres VRAM GPU (Alokacja vs Rzeczywiste Tekstury - Ostatnie 5 minut)</h2>
             <span class="panel-caption">Niebieski: Przydzielony VRAM (MB) · Pomarańczowy przerywany: Tekstury (MB)</span>
           </div>
           <div id="gpu-vram-d3-chart">
             <!-- Rendered via D3 -->
           </div>
           <p style="margin:0;font-size:12px;color:var(--text-muted);">
-            Wykres telemetrii D3.js śledzi zużycie pamięci VRAM w czasie rzeczywistym przez ostatnie 60 sekund, rozróżniając zaalokowaną pulę pamięci od faktycznie zajętego bufora tekstur.
+            Wykres telemetrii D3.js śledzi zużycie pamięci VRAM w czasie rzeczywistym przez ostatnie 5 minut (300 próbek), ułatwiając identyfikację potencjalnych wycieków pamięci w scenariuszach gier 3D.
+          </p>
+        </div>
+
+        <div class="panel stack-md">
+          <div class="panel-header" style="margin-bottom:0;">
+            <h2 class="panel-title">Obciążenie termiczne i taktowanie GPU (Temperatura vs Zegar Rdzenia)</h2>
+            <span class="panel-caption">Pomarańczowy: Temperatura (°C) · Niebieski przerywany: Zegar (MHz) · Czerwone punkty: Throttling termiczny</span>
+          </div>
+          <div id="gpu-thermal-d3-chart">
+            <!-- Rendered via D3 -->
+          </div>
+          <p style="margin:0;font-size:12px;color:var(--text-muted);">
+            Wykres D3.js wizualizuje obciążenie termiczne (temperaturę rdzenia GPU w czasie rzeczywistym względem częstotliwości zegara), wskazując punkty występowania thermal throttlingu.
           </p>
         </div>
 
@@ -5247,10 +5281,15 @@ export class SystemPulseApp {
     const mountEl = host.querySelector<HTMLElement>('#gpu-canvas-mount');
     if (mountEl) {
       gpuStressEngine.mount(mountEl, (metrics) => {
-        this.gpuState = metrics;
+        this.gpuState = this.processGpuMetrics(metrics);
         this.patchGpuLive();
       });
     }
+
+    host.querySelector('#gpu-fps-smoothing-toggle')?.addEventListener('click', () => {
+      this.gpuFpsSmoothing = !this.gpuFpsSmoothing;
+      this.renderGpuView(host);
+    });
 
     host.querySelectorAll<HTMLButtonElement>('[data-gpu-scene]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -5351,7 +5390,7 @@ export class SystemPulseApp {
 
         gpuStressEngine.setSceneMode(sc.id);
         const res = await gpuStressEngine.runTimedBenchmark(3000, (m) => {
-          this.gpuState = m;
+          this.gpuState = this.processGpuMetrics(m);
           this.patchGpuLive();
         });
         this.gpuSuiteResults.push({
@@ -5526,6 +5565,19 @@ export class SystemPulseApp {
           textureVramMB: t.textureVramMB ?? 6144,
         })),
         vramChartEl,
+        180
+      );
+    }
+    const thermalChartEl = this.root.querySelector<HTMLElement>('#gpu-thermal-d3-chart');
+    if (thermalChartEl) {
+      renderGpuThermalLoadChartD3(
+        g.telemetry.map((t) => ({
+          timeSec: t.timeSec,
+          estTempC: t.estTempC ?? 44,
+          coreClockMhz: t.coreClockMhz ?? 2550,
+          thermalThrottle: t.thermalThrottle ?? false,
+        })),
+        thermalChartEl,
         180
       );
     }

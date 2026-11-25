@@ -647,6 +647,15 @@ export class FanTestService {
   private cooldownStartTempC = 44;
   private cooldownTicks = 0;
   private fanCurve: FanCurveConfig = createDefaultFanCurve();
+  private autoCoolingEnabled = false;
+
+  public setAutoCoolingEnabled(enabled: boolean): void {
+    this.autoCoolingEnabled = Boolean(enabled);
+  }
+
+  public isAutoCoolingEnabled(): boolean {
+    return this.autoCoolingEnabled;
+  }
 
   // PWM Frequency Monitor state
   private pwmTimer: ReturnType<typeof setInterval> | null = null;

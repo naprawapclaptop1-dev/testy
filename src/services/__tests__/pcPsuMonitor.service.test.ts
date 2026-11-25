@@ -105,10 +105,16 @@ describe('PcPsuMonitor & BatteryHealthService PSU Extensions', () => {
     const text = new TextDecoder().decode(bytes);
     expect(text).toContain('SystemPulse-Pro-Portable/Instalator-SystemPulse-Pro-Setup.cmd');
     expect(text).toContain('SystemPulse-Pro-Portable/SystemPulse-Pro-Portable.bat');
+    expect(text).toContain('SystemPulse-Pro-Portable/SystemPulsePro.csproj');
+    expect(text).toContain('SystemPulse-Pro-Portable/SystemPulseSetup.csproj');
     expect(text).toContain('SystemPulse-Pro-Portable/SystemPulseLauncher.cs');
     expect(text).toContain('SystemPulse-Pro-Portable/app/index.html');
     expect(text).toContain('SystemPulse-Pro-Portable/app/portable-bundle.js');
     expect(text).toContain('SystemPulse-Pro-Portable/app/portable-styles.css');
+    expect(text).toContain('<EnableDefaultCompileItems>false</EnableDefaultCompileItems>');
+    expect(text).toContain('<Compile Include="SystemPulseLauncher.cs" />');
+    expect(text).toContain('<Compile Include="SystemPulseSetupGui.cs" />');
+    expect(text).toContain('Odinstaluj-SystemPulse-Pro.cmd');
     expect(text).toContain('--disable-frame-rate-limit');
     expect(text).toContain('127.0.0.1');
     expect(text).not.toContain('usercontent.goog');

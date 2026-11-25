@@ -1147,6 +1147,7 @@ export const DISPLAY_PATTERNS: DisplayPatternDef[] = [
 ];
 
 export const OLED_PROTECTION_DURATION_SEC = 60 * 60;
+export const oledProtectionDurationSec = OLED_PROTECTION_DURATION_SEC;
 
 export function formatCountdownMmSs(totalSeconds: number): string {
   const clamped = Math.max(0, Math.floor(totalSeconds));
@@ -1262,12 +1263,15 @@ export class DisplayDiagnosticController {
   private onPatternChange?: (index: number) => void;
 
   private oledProtectionActive = false;
-  private oledDurationSec = OLED_PROTECTION_DURATION_SEC;
+  private oledDurationSec = oledProtectionDurationSec;
   private oledStartedAtMs = 0;
   private oledTimerId: number | null = null;
   private oledOptions: OledProtectionOptions | null = null;
   private oledHudTimerEl: HTMLElement | null = null;
+  private oledHudCountdownEl: HTMLElement | null = null;
   private oledHudProgressEl: HTMLElement | null = null;
+  private oledHudProgressTrackEl: HTMLElement | null = null;
+  private oledHudRemainingPctEl: HTMLElement | null = null;
 
   public getPatternIndex(): number {
     return this.patternIndex;
@@ -1389,7 +1393,7 @@ export class DisplayDiagnosticController {
       this.onPatternChange?.(oledIdx);
     }
 
-    const durationSec = Math.max(1, Math.round(options?.durationSec ?? OLED_PROTECTION_DURATION_SEC));
+    const durationSec = Math.max(1, Math.round(options?.durationSec ?? oledProtectionDurationSec));
     this.oledProtectionActive = true;
     this.oledDurationSec = durationSec;
     this.oledStartedAtMs = Date.now();
@@ -1413,16 +1417,62 @@ export class DisplayDiagnosticController {
 
     const timerEl = document.createElement('span');
     timerEl.className = 'font-mono oled-hud-timer';
-    timerEl.textContent = `Pozostało: ${formatCountdownMmSs(durationSec)} / ${formatCountdownMmSs(durationSec)}`;
+    timerEl.dataset.durationSec = String(durationSec);
+
+    const timerPrefixEl = document.createElement('span');
+    timerPrefixEl.className = 'oled-hud-timer-label';
+    timerPrefixEl.textContent = 'Pozostało: ';
+
+    const countdownEl = document.createElement('span');
+    countdownEl.className = 'font-mono oled-hud-countdown';
+    countdownEl.textContent = formatCountdownMmSs(durationSec);
+    countdownEl.dataset.remainingSec = String(durationSec);
+    countdownEl.dataset.remainingMmss = formatCountdownMmSs(durationSec);
+    countdownEl.dataset.totalDurationSec = String(durationSec);
+    if (typeof countdownEl.setAttribute === 'function') {
+      countdownEl.setAttribute('role', 'timer');
+      countdownEl.setAttribute('aria-live', 'off');
+      countdownEl.setAttribute('aria-label', 'Pozostały czas cyklu ochrony OLED');
+    }
+
+    const timerTotalEl = document.createElement('span');
+    timerTotalEl.className = 'font-mono oled-hud-duration';
+    timerTotalEl.textContent = ` / ${formatCountdownMmSs(durationSec)}`;
+
+    timerEl.append(timerPrefixEl, countdownEl, timerTotalEl);
     this.oledHudTimerEl = timerEl;
+    this.oledHudCountdownEl = countdownEl;
+
+    const progressWrap = document.createElement('div');
+    progressWrap.className = 'oled-hud-progress-wrap';
 
     const progressTrack = document.createElement('div');
     progressTrack.className = 'oled-hud-progress-track';
+    progressTrack.dataset.remainingPct = '100';
+    progressTrack.dataset.remainingSec = String(durationSec);
+    progressTrack.dataset.remainingState = 'high';
+    if (typeof progressTrack.setAttribute === 'function') {
+      progressTrack.setAttribute('role', 'progressbar');
+      progressTrack.setAttribute('aria-label', 'Pozostały czas ochrony OLED');
+      progressTrack.setAttribute('aria-valuemin', '0');
+      progressTrack.setAttribute('aria-valuemax', '100');
+      progressTrack.setAttribute('aria-valuenow', '100');
+    }
+
     const progressFill = document.createElement('div');
     progressFill.className = 'oled-hud-progress-fill';
-    progressFill.style.width = '0%';
+    progressFill.style.width = '100%';
+    progressFill.dataset.remainingPct = '100';
     progressTrack.appendChild(progressFill);
+    this.oledHudProgressTrackEl = progressTrack;
     this.oledHudProgressEl = progressFill;
+
+    const remainingPctEl = document.createElement('span');
+    remainingPctEl.className = 'font-mono oled-hud-remaining-pct';
+    remainingPctEl.textContent = '100%';
+    this.oledHudRemainingPctEl = remainingPctEl;
+
+    progressWrap.append(progressTrack, remainingPctEl);
 
     const stopBtn = document.createElement('button');
     stopBtn.className = 'btn btn-secondary btn-sm';
@@ -1432,7 +1482,7 @@ export class DisplayDiagnosticController {
       this.stopOledBurnInProtection(false);
     };
 
-    hud.append(titleEl, timerEl, progressTrack, stopBtn);
+    hud.append(titleEl, timerEl, progressWrap, stopBtn);
     overlay.append(fsCanvas, hud);
     document.body.appendChild(overlay);
 
@@ -1479,12 +1529,31 @@ export class DisplayDiagnosticController {
       const elapsedSec = (Date.now() - this.oledStartedAtMs) / 1000;
       const remaining = Math.max(0, Math.ceil(this.oledDurationSec - elapsedSec));
       const progressPct = Math.max(0, Math.min(100, (elapsedSec / this.oledDurationSec) * 100));
+      const remainingPct = Math.max(0, Math.min(100, (remaining / this.oledDurationSec) * 100));
+      const remainingState = remainingPct > 35 ? 'high' : remainingPct > 10 ? 'mid' : 'low';
 
-      if (this.oledHudTimerEl) {
-        this.oledHudTimerEl.textContent = `Pozostało: ${formatCountdownMmSs(remaining)} / ${formatCountdownMmSs(this.oledDurationSec)}`;
+      const remainingMmSs = formatCountdownMmSs(remaining);
+      if (this.oledHudCountdownEl) {
+        this.oledHudCountdownEl.textContent = remainingMmSs;
+        this.oledHudCountdownEl.dataset.remainingSec = String(remaining);
+        this.oledHudCountdownEl.dataset.remainingMmss = remainingMmSs;
+      } else if (this.oledHudTimerEl) {
+        this.oledHudTimerEl.textContent = `Pozostało: ${remainingMmSs} / ${formatCountdownMmSs(this.oledDurationSec)}`;
       }
       if (this.oledHudProgressEl) {
-        this.oledHudProgressEl.style.width = `${progressPct.toFixed(1)}%`;
+        this.oledHudProgressEl.style.width = `${remainingPct.toFixed(1)}%`;
+        this.oledHudProgressEl.dataset.remainingPct = remainingPct.toFixed(1);
+      }
+      if (this.oledHudProgressTrackEl) {
+        this.oledHudProgressTrackEl.dataset.remainingPct = remainingPct.toFixed(1);
+        this.oledHudProgressTrackEl.dataset.remainingSec = String(remaining);
+        this.oledHudProgressTrackEl.dataset.remainingState = remainingState;
+        if (typeof this.oledHudProgressTrackEl.setAttribute === 'function') {
+          this.oledHudProgressTrackEl.setAttribute('aria-valuenow', String(Math.round(remainingPct)));
+        }
+      }
+      if (this.oledHudRemainingPctEl) {
+        this.oledHudRemainingPctEl.textContent = `${Math.round(remainingPct)}%`;
       }
 
       this.oledOptions?.onTick?.(remaining, progressPct);
@@ -1512,7 +1581,10 @@ export class DisplayDiagnosticController {
     const callbacks = this.oledOptions;
     this.oledOptions = null;
     this.oledHudTimerEl = null;
+    this.oledHudCountdownEl = null;
     this.oledHudProgressEl = null;
+    this.oledHudProgressTrackEl = null;
+    this.oledHudRemainingPctEl = null;
 
     this.teardownFullscreenOverlay();
 

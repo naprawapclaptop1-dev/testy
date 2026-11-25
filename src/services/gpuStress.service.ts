@@ -6358,7 +6358,7 @@ export class GpuStressEngine {
         coreClockMhz,
         thermalThrottle: thermalThrottleActive,
       });
-      if (this.telemetry.length > 60) this.telemetry.shift();
+      if (this.telemetry.length > 300) this.telemetry.shift();
 
       const thermalThrottleRecent60s = this.telemetry.some((t) => t.thermalThrottle);
 
