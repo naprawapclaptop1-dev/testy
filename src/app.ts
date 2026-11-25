@@ -50,7 +50,7 @@ import {
 } from './ui/pcRankingReport';
 import { getSystemSpecs } from './services/systemInfo.service';
 import { cpuTestService } from './services/cpuTest.service';
-import { ramTestService } from './services/ramTest.service';
+import { computeRamSummaryMetrics, ramTestService } from './services/ramTest.service';
 import {
   DISK_SCAN_CMD_COMMAND,
   DISK_SCAN_POWERSHELL_CMD,
@@ -67,6 +67,7 @@ import {
   renderRailFullHistoryD3ModalChart,
 } from './ui/pcPsuChart';
 import { downloadPortableExeZip } from './services/portableExeBuilder.service';
+import { pwaInstallService } from './services/pwaInstall.service';
 import { soundNotificationService, NotificationEventType, SoundPreset } from './services/soundNotification.service';
 import {
   DISPLAY_PATTERNS,
@@ -727,10 +728,21 @@ export class SystemPulseApp {
         ...saved.cpuState,
         status: saved.cpuState.status === 'running' || saved.cpuState.status === 'stressing' ? 'completed' : saved.cpuState.status,
       };
-      this.ramState = {
+      const restoredRam: RamTestResult = {
         ...saved.ramState,
         status: saved.ramState.status === 'running' ? 'completed' : saved.ramState.status,
       };
+      if (restoredRam.bandwidthReadMBs > 0 && restoredRam.bandwidthWriteMBs > 0) {
+        const recalc = computeRamSummaryMetrics({
+          bandwidthReadMBs: restoredRam.bandwidthReadMBs,
+          bandwidthWriteMBs: restoredRam.bandwidthWriteMBs,
+          latencyNs: restoredRam.latencyNs || 18,
+          errorsFound: restoredRam.errorsFound || 0,
+        });
+        restoredRam.overallScore = recalc.overallScore;
+        restoredRam.healthGrade = recalc.healthGrade;
+      }
+      this.ramState = restoredRam;
       this.diskState = {
         ...saved.diskState,
         status: saved.diskState.status === 'running' ? 'completed' : saved.diskState.status,
@@ -964,10 +976,20 @@ export class SystemPulseApp {
   }
 
   private getSuiteScores(): SuiteScores {
+    if (this.ramState.bandwidthReadMBs > 0 && this.ramState.bandwidthWriteMBs > 0) {
+      const recalc = computeRamSummaryMetrics({
+        bandwidthReadMBs: this.ramState.bandwidthReadMBs,
+        bandwidthWriteMBs: this.ramState.bandwidthWriteMBs,
+        latencyNs: this.ramState.latencyNs || 18,
+        errorsFound: this.ramState.errorsFound || 0,
+      });
+      this.ramState.overallScore = recalc.overallScore;
+      this.ramState.healthGrade = recalc.healthGrade;
+    }
     const cpu = this.cpuState.overallScore;
     const ram = this.ramState.overallScore;
     const disk = this.diskState.overallScore;
-    const gpu = this.gpuState.overallScore;
+    const gpu = Math.max(this.gpuState.overallScore, this.gameState.overallScore || 0);
     const battery = Math.round(this.batteryState.healthPct);
 
     const measured = [cpu, ram, disk, gpu].filter((v) => v > 0);
@@ -1090,10 +1112,20 @@ export class SystemPulseApp {
             <span>${isHc ? 'Ciemny' : 'Kontrast'}</span>
           </button>
           <button
+            id="btn-install-pwa-app"
+            type="button"
+            class="btn btn-secondary btn-sm"
+            style="${pwaInstallService.getState().isInstalled ? 'display:none;' : ''}"
+            title="Zainstaluj SystemPulse Pro jako natywną aplikację Windows / desktop z ikoną (0 alarmów antywirusa)"
+          >
+            ${iconSvg('download', 14)}
+            <span>Zainstaluj App</span>
+          </button>
+          <button
             id="btn-download-portable-exe"
             type="button"
             class="btn btn-amber btn-sm"
-            title="Pobierz paczkę Portable Windows (.EXE + Launcher Bez Limitu FPS + Portal w archiwum .ZIP)"
+            title="Pobierz paczkę Offline Portable Windows (.ZIP z ikoną .ICO, instalatorem i Inno Setup)"
           >
             ${iconSvg('download', 14)}
             <span>Portable .EXE (.ZIP)</span>
@@ -1107,11 +1139,35 @@ export class SystemPulseApp {
 
       <main id="workspace-host" class="workspace"></main>
 
+      <div
+        id="sp-offline-indicator"
+        style="display:none;position:fixed;bottom:14px;left:14px;z-index:1200;align-items:center;gap:8px;padding:7px 12px;border-radius:10px;background:rgba(217,119,6,0.94);color:#fff;font-size:12px;font-weight:600;box-shadow:0 8px 24px rgba(0,0,0,0.45);"
+      >
+        <span style="width:8px;height:8px;border-radius:999px;background:#fff;display:inline-block;"></span>
+        <span>Tryb Offline — aplikacja działa lokalnie z pamięci podręcznej</span>
+      </div>
+
       <footer class="app-footer">
         <span>SystemPulse Pro · Pakiet diagnostyczny PC i Laptopa od A do Z</span>
         <span id="footer-autosave-status" class="font-mono">Auto-zapis IndexedDB aktywny</span>
       </footer>
     `;
+
+    pwaInstallService.init();
+    const pwaBtn = this.root.querySelector<HTMLButtonElement>('#btn-install-pwa-app');
+    const offlineBanner = this.root.querySelector<HTMLDivElement>('#sp-offline-indicator');
+    pwaInstallService.subscribe((st) => {
+      if (pwaBtn) {
+        pwaBtn.style.display = st.isInstalled ? 'none' : '';
+      }
+      if (offlineBanner) {
+        offlineBanner.style.display = st.isOnline ? 'none' : 'flex';
+      }
+    });
+
+    pwaBtn?.addEventListener('click', () => {
+      void this.handleInstallAppClick();
+    });
 
     this.root.querySelectorAll<HTMLButtonElement>('[data-nav]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -1142,12 +1198,79 @@ export class SystemPulseApp {
         'Pobrano paczkę instalacyjną Portable .EXE (.ZIP)',
         filename,
         'Win64 Portable',
-        'Wygenerowano archiwum ZIP z natywnym launcherem SystemPulse-Pro.exe, kompilatorem .NET i portalem GPU Bez Limitu FPS.'
+        'Wygenerowano czyste archiwum ZIP z ikoną SystemPulse-Pro.ico, instalatorem skrótów, skryptem Inno Setup i aplikacją offline.'
       );
     });
 
     const fullBtn = this.root.querySelector<HTMLButtonElement>('#btn-run-full-suite');
     fullBtn?.addEventListener('click', () => void this.runFullSystemSuite());
+  }
+
+  private async handleInstallAppClick(): Promise<void> {
+    const result = await pwaInstallService.promptInstall();
+    if (result === 'accepted') {
+      void this.recordLog(
+        'SYSTEM',
+        'OK',
+        'Zainstalowano aplikację desktopową SystemPulse Pro',
+        'Windows / PWA Standalone',
+        'Signed App',
+        'Utworzono natywną aplikację z ikoną SystemPulse Pro bez ostrzeżeń antywirusa.'
+      );
+      return;
+    }
+    if (result === 'dismissed') return;
+    this.showInstallGuideModal();
+  }
+
+  private showInstallGuideModal(): void {
+    document.getElementById('sp-install-guide-modal')?.remove();
+    const { isIOS } = pwaInstallService.getState();
+    const modal = document.createElement('div');
+    modal.id = 'sp-install-guide-modal';
+    modal.style.cssText =
+      'position:fixed;inset:0;z-index:2000;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(4,8,16,0.78);backdrop-filter:blur(6px);';
+    modal.innerHTML = `
+      <div style="max-width:520px;width:100%;background:#0e1526;border:1px solid #263550;border-radius:16px;padding:24px;color:#e2e8f0;box-shadow:0 24px 64px rgba(0,0,0,0.65);">
+        <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px;">
+          <img src="/pwa-192x192.png" alt="SystemPulse Pro" width="52" height="52" style="border-radius:12px;border:1px solid #1e293b;" referrerpolicy="no-referrer" />
+          <div>
+            <h3 style="margin:0;font-size:18px;font-weight:700;color:#f8fafc;">Instalacja SystemPulse Pro na komputerze</h3>
+            <p style="margin:3px 0 0;font-size:12px;color:#38bdf8;">Podpisana aplikacja z ikoną • 0 alarmów Bitdefender / Defender</p>
+          </div>
+        </div>
+        ${
+          isIOS
+            ? `<p style="font-size:13px;line-height:1.6;color:#cbd5e1;margin:0 0 16px;">
+                1. Kliknij przycisk <strong>Udostępnij</strong> w dolnym pasku Safari.<br/>
+                2. Wybierz <strong>Dodaj do ekranu początkowego</strong>, aby zainstalować SystemPulse Pro z pełną ikoną.
+              </p>`
+            : `<div style="font-size:13px;line-height:1.6;color:#cbd5e1;display:flex;flex-direction:column;gap:10px;margin-bottom:18px;">
+                <div style="background:#080e1c;border:1px solid #1e293b;border-radius:10px;padding:12px;">
+                  <strong style="color:#22d3ee;">Opcja 1 (Polecana — 100% bez alarmów antywirusa):</strong><br/>
+                  Otwórz aplikację w osobnym oknie Chrome lub Edge i kliknij ikonę <strong>Zainstaluj SystemPulse Pro</strong> w pasku adresu (albo Menu ⋮ → <em>Przesyłaj, zapisuj i udostępniaj → Zainstaluj stronę jako aplikację</em>). Windows utworzy skrót z ikoną na Pulpicie, w Menu Start i w Ustawieniach aplikacji.
+                </div>
+                <div style="background:#080e1c;border:1px solid #1e293b;border-radius:10px;padding:12px;">
+                  <strong style="color:#fbbf24;">Opcja 2 (Paczka Offline .ZIP + ikona .ICO + Inno Setup):</strong><br/>
+                  Pobierz paczkę offline ze wszystkimi plikami, ikoną <code>SystemPulse-Pro.ico</code> oraz skryptem <code>SystemPulse-Pro-Installer.iss</code> do zbudowania własnego instalatora <code>Setup.exe</code>.
+                </div>
+              </div>`
+        }
+        <div style="display:flex;gap:10px;justify-content:flex-end;">
+          <button id="sp-install-modal-zip" type="button" class="btn btn-amber btn-sm">Pobierz Offline .ZIP</button>
+          <button id="sp-install-modal-close" type="button" class="btn btn-primary btn-sm">Zamknij</button>
+        </div>
+      </div>
+    `;
+    modal.addEventListener('click', (ev) => {
+      if (ev.target === modal) modal.remove();
+    });
+    modal.querySelector('#sp-install-modal-close')?.addEventListener('click', () => modal.remove());
+    modal.querySelector('#sp-install-modal-zip')?.addEventListener('click', () => {
+      downloadPortableExeZip();
+      modal.remove();
+    });
+    document.body.appendChild(modal);
   }
 
   private toggleSoundNotifications(): void {

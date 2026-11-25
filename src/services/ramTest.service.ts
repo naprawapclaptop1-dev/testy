@@ -15,8 +15,18 @@ export interface RamCalculationSummary {
 
 export function computeRamSummaryMetrics(input: RamCalculationInput): RamCalculationSummary {
   const avgBw = (input.bandwidthReadMBs + input.bandwidthWriteMBs) / 2;
-  const bwScore = Math.min(100, (avgBw / 9000) * 100);
-  const latScore = Math.min(100, Math.max(20, 115 - input.latencyNs * 1.4));
+  const bwScore =
+    avgBw <= 2500
+      ? (avgBw / 9000) * 100
+      : avgBw <= 4500
+        ? 70 + ((avgBw - 2500) / 2000) * 22
+        : Math.min(100, 92 + ((avgBw - 4500) / 2000) * 8);
+
+  const latScore =
+    input.latencyNs <= 24
+      ? Math.min(100, 96 + ((24 - Math.max(0, input.latencyNs)) / 14) * 4)
+      : Math.min(96, Math.max(20, 115 - input.latencyNs * 1.4));
+
   const errorPenalty = input.errorsFound === 0 ? 0 : Math.min(75, 25 + input.errorsFound * 5);
 
   const overallScore = Math.max(

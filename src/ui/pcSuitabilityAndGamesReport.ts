@@ -7,6 +7,7 @@ import type {
   SystemSpecs,
 } from '../types';
 import { gameBenchService } from '../services/gameBench.service';
+import { computeRamSummaryMetrics } from '../services/ramTest.service';
 import { generate30DayGameFpsHistory, renderGame30DayFpsTrendChartD3 } from './charts';
 
 export interface PcSuitabilityInputContext {
@@ -210,8 +211,8 @@ export function computeHardwarePowerIndex(ctx: PcSuitabilityInputContext): Hardw
     const scoreNorm = benchGpuScore > 0 ? Math.min(118, benchGpuScore * 1.08) : fpsNorm;
     const measuredComposite = (fpsNorm * 0.52 + scoreNorm * 0.48) * stabilityFactor;
 
-    // Weight 65% real measured benchmark + 35% detected GPU class so actual test results clearly drive predictions
-    gpuScore = Math.max(18, Math.min(124, Math.round(measuredComposite * 0.65 + gpuClass.gpuBase * 0.35)));
+    // 100% real measured benchmark result when GPU 3D test has been executed
+    gpuScore = Math.max(18, Math.min(124, Math.round(measuredComposite)));
   }
 
   // Real benchmark-calibrated CPU score
@@ -225,12 +226,28 @@ export function computeHardwarePowerIndex(ctx: PcSuitabilityInputContext): Hardw
     cpuScore = Math.max(22, Math.min(115, Math.round(mcNorm * 0.55 + overallNorm * 0.45)));
   }
 
-  // Real benchmark-calibrated RAM score
+  // Real benchmark-calibrated RAM score (calibrated for V8 DDR4/DDR5 throughput & latency)
   let ramScore = baselineRamScore;
   if (ramTested) {
-    const bwBonus = (ctx.ram?.bandwidthReadMBs ?? 0) > 0 ? Math.min(105, Math.round((ctx.ram.bandwidthReadMBs / 2400) * 88)) : 75;
-    const baseRam = (ctx.ram?.overallScore ?? 0) > 0 ? ctx.ram.overallScore : bwBonus;
-    ramScore = Math.max(25, Math.min(108, Math.round(baseRam * 0.75 + bwBonus * 0.25)));
+    const readMb = ctx.ram?.bandwidthReadMBs ?? 0;
+    const writeMb = ctx.ram?.bandwidthWriteMBs ?? readMb;
+    const bwBonus =
+      readMb > 0
+        ? readMb >= 4500
+          ? Math.min(106, Math.round(94 + ((readMb - 4500) / 2000) * 10))
+          : Math.min(105, Math.round((readMb / 2400) * 88))
+        : 75;
+    const recalcScore =
+      readMb > 0 && writeMb > 0
+        ? computeRamSummaryMetrics({
+            bandwidthReadMBs: readMb,
+            bandwidthWriteMBs: writeMb,
+            latencyNs: ctx.ram?.latencyNs || 18,
+            errorsFound: ctx.ram?.errorsFound || 0,
+          }).overallScore
+        : 0;
+    const baseRam = Math.max(ctx.ram?.overallScore ?? 0, recalcScore) || bwBonus;
+    ramScore = Math.max(25, Math.min(108, Math.round(baseRam * 0.78 + bwBonus * 0.22)));
   }
 
   // Real benchmark-calibrated Disk score

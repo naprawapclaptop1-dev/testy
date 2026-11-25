@@ -379,27 +379,22 @@ describe('pcRankingReport & multi-page PDF report', () => {
     });
   });
 
-  it('sorts leaderboard from best (#1) to lowest, computes percentile, and detects strongest & bottleneck components', () => {
+  it('shows only real tested computers (zero hardcoded fictional PCs), calibrates DDR5-6000 RAM to 99/100, and reports balanced high-end diagnosis', () => {
     const { rankingCtx } = makeFixture();
     const snap = computePcRankingSnapshot(rankingCtx);
 
-    expect(snap.totalRanked).toBe(REFERENCE_PC_LEADERBOARD.length + 1);
-    expect(snap.currentRank).toBeGreaterThanOrEqual(1);
-    expect(snap.currentRank).toBeLessThanOrEqual(3);
-    expect(snap.percentileBetterThan).toBeGreaterThanOrEqual(80);
+    expect(REFERENCE_PC_LEADERBOARD).toHaveLength(0);
+    expect(snap.totalRanked).toBe(1);
+    expect(snap.currentRank).toBe(1);
     expect(snap.hasRealMeasurements).toBe(true);
-
-    // Leaderboard must be strictly non-increasing by overallScore
-    for (let i = 1; i < snap.leaderboard.length; i++) {
-      expect(snap.leaderboard[i - 1].overallScore).toBeGreaterThanOrEqual(snap.leaderboard[i].overallScore);
-    }
-
-    // RAM is 77 while CPU/GPU/Disk are 99-100 -> bottleneck must be RAM
+    expect(snap.currentEntry.ramScore).toBeGreaterThanOrEqual(98);
+    expect(snap.isBalancedHighEnd).toBe(true);
+    expect(snap.bottleneckComponent).toContain('Brak — pełny balans');
     expect(snap.bottleneckComponent).toContain('RAM');
     expect(snap.strongestComponent).toMatch(/CPU|GPU/);
   });
 
-  it('persists and deletes user-saved PCs in localStorage and reflects them in the ranking', () => {
+  it('persists and deletes user-saved real tested PCs in localStorage and sorts the ranking from #1 best to lowest', () => {
     const { rankingCtx } = makeFixture();
     const initial = computePcRankingSnapshot(rankingCtx);
 
@@ -419,7 +414,9 @@ describe('pcRankingReport & multi-page PDF report', () => {
     expect(saved[0].name).toBe('PC Klienta #1 (RTX 4070)');
 
     const afterSave = computePcRankingSnapshot(rankingCtx);
-    expect(afterSave.totalRanked).toBe(REFERENCE_PC_LEADERBOARD.length + 2);
+    expect(afterSave.totalRanked).toBe(2);
+    expect(afterSave.currentRank).toBe(1);
+    expect(afterSave.leaderboard[0].overallScore).toBeGreaterThanOrEqual(afterSave.leaderboard[1].overallScore);
     expect(afterSave.leaderboard.some((e) => e.id === 'client_pc_1' && e.isUserSaved)).toBe(true);
 
     deleteSavedPcFromRanking('client_pc_1');

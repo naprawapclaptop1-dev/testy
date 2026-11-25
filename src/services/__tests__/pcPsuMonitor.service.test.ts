@@ -114,6 +114,12 @@ describe('PcPsuMonitor & BatteryHealthService PSU Extensions', () => {
     expect(text).toContain('<EnableDefaultCompileItems>false</EnableDefaultCompileItems>');
     expect(text).toContain('<Compile Include="SystemPulseLauncher.cs" />');
     expect(text).toContain('<Compile Include="SystemPulseSetupGui.cs" />');
+    expect(text).toContain('SystemPulse-Pro-Portable/SystemPulse-Pro.ico');
+    expect(text).toContain('SystemPulse-Pro-Portable/app/favicon.ico');
+    expect(text).toContain('SystemPulse-Pro-Portable/app/icon.svg');
+    expect(text).toContain('SystemPulse-Pro-Portable/SystemPulse-Pro-Installer.iss');
+    expect(text).toContain('<ApplicationIcon>SystemPulse-Pro.ico</ApplicationIcon>');
+    expect(text).toContain('IconFile=%INSTALL_DIR%\\SystemPulse-Pro.ico');
     expect(text).toContain('Odinstaluj-SystemPulse-Pro.cmd');
     expect(text).toContain('start "" "!BROWSER_EXE!"');
     expect(text).not.toContain('start "" %%~B');
@@ -124,9 +130,27 @@ describe('PcPsuMonitor & BatteryHealthService PSU Extensions', () => {
     expect(text).not.toContain('csc.exe');
     expect(text).not.toContain('ExecutionPolicy');
     expect(text).not.toContain('WScript.Shell');
+    expect(text).not.toContain('taskkill');
+    expect(text).not.toContain('--allow-file-access-from-files');
+
+    // Verify all PWA & Windows icon assets exist with valid binary headers
+    const fs = await import('node:fs');
+    const icoBuf = fs.readFileSync('public/favicon.ico');
+    expect(icoBuf[0]).toBe(0);
+    expect(icoBuf[1]).toBe(0);
+    expect(icoBuf[2]).toBe(1);
+    expect(icoBuf[3]).toBe(0);
+    for (const iconPath of [
+      'public/icon.svg',
+      'public/pwa-192x192.png',
+      'public/pwa-512x512.png',
+      'public/pwa-maskable-512x512.png',
+      'public/apple-touch-icon.png',
+    ]) {
+      expect(fs.existsSync(iconPath)).toBe(true);
+    }
 
     // Verify the actual shipped offline bundle compiles with 0 SyntaxErrors as a classic <script>
-    const fs = await import('node:fs');
     const vm = await import('node:vm');
     const { sanitizePortableBundleJs } = await import('../portableExeBuilder.service');
     const rawBundle = fs.readFileSync('public/portable-bundle.js', 'utf8');

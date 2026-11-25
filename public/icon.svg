@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b1324" />
+      <stop offset="55%" stop-color="#070b14" />
+      <stop offset="100%" stop-color="#0e1b33" />
+    </linearGradient>
+    <linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="50%" stop-color="#06b6d4" />
+      <stop offset="100%" stop-color="#10b981" />
+    </linearGradient>
+    <linearGradient id="pulseGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="50%" stop-color="#22d3ee" />
+      <stop offset="100%" stop-color="#34d399" />
+    </linearGradient>
+    <radialGradient id="coreGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.38" />
+      <stop offset="65%" stop-color="#06b6d4" stop-opacity="0.08" />
+      <stop offset="100%" stop-color="#06b6d4" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+
+  <!-- Rounded dark app tile -->
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#bgGrad)" stroke="url(#ringGrad)" stroke-width="14" />
+
+  <!-- Subtle inner radial glow -->
+  <circle cx="256" cy="256" r="188" fill="url(#coreGlow)" />
+
+  <!-- Hardware CPU pins (top, bottom, left, right) -->
+  <g stroke="#38bdf8" stroke-width="14" stroke-linecap="round" opacity="0.72">
+    <line x1="184" y1="86" x2="184" y2="118" />
+    <line x1="256" y1="86" x2="256" y2="118" />
+    <line x1="328" y1="86" x2="328" y2="118" />
+    <line x1="184" y1="394" x2="184" y2="426" />
+    <line x1="256" y1="394" x2="256" y2="426" />
+    <line x1="328" y1="394" x2="328" y2="426" />
+    <line x1="86" y1="184" x2="118" y2="184" />
+    <line x1="86" y1="256" x2="118" y2="256" />
+    <line x1="86" y1="328" x2="118" y2="328" />
+    <line x1="394" y1="184" x2="426" y2="184" />
+    <line x1="394" y1="256" x2="426" y2="256" />
+    <line x1="394" y1="328" x2="426" y2="328" />
+  </g>
+
+  <!-- Central silicon processor package -->
+  <rect x="118" y="118" width="276" height="276" rx="46" fill="#0f172a" stroke="url(#ringGrad)" stroke-width="12" />
+  <rect x="142" y="142" width="228" height="228" rx="30" fill="#08101f" stroke="#1e293b" stroke-width="4" />
+
+  <!-- Glow halo behind pulse waveform -->
+  <polyline
+    points="148,266 196,266 224,180 264,334 300,224 324,266 364,266"
+    fill="none"
+    stroke="#22d3ee"
+    stroke-width="30"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    opacity="0.22"
+  />
+
+  <!-- Crisp diagnostic pulse waveform -->
+  <polyline
+    points="148,266 196,266 224,180 264,334 300,224 324,266 364,266"
+    fill="none"
+    stroke="url(#pulseGrad)"
+    stroke-width="20"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+
+  <!-- Peak highlight node -->
+  <circle cx="224" cy="180" r="14" fill="#f8fafc" stroke="#22d3ee" stroke-width="6" />
+  <circle cx="300" cy="224" r="11" fill="#34d399" />
+</svg>

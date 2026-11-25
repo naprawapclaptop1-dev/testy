@@ -7,20 +7,30 @@ import type {
   SuiteScores,
   SystemSpecs,
 } from '../types';
+import { computeRamSummaryMetrics } from '../services/ramTest.service';
 import { computeHardwarePowerIndex, hasAnyBenchmarkResults } from './pcSuitabilityAndGamesReport';
 
 export interface PcRankingEntry {
   id: string;
   name: string;
   tierLabel: string;
-  category: 'Entuzjasta / Flagowy' | 'Gaming Pro' | 'Średnia Półka' | 'Laptop / Biuro' | 'Twój Zapisany PC' | 'Twój Aktualny PC';
+  category:
+    | 'Entuzjasta / Flagowy'
+    | 'Gaming Pro'
+    | 'Średnia Półka'
+    | 'Laptop / Biuro'
+    | 'Twój Zapisany PC'
+    | 'Twój Aktualny PC';
   cpuSummary: string;
   gpuSummary: string;
+  ramSummary?: string;
+  diskSummary?: string;
   cpuScore: number;
   gpuScore: number;
   ramScore: number;
   diskScore: number;
   overallScore: number;
+  testedCount?: number;
   isCurrentPc?: boolean;
   isUserSaved?: boolean;
   savedAt?: number;
@@ -37,8 +47,10 @@ export interface PcRankingSnapshot {
   leaderName: string;
   strongestComponent: string;
   bottleneckComponent: string;
+  isBalancedHighEnd: boolean;
   tierBadge: string;
   hasRealMeasurements: boolean;
+  testedCount: number;
 }
 
 export interface PcRankingInputContext {
@@ -53,151 +65,11 @@ export interface PcRankingInputContext {
 
 const STORAGE_KEY = 'systempulse_pc_ranking_v1';
 
-export const REFERENCE_PC_LEADERBOARD: PcRankingEntry[] = [
-  {
-    id: 'ref_5090_9950x3d',
-    name: 'Stacja Flagowa Ultra (RTX 5090 + Ryzen 9 9950X3D)',
-    tierLabel: 'S+ EKSTREMALNY',
-    category: 'Entuzjasta / Flagowy',
-    cpuSummary: '32 wątki · DDR5-6400',
-    gpuSummary: 'RTX 5090 32 GB',
-    cpuScore: 99,
-    gpuScore: 100,
-    ramScore: 98,
-    diskScore: 99,
-    overallScore: 99,
-  },
-  {
-    id: 'ref_4090_7950x3d',
-    name: 'High-End Entuzjasta (RTX 4090 / RX 7900 XTX + 16C/32T)',
-    tierLabel: 'S FLAGOWY',
-    category: 'Entuzjasta / Flagowy',
-    cpuSummary: '32 wątki · DDR5-6000',
-    gpuSummary: 'RTX 4090 / RX 7900 XTX 24 GB',
-    cpuScore: 95,
-    gpuScore: 96,
-    ramScore: 93,
-    diskScore: 95,
-    overallScore: 95,
-  },
-  {
-    id: 'ref_4080s_7800x3d',
-    name: 'Gaming 4K Pro (RTX 4080 Super / RX 9070 XT + 7800X3D)',
-    tierLabel: 'S GAMING 4K',
-    category: 'Entuzjasta / Flagowy',
-    cpuSummary: '16 wątków · DDR5-6000',
-    gpuSummary: 'RTX 4080S / RX 9070 XT 16 GB',
-    cpuScore: 90,
-    gpuScore: 92,
-    ramScore: 89,
-    diskScore: 92,
-    overallScore: 91,
-  },
-  {
-    id: 'ref_4070tis_14700k',
-    name: 'Gaming 1440p Ultra (RTX 4070 Ti Super / RX 7900 XT + i7)',
-    tierLabel: 'A+ WYSOKA KLASA',
-    category: 'Gaming Pro',
-    cpuSummary: '24–28 wątków · DDR5',
-    gpuSummary: 'RTX 4070 TiS / RX 7900 XT',
-    cpuScore: 88,
-    gpuScore: 86,
-    ramScore: 85,
-    diskScore: 88,
-    overallScore: 87,
-  },
-  {
-    id: 'ref_4070_7800xt',
-    name: 'Gaming 1440p High (RTX 4070 / RX 7800 XT + Ryzen 7)',
-    tierLabel: 'A BARDZO DOBRY',
-    category: 'Gaming Pro',
-    cpuSummary: '16 wątków · DDR5/DDR4',
-    gpuSummary: 'RTX 4070 / RX 7800 XT',
-    cpuScore: 81,
-    gpuScore: 80,
-    ramScore: 80,
-    diskScore: 84,
-    overallScore: 81,
-  },
-  {
-    id: 'ref_laptop_rtx4070',
-    name: 'Laptop Gamingowy Pro (RTX 4070 Mobile + Core i7 / Ryzen 9)',
-    tierLabel: 'A LAPTOP GAMING',
-    category: 'Gaming Pro',
-    cpuSummary: '16–20 wątków Mobile',
-    gpuSummary: 'RTX 4070 Laptop 8 GB',
-    cpuScore: 78,
-    gpuScore: 74,
-    ramScore: 76,
-    diskScore: 82,
-    overallScore: 77,
-  },
-  {
-    id: 'ref_4060_7600',
-    name: 'PC Średnia Półka 1080p (RTX 4060 / RX 7600 + Ryzen 5)',
-    tierLabel: 'B+ POPULARNY',
-    category: 'Średnia Półka',
-    cpuSummary: '12 wątków · DDR4/DDR5',
-    gpuSummary: 'RTX 4060 / RX 7600 8 GB',
-    cpuScore: 72,
-    gpuScore: 68,
-    ramScore: 72,
-    diskScore: 78,
-    overallScore: 71,
-  },
-  {
-    id: 'ref_3060_i5',
-    name: 'Uniwersalny PC 1080p (RTX 3060 / RX 6600 + i5-12400F)',
-    tierLabel: 'B STANDARD',
-    category: 'Średnia Półka',
-    cpuSummary: '12 wątków · DDR4-3200',
-    gpuSummary: 'RTX 3060 / RX 6600',
-    cpuScore: 66,
-    gpuScore: 62,
-    ramScore: 68,
-    diskScore: 74,
-    overallScore: 66,
-  },
-  {
-    id: 'ref_laptop_1650_780m',
-    name: 'Laptop Multimedialny (GTX 1650 / Radeon 780M + 16 GB)',
-    tierLabel: 'C+ MULTIMEDIA',
-    category: 'Laptop / Biuro',
-    cpuSummary: '8–16 wątków · LPDDR5',
-    gpuSummary: 'GTX 1650 / Radeon 780M',
-    cpuScore: 58,
-    gpuScore: 48,
-    ramScore: 62,
-    diskScore: 70,
-    overallScore: 56,
-  },
-  {
-    id: 'ref_office_iris',
-    name: 'Laptop Biurowy Nowoczesny (Intel Iris Xe / Core i5 U)',
-    tierLabel: 'C BIUROWY',
-    category: 'Laptop / Biuro',
-    cpuSummary: '8–12 wątków ULV',
-    gpuSummary: 'Intel Iris Xe (iGPU)',
-    cpuScore: 52,
-    gpuScore: 34,
-    ramScore: 56,
-    diskScore: 66,
-    overallScore: 48,
-  },
-  {
-    id: 'ref_budget_uhd',
-    name: 'Laptop Budżetowy / Starszy PC (Intel UHD 620 / 4 wątki)',
-    tierLabel: 'D PODSTAWOWY',
-    category: 'Laptop / Biuro',
-    cpuSummary: '4 wątki · 8 GB RAM',
-    gpuSummary: 'Intel UHD Graphics',
-    cpuScore: 34,
-    gpuScore: 22,
-    ramScore: 44,
-    diskScore: 48,
-    overallScore: 34,
-  },
-];
+/**
+ * Kept empty by default so that the ranking table NEVER mixes fictional/hardcoded
+ * reference rows with real measured benchmark results.
+ */
+export const REFERENCE_PC_LEADERBOARD: PcRankingEntry[] = [];
 
 function escHtml(text: string): string {
   return text
@@ -218,6 +90,7 @@ function shortenGpuName(raw: string): string {
 }
 
 function tierFromScore(score: number): string {
+  if (score <= 0) return 'BRAK POMIARU';
   if (score >= 96) return 'S+ EKSTREMALNY';
   if (score >= 90) return 'S FLAGOWY';
   if (score >= 84) return 'A+ GAMING PRO';
@@ -240,7 +113,8 @@ export function loadSavedPcRankings(): PcRankingEntry[] {
           item &&
           typeof item.id === 'string' &&
           typeof item.name === 'string' &&
-          typeof item.overallScore === 'number'
+          typeof item.overallScore === 'number' &&
+          item.overallScore > 0
       )
       .slice(0, 25);
   } catch {
@@ -249,6 +123,9 @@ export function loadSavedPcRankings(): PcRankingEntry[] {
 }
 
 export function savePcToRanking(entry: PcRankingEntry): PcRankingEntry[] {
+  if (!entry || entry.overallScore <= 0) {
+    return loadSavedPcRankings();
+  }
   const list = loadSavedPcRankings();
   const normalized: PcRankingEntry = {
     ...entry,
@@ -302,40 +179,127 @@ export function computePcRankingSnapshot(
     game: ctx.game,
   });
 
-  const clamp100 = (n: number) => Math.max(15, Math.min(100, Math.round(n)));
-  const cpuScore = ctx.scores.cpu > 0 ? clamp100(ctx.scores.cpu) : clamp100(hw.cpuScore);
-  const gpuScore = ctx.scores.gpu > 0 ? clamp100(ctx.scores.gpu) : clamp100(hw.gpuScore);
-  const ramScore = ctx.scores.ram > 0 ? clamp100(ctx.scores.ram) : clamp100(hw.ramScore);
-  const diskScore = ctx.scores.disk > 0 ? clamp100(ctx.scores.disk) : clamp100(hw.diskScore);
+  const clamp100 = (n: number) => Math.max(10, Math.min(100, Math.round(n)));
 
-  // Weighted overall ranking score (GPU 38%, CPU 32%, RAM 16%, Disk 14%) blended with suite overall when available
-  const weightedCalc = Math.round(gpuScore * 0.38 + cpuScore * 0.32 + ramScore * 0.16 + diskScore * 0.14);
+  // Determine which subsystems actually have REAL measured benchmark results
+  const cpuTested =
+    (ctx.cpu?.multiCoreScore ?? 0) > 0 ||
+    (ctx.cpu?.overallScore ?? 0) > 0 ||
+    (ctx.scores?.cpu ?? 0) > 0;
+  const gpuTested =
+    (ctx.gpu?.avgFps ?? 0) > 0 ||
+    (ctx.gpu?.overallScore ?? 0) > 0 ||
+    (ctx.game?.avgFps ?? 0) > 0 ||
+    (ctx.game?.overallScore ?? 0) > 0 ||
+    (ctx.scores?.gpu ?? 0) > 0;
+  const ramTested =
+    (ctx.ram?.bandwidthReadMBs ?? 0) > 0 ||
+    (ctx.ram?.overallScore ?? 0) > 0 ||
+    (ctx.scores?.ram ?? 0) > 0;
+  const diskTested =
+    (ctx.disk?.seqReadMBs ?? 0) > 0 ||
+    (ctx.disk?.overallScore ?? 0) > 0 ||
+    (ctx.scores?.disk ?? 0) > 0;
+
+  // Recompute calibrated DDR4/DDR5 RAM score from real measured throughput & latency if available
+  const recalcRamScore =
+    (ctx.ram?.bandwidthReadMBs ?? 0) > 0 && (ctx.ram?.bandwidthWriteMBs ?? 0) > 0
+      ? computeRamSummaryMetrics({
+          bandwidthReadMBs: ctx.ram.bandwidthReadMBs,
+          bandwidthWriteMBs: ctx.ram.bandwidthWriteMBs,
+          latencyNs: ctx.ram.latencyNs || 18,
+          errorsFound: ctx.ram.errorsFound || 0,
+        }).overallScore
+      : 0;
+
+  // NEVER invent scores for untested components: untested = 0
+  const cpuScore = cpuTested
+    ? clamp100(ctx.scores.cpu > 0 ? ctx.scores.cpu : ctx.cpu?.overallScore > 0 ? ctx.cpu.overallScore : hw.cpuScore)
+    : 0;
+  const gpuRawMeasured = Math.max(
+    ctx.scores.gpu || 0,
+    ctx.gpu?.overallScore || 0,
+    ctx.game?.overallScore || 0
+  );
+  const gpuScore = gpuTested
+    ? clamp100(gpuRawMeasured > 0 ? gpuRawMeasured : hw.gpuScore)
+    : 0;
+  const ramRawMeasured = Math.max(
+    ctx.scores.ram || 0,
+    ctx.ram?.overallScore || 0,
+    recalcRamScore
+  );
+  const ramScore = ramTested
+    ? clamp100(ramRawMeasured > 0 ? ramRawMeasured : hw.ramScore)
+    : 0;
+  const diskRawMeasured = Math.max(ctx.scores.disk || 0, ctx.disk?.overallScore || 0);
+  const diskScore = diskTested
+    ? clamp100(diskRawMeasured > 0 ? diskRawMeasured : hw.diskScore)
+    : 0;
+
+  // Weighted overall score strictly from ACTUALLY TESTED subsystems
+  const weightedComponents: Array<{ score: number; weight: number }> = [];
+  if (gpuScore > 0) weightedComponents.push({ score: gpuScore, weight: 0.38 });
+  if (cpuScore > 0) weightedComponents.push({ score: cpuScore, weight: 0.32 });
+  if (ramScore > 0) weightedComponents.push({ score: ramScore, weight: 0.16 });
+  if (diskScore > 0) weightedComponents.push({ score: diskScore, weight: 0.14 });
+
+  const totalWeight = weightedComponents.reduce((sum, item) => sum + item.weight, 0);
   const overallScore =
-    ctx.scores.overall > 0
-      ? clamp100(Math.round(weightedCalc * 0.65 + ctx.scores.overall * 0.35))
-      : clamp100(weightedCalc);
+    totalWeight > 0
+      ? clamp100(
+          weightedComponents.reduce((sum, item) => sum + item.score * item.weight, 0) / totalWeight
+        )
+      : 0;
 
+  const testedCount = weightedComponents.length;
   const shortGpu = shortenGpuName(hw.gpuLabel);
+
+  const cpuSummary = cpuTested
+    ? `${hw.cpuCores} wątków${ctx.cpu.multiCoreScore > 0 ? ` · Multi: ${ctx.cpu.multiCoreScore.toLocaleString('pl-PL')} pkt` : ''}${ctx.cpu.singleCoreScore > 0 ? ` · Single: ${ctx.cpu.singleCoreScore.toLocaleString('pl-PL')} pkt` : ''}`
+    : `${hw.cpuCores} wątków (CPU: brak testu)`;
+
+  const low1Fps = Math.max(ctx.gpu?.low1PctFps || 0, ctx.game?.low1PctFps || 0);
+  const safeLow1 = hw.benchGpuFps > 0 && low1Fps > 0 ? Math.min(hw.benchGpuFps, low1Fps) : 0;
+  const gpuSummary = gpuTested
+    ? `${shortGpu}${hw.benchGpuFps > 0 ? ` · ${hw.benchGpuFps} FPS${safeLow1 > 0 ? ` (1% Low: ${safeLow1} FPS)` : ''}` : ''}`
+    : `${shortGpu} (GPU: brak testu)`;
+
+  const ramSummary = ramTested
+    ? ctx.ram?.bandwidthReadMBs > 0
+      ? `RAM: ${ctx.ram.bandwidthReadMBs}/${ctx.ram.bandwidthWriteMBs} MB/s · ${ctx.ram.latencyNs} ns · ${ctx.ram.errorsFound} błędów`
+      : `RAM: ${ramScore}/100 pkt`
+    : 'RAM: brak testu';
+
+  const diskSummary = diskTested
+    ? ctx.disk?.seqReadMBs > 0
+      ? `Dysk: ${ctx.disk.seqReadMBs}/${ctx.disk.seqWriteMBs} MB/s · SMART ${ctx.disk.smartHealthPct}%`
+      : `Dysk: ${diskScore}/100 pkt`
+    : 'Dysk: brak testu';
+
   const currentEntry: PcRankingEntry = {
     id: 'current_pc',
     name: `TWÓJ KOMPUTER (${shortGpu} · ${hw.cpuCores}T)`,
     tierLabel: tierFromScore(overallScore),
     category: 'Twój Aktualny PC',
-    cpuSummary: `${hw.cpuCores} wątków${ctx.cpu.multiCoreScore > 0 ? ` · ${ctx.cpu.multiCoreScore.toLocaleString('pl-PL')} pkt` : ''}`,
-    gpuSummary: `${shortGpu}${hw.benchGpuFps > 0 ? ` · ${hw.benchGpuFps} FPS` : ''}`,
+    cpuSummary,
+    gpuSummary,
+    ramSummary,
+    diskSummary,
     cpuScore,
     gpuScore,
     ramScore,
     diskScore,
     overallScore,
+    testedCount,
     isCurrentPc: true,
   };
 
   const savedEntries = savedOverride ?? loadSavedPcRankings();
+  // ONLY real measured entries in the leaderboard — no invented reference machines
   const combined: PcRankingEntry[] = [
     currentEntry,
     ...savedEntries.map((e) => ({ ...e, isCurrentPc: false, isUserSaved: true })),
-    ...REFERENCE_PC_LEADERBOARD,
   ].sort((a, b) => {
     if (b.overallScore !== a.overallScore) return b.overallScore - a.overallScore;
     if (b.gpuScore !== a.gpuScore) return b.gpuScore - a.gpuScore;
@@ -347,20 +311,36 @@ export function computePcRankingSnapshot(
   const totalRanked = combined.length;
   const belowCount = Math.max(0, totalRanked - currentRank);
   const percentileBetterThan =
-    totalRanked > 1 ? Math.round((belowCount / (totalRanked - 1)) * 100) : 100;
+    totalRanked > 1
+      ? Math.round((belowCount / (totalRanked - 1)) * 100)
+      : overallScore > 0
+        ? Math.min(99, Math.max(10, overallScore))
+        : 0;
 
-  const leader = combined[0];
+  const leader = combined[0] ?? currentEntry;
   const gapToLeader = Math.max(0, leader.overallScore - overallScore);
 
-  const parts: Array<{ name: string; score: number }> = [
-    { name: `Procesor CPU (${cpuScore}/100)`, score: cpuScore },
-    { name: `Grafika GPU 3D (${gpuScore}/100)`, score: gpuScore },
-    { name: `Pamięć RAM (${ramScore}/100)`, score: ramScore },
-    { name: `Dysk SSD/NVMe (${diskScore}/100)`, score: diskScore },
-  ];
-  const sortedParts = [...parts].sort((a, b) => b.score - a.score);
-  const strongestComponent = sortedParts[0].name;
-  const bottleneckComponent = sortedParts[sortedParts.length - 1].name;
+  const testedParts: Array<{ key: string; name: string; score: number }> = [];
+  if (cpuScore > 0) testedParts.push({ key: 'cpu', name: `Procesor CPU (${cpuScore}/100)`, score: cpuScore });
+  if (gpuScore > 0) testedParts.push({ key: 'gpu', name: `Grafika GPU 3D (${gpuScore}/100)`, score: gpuScore });
+  if (diskScore > 0) testedParts.push({ key: 'disk', name: `Dysk SSD/NVMe (${diskScore}/100)`, score: diskScore });
+  if (ramScore > 0) testedParts.push({ key: 'ram', name: `Pamięć RAM (${ramScore}/100)`, score: ramScore });
+
+  const sortedParts = [...testedParts].sort((a, b) => b.score - a.score);
+  const strongestComponent =
+    sortedParts.length > 0 ? sortedParts[0].name : 'Brak pomiaru (uruchom test)';
+
+  const lowestPart = sortedParts.length > 0 ? sortedParts[sortedParts.length - 1] : null;
+  const hasRamErrors = (ctx.ram?.errorsFound ?? 0) > 0;
+  const isBalancedHighEnd =
+    lowestPart !== null && lowestPart.score >= 82 && !hasRamErrors;
+
+  const bottleneckComponent =
+    lowestPart === null
+      ? 'Brak pomiaru (uruchom test)'
+      : isBalancedHighEnd
+        ? `Brak — pełny balans (${lowestPart.name} · 100% sprawny)`
+        : lowestPart.name;
 
   return {
     currentEntry,
@@ -373,98 +353,142 @@ export function computePcRankingSnapshot(
     leaderName: leader.name,
     strongestComponent,
     bottleneckComponent,
+    isBalancedHighEnd,
     tierBadge: tierFromScore(overallScore),
-    hasRealMeasurements: hasReal,
+    hasRealMeasurements: hasReal && overallScore > 0,
+    testedCount,
   };
 }
 
 let rankingFilter: 'all' | 'saved_only' = 'all';
 let saveNotice: string | null = null;
 
+function formatScoreCell(score: number): string {
+  return score > 0
+    ? `<strong style="color:#f8fafc;">${score}</strong>`
+    : `<span style="color:#64748b;" title="Nie wykonano jeszcze testu tego podzespołu">—</span>`;
+}
+
 export function renderPcRankingSectionHtml(ctx: PcRankingInputContext): string {
   const snap = computePcRankingSnapshot(ctx);
+
+  // When no real tests have been executed yet and there are no saved tested PCs, never show made-up numbers
+  if (!snap.hasRealMeasurements && snap.savedEntries.length === 0) {
+    const shortGpu = shortenGpuName(ctx.specs?.gpuRenderer || ctx.gpu?.rendererName || 'GPU WebGL2');
+    const cores = ctx.specs?.cpuCores || 8;
+    return `
+      <section class="sp-panel sp-ranking-panel" id="sp-pc-ranking-section">
+        <div class="sp-panel-head">
+          <div>
+            <span class="sp-eyebrow">RANKING KOMPUTERÓW I LAPTOPÓW · TYLKO RZECZYWISTE POMIARY BENCHMARKOWE</span>
+            <h3>🏆 Ranking Przetestowanych Komputerów — Wymagany pomiar</h3>
+            <p class="sp-muted">
+              Ranking prezentuje wyłącznie <strong>prawdziwe, zmierzone wyniki</strong> po wykonaniu testów wydajności (bez sztucznych lub zmyślonych tabel).
+              Wykryto Twój sprzęt: <strong>${escHtml(shortGpu)} · ${cores} wątków CPU</strong> — uruchom test, aby zmierzyć realną punktację.
+            </p>
+          </div>
+        </div>
+        <div class="sp-ranking-kpi-grid" style="display:none;"></div>
+        <div class="sp-ranking-table-wrap" style="padding:18px;text-align:center;">
+          <p style="margin:0 0 12px;color:#94a3b8;font-size:13px;">
+            Brak wykonanych testów w bieżącej sesji. Kliknij poniższy przycisk, aby przeprowadzić prawdziwy pomiar CPU, RAM, Dysku i GPU 3D.
+          </p>
+          <button type="button" class="btn btn-primary" data-run-full-suite="true" style="padding:10px 20px;font-weight:700;">
+            🚀 Uruchom Pełny Test PC (Zmierz prawdziwy wynik do Rankingu)
+          </button>
+        </div>
+      </section>
+    `;
+  }
+
   const rows =
-    rankingFilter === 'saved_only'
-      ? [snap.currentEntry, ...snap.savedEntries].sort((a, b) => b.overallScore - a.overallScore)
+    rankingFilter === 'saved_only' && snap.savedEntries.length > 0
+      ? snap.leaderboard.filter((e) => e.isUserSaved || e.isCurrentPc)
       : snap.leaderboard;
 
   const defaultLabel = `${shortenGpuName(ctx.specs?.gpuRenderer || ctx.gpu?.rendererName || 'PC')} (${ctx.specs?.cpuCores || 8}T)`;
+
+  const bottleneckColor = snap.isBalancedHighEnd ? '#34d399' : '#fbbf24';
+  const bottleneckSub = snap.isBalancedHighEnd
+    ? 'Wszystkie podzespoły pracują wzorowo — brak potrzeby wymiany'
+    : snap.testedCount < 4
+      ? `Przetestowano ${snap.testedCount}/4 podzespołów — uruchom pozostałe testy`
+      : 'Element o najniższym wyniku w tej konfiguracji';
 
   return `
     <section class="sp-panel sp-ranking-panel" id="sp-pc-ranking-section">
       <div class="sp-panel-head">
         <div>
-          <span class="sp-eyebrow">RANKING KOMPUTERÓW I LAPTOPÓW · PORÓWNANIE WYDAJNOŚCI (KTÓRY NAJLEPSZY?)</span>
-          <h3>🏆 Ranking Komputerów — Pozycja #${snap.currentRank} z ${snap.totalRanked} (Lepszy niż ${snap.percentileBetterThan}% konfiguracji)</h3>
+          <span class="sp-eyebrow">RANKING PRZETESTOWANYCH KOMPUTERÓW · 100% RZECZYWISTE WYNIKI Z TESTÓW (${snap.testedCount}/4 PODZESPOŁÓW)</span>
+          <h3>🏆 Ranking Komputerów — Pozycja #${snap.currentRank} z ${snap.totalRanked} (${snap.totalRanked > 1 ? `Lepszy niż ${snap.percentileBetterThan}% przetestowanych PC` : `Wynik pomiaru: ${snap.currentEntry.overallScore}/100 pkt`})</h3>
           <p class="sp-muted">
-            Porównanie Twojego PC z konfiguracjami referencyjnymi oraz własnymi zapisanymi komputerami klientów/stanowisk.
-            ${snap.hasRealMeasurements ? 'Pozycja wyliczona na podstawie zmierzonych benchmarków.' : 'Wstępna pozycja ze specyfikacji — uruchom Pełny Test, aby potwierdzić miejsce w rankingu.'}
+            Tabela zawiera wyłącznie <strong>prawdziwe wyniki z wykonanych testów</strong> (Twój aktualnie przetestowany komputer oraz zapisane po testach maszyny). Nieprzetestowane podzespoły są oznaczane jako „—”.
           </p>
         </div>
         <div class="sp-ranking-controls">
           <div class="sp-games-filter-bar">
             <button type="button" class="sp-filter-btn ${rankingFilter === 'all' ? 'active' : ''}" data-rank-filter="all">
-              Pełny Ranking (${snap.totalRanked})
+              Wszystkie Przetestowane (${snap.totalRanked})
             </button>
             <button type="button" class="sp-filter-btn ${rankingFilter === 'saved_only' ? 'active' : ''}" data-rank-filter="saved_only">
-              Moje Zapisane PC (${snap.savedEntries.length + 1})
+              Zapisane w Bazie (${snap.savedEntries.length})
             </button>
           </div>
         </div>
       </div>
 
-      <!-- KPI podsumowanie pozycji -->
+      <!-- KPI podsumowanie pozycji z realnych pomiarów -->
       <div class="sp-ranking-kpi-grid">
         <div class="sp-ranking-kpi">
           <span class="sp-ranking-kpi-lbl">Miejsce w Rankingu</span>
           <strong class="sp-ranking-kpi-val status-cyan">#${snap.currentRank} / ${snap.totalRanked}</strong>
-          <span class="sp-ranking-kpi-sub">Klasa: ${escHtml(snap.tierBadge)}</span>
+          <span class="sp-ranking-kpi-sub">Klasa pomiaru: ${escHtml(snap.tierBadge)}</span>
         </div>
         <div class="sp-ranking-kpi">
-          <span class="sp-ranking-kpi-lbl">Percentyl Mocy</span>
-          <strong class="sp-ranking-kpi-val status-ok">TOP ${Math.max(1, 100 - snap.percentileBetterThan)}%</strong>
-          <span class="sp-ranking-kpi-sub">Lepszy niż ${snap.percentileBetterThan}% PC</span>
+          <span class="sp-ranking-kpi-lbl">Zmierzony Indeks Ogólny</span>
+          <strong class="sp-ranking-kpi-val status-ok">${snap.currentEntry.overallScore}/100 pkt</strong>
+          <span class="sp-ranking-kpi-sub">Wykonane testy: ${snap.testedCount}/4 podzespołów</span>
         </div>
         <div class="sp-ranking-kpi">
-          <span class="sp-ranking-kpi-lbl">Najmocniejszy element</span>
+          <span class="sp-ranking-kpi-lbl">Najmocniejszy przetestowany element</span>
           <strong class="sp-ranking-kpi-val" style="font-size:13.5px;color:#34d399;">${escHtml(snap.strongestComponent)}</strong>
-          <span class="sp-ranking-kpi-sub">Strata do #1: ${snap.gapToLeader === 0 ? 'LIDER RANKINGU!' : `-${snap.gapToLeader} pkt`}</span>
+          <span class="sp-ranking-kpi-sub">${snap.gapToLeader === 0 ? 'LIDER RANKINGU (#1)!' : `Strata do #1: -${snap.gapToLeader} pkt`}</span>
         </div>
         <div class="sp-ranking-kpi">
-          <span class="sp-ranking-kpi-lbl">Najsłabsze ogniwo (Bottleneck)</span>
-          <strong class="sp-ranking-kpi-val" style="font-size:13.5px;color:#fbbf24;">${escHtml(snap.bottleneckComponent)}</strong>
-          <span class="sp-ranking-kpi-sub">Potencjał do modernizacji</span>
+          <span class="sp-ranking-kpi-lbl">Balans Konfiguracji / Diagnoza</span>
+          <strong class="sp-ranking-kpi-val" style="font-size:13.5px;color:${bottleneckColor};">${escHtml(snap.bottleneckComponent)}</strong>
+          <span class="sp-ranking-kpi-sub">${escHtml(bottleneckSub)}</span>
         </div>
       </div>
 
-      <!-- Zapisz aktualny komputer do lokalnego rankingu serwisowego -->
+      <!-- Zapisz aktualnie przetestowany komputer do lokalnego rankingu serwisowego -->
       <div class="sp-ranking-save-bar">
         <input
           type="text"
           id="sp-ranking-pc-name"
           class="input-text"
-          placeholder="Nazwa komputera (np. PC Klienta #1, Laptop Gamingowy...)"
+          placeholder="Nazwa przetestowanego komputera (np. PC Klienta #1, Stacja RX 7900 XTX...)"
           value="${escHtml(defaultLabel)}"
           style="flex:1;min-width:220px;"
         />
-        <button type="button" class="btn btn-primary btn-sm" id="sp-ranking-save-btn">
-          💾 Zapisz ten PC do Rankingu (Porównaj z innymi)
+        <button type="button" class="btn btn-primary btn-sm" id="sp-ranking-save-btn" ${snap.hasRealMeasurements ? '' : 'disabled'}>
+          💾 Zapisz ten wynik testu do Rankingu (Porównaj kolejne PC)
         </button>
       </div>
       ${saveNotice ? `<div class="sp-scheme-feedback">${escHtml(saveNotice)}</div>` : ''}
 
-      <!-- Tabela rankingu od #1 najlepszego -->
+      <!-- Tabela rankingu z prawdziwymi pomiarami -->
       <div class="sp-ranking-table-wrap">
         <table class="sp-ranking-table">
           <thead>
             <tr>
               <th style="width:52px;">Poz.</th>
-              <th>Komputer / Konfiguracja</th>
+              <th>Przetestowany Komputer / Rzeczywiste Pomiary</th>
               <th style="width:74px;">CPU</th>
               <th style="width:74px;">GPU</th>
               <th style="width:74px;">RAM</th>
               <th style="width:74px;">Dysk</th>
-              <th style="width:170px;">Wynik Ogólny</th>
+              <th style="width:170px;">Wynik z Testów</th>
               <th style="width:46px;"></th>
             </tr>
           </thead>
@@ -485,10 +509,13 @@ export function renderPcRankingSectionHtml(ctx: PcRankingInputContext): string {
                       ? 'sp-rank-bar-fill--mid'
                       : 'sp-rank-bar-fill--low';
                 const tagHtml = entry.isCurrentPc
-                  ? '<span class="sp-rank-tag sp-rank-tag--current">TWÓJ PC</span>'
+                  ? '<span class="sp-rank-tag sp-rank-tag--current">TWÓJ WYNIK LIVE</span>'
                   : entry.isUserSaved
-                    ? '<span class="sp-rank-tag sp-rank-tag--saved">ZAPISANY</span>'
+                    ? '<span class="sp-rank-tag sp-rank-tag--saved">ZAPISANY TEST</span>'
                     : `<span class="sp-rank-tag">${escHtml(entry.tierLabel)}</span>`;
+                const extraDetails = [entry.gpuSummary, entry.cpuSummary, entry.ramSummary, entry.diskSummary]
+                  .filter(Boolean)
+                  .join(' · ');
                 return `
                   <tr class="${rowCls}">
                     <td class="font-mono" style="font-weight:800;text-align:center;">${medal}</td>
@@ -497,24 +524,24 @@ export function renderPcRankingSectionHtml(ctx: PcRankingInputContext): string {
                         <strong>${escHtml(entry.name)}</strong>
                         ${tagHtml}
                       </div>
-                      <div class="sp-rank-sub">${escHtml(entry.gpuSummary)} · ${escHtml(entry.cpuSummary)}</div>
+                      <div class="sp-rank-sub">${escHtml(extraDetails)}</div>
                     </td>
-                    <td class="font-mono">${entry.cpuScore}</td>
-                    <td class="font-mono">${entry.gpuScore}</td>
-                    <td class="font-mono">${entry.ramScore}</td>
-                    <td class="font-mono">${entry.diskScore}</td>
+                    <td class="font-mono">${formatScoreCell(entry.cpuScore)}</td>
+                    <td class="font-mono">${formatScoreCell(entry.gpuScore)}</td>
+                    <td class="font-mono">${formatScoreCell(entry.ramScore)}</td>
+                    <td class="font-mono">${formatScoreCell(entry.diskScore)}</td>
                     <td>
                       <div class="sp-rank-score-cell">
                         <div class="sp-rank-bar-track">
                           <div class="sp-rank-bar-fill ${barFillCls}" style="width:${entry.overallScore}%"></div>
                         </div>
-                        <strong class="font-mono">${entry.overallScore}/100</strong>
+                        <strong class="font-mono">${entry.overallScore > 0 ? `${entry.overallScore}/100` : 'Brak'}</strong>
                       </div>
                     </td>
                     <td style="text-align:right;">
                       ${
                         entry.isUserSaved
-                          ? `<button type="button" class="btn btn-secondary btn-sm" data-rank-delete="${escHtml(entry.id)}" title="Usuń z rankingu" style="padding:2px 7px;font-size:11px;">✕</button>`
+                          ? `<button type="button" class="btn btn-secondary btn-sm" data-rank-delete="${escHtml(entry.id)}" title="Usuń zapisany wynik z rankingu" style="padding:2px 7px;font-size:11px;">✕</button>`
                           : ''
                       }
                     </td>
@@ -543,9 +570,14 @@ export function bindPcRankingSectionEvents(
 
   const saveBtn = root.querySelector<HTMLButtonElement>('#sp-ranking-save-btn');
   saveBtn?.addEventListener('click', () => {
+    const snap = computePcRankingSnapshot(ctx);
+    if (!snap.hasRealMeasurements || snap.currentEntry.overallScore <= 0) {
+      saveNotice = '⚠️ Uruchom najpierw test wydajności (np. Pełny Test PC), aby zapisać prawdziwy zmierzony wynik.';
+      rerender();
+      return;
+    }
     const input = root.querySelector<HTMLInputElement>('#sp-ranking-pc-name');
     const customName = input?.value.trim() || 'Przetestowany PC';
-    const snap = computePcRankingSnapshot(ctx);
     savePcToRanking({
       ...snap.currentEntry,
       id: `saved_${Date.now()}`,
@@ -554,7 +586,7 @@ export function bindPcRankingSectionEvents(
       isUserSaved: true,
       savedAt: Date.now(),
     });
-    saveNotice = `✓ Zapisano „${customName}” (${snap.currentEntry.overallScore}/100 pkt) do lokalnego rankingu komputerów.`;
+    saveNotice = `✓ Zapisano prawdziwy wynik testu „${customName}” (${snap.currentEntry.overallScore}/100 pkt) do rankingu.`;
     rerender();
   });
 
@@ -563,7 +595,7 @@ export function bindPcRankingSectionEvents(
       const id = btn.dataset.rankDelete;
       if (id) {
         deleteSavedPcFromRanking(id);
-        saveNotice = 'Usunięto pozycję z zapisanego rankingu.';
+        saveNotice = 'Usunięto zapisany wynik z rankingu.';
         rerender();
       }
     });

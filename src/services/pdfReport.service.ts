@@ -481,7 +481,7 @@ export function buildDiagnosticPdfDocument(payload: PdfReportPayload): jsPDF {
     },
     {
       label: 'Pamiec RAM',
-      score: scores.ram,
+      score: rankingSnap.currentEntry.ramScore || scores.ram,
       detail:
         ram.bandwidthReadMBs > 0
           ? `Odczyt ${ram.bandwidthReadMBs} / Zapis ${ram.bandwidthWriteMBs} MB/s | Bledy: ${ram.errorsFound} (${ram.healthGrade})`
@@ -653,7 +653,7 @@ export function buildDiagnosticPdfDocument(payload: PdfReportPayload): jsPDF {
       ['Test Szachownicy / PRNG', ram.status === 'completed' ? `${ram.patternErrors} / ${ram.randomErrors} bledow` : 'Oczekiwanie'],
       ['Test Walking 1s/0s', ram.status === 'completed' ? `${ram.walkingBitErrors} bledow` : 'Oczekiwanie'],
       ['Laczne bledy / Werdykt', `${ram.errorsFound} bledow | ${ram.healthGrade}`],
-      ['Wynik koncowy RAM', scores.ram > 0 ? `${scores.ram} / 100 pkt` : 'Nie testowano'],
+      ['Wynik koncowy RAM', (rankingSnap.currentEntry.ramScore || scores.ram) > 0 ? `${rankingSnap.currentEntry.ramScore || scores.ram} / 100 pkt` : 'Nie testowano'],
     ],
     [99, 102, 241]
   );
@@ -1014,10 +1014,10 @@ export function buildDiagnosticPdfDocument(payload: PdfReportPayload): jsPDF {
         ? `[ZAPISANY] ${entry.name}`
         : entry.name;
     doc.text(fitTextToWidth(doc, nameLabel, 91), margin + 13, y + 3.6);
-    doc.text(`${entry.cpuScore}`, margin + 106, y + 3.6);
-    doc.text(`${entry.gpuScore}`, margin + 118, y + 3.6);
-    doc.text(`${entry.ramScore}`, margin + 130, y + 3.6);
-    doc.text(`${entry.diskScore}`, margin + 142, y + 3.6);
+    doc.text(entry.cpuScore > 0 ? `${entry.cpuScore}` : '--', margin + 106, y + 3.6);
+    doc.text(entry.gpuScore > 0 ? `${entry.gpuScore}` : '--', margin + 118, y + 3.6);
+    doc.text(entry.ramScore > 0 ? `${entry.ramScore}` : '--', margin + 130, y + 3.6);
+    doc.text(entry.diskScore > 0 ? `${entry.diskScore}` : '--', margin + 142, y + 3.6);
 
     // Mini score bar + number
     doc.setFillColor(226, 232, 240);

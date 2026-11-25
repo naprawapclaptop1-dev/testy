@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="mBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b1324" />
+      <stop offset="55%" stop-color="#070b14" />
+      <stop offset="100%" stop-color="#0e1b33" />
+    </linearGradient>
+    <linearGradient id="mRing" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="50%" stop-color="#06b6d4" />
+      <stop offset="100%" stop-color="#10b981" />
+    </linearGradient>
+    <linearGradient id="mPulse" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="50%" stop-color="#22d3ee" />
+      <stop offset="100%" stop-color="#34d399" />
+    </linearGradient>
+  </defs>
+
+  <!-- Full-bleed dark background for maskable safe-zone cropping (14% padding) -->
+  <rect x="0" y="0" width="512" height="512" fill="url(#mBg)" />
+
+  <!-- Centered inner emblem inside central 76% safe zone -->
+  <g transform="translate(64, 64) scale(0.75)">
+    <g stroke="#38bdf8" stroke-width="16" stroke-linecap="round" opacity="0.78">
+      <line x1="184" y1="74" x2="184" y2="112" />
+      <line x1="256" y1="74" x2="256" y2="112" />
+      <line x1="328" y1="74" x2="328" y2="112" />
+      <line x1="184" y1="400" x2="184" y2="438" />
+      <line x1="256" y1="400" x2="256" y2="438" />
+      <line x1="328" y1="400" x2="328" y2="438" />
+      <line x1="74" y1="184" x2="112" y2="184" />
+      <line x1="74" y1="256" x2="112" y2="256" />
+      <line x1="74" y1="328" x2="112" y2="328" />
+      <line x1="400" y1="184" x2="438" y2="184" />
+      <line x1="400" y1="256" x2="438" y2="256" />
+      <line x1="400" y1="328" x2="438" y2="328" />
+    </g>
+    <rect x="112" y="112" width="288" height="288" rx="48" fill="#0f172a" stroke="url(#mRing)" stroke-width="14" />
+    <rect x="138" y="138" width="236" height="236" rx="32" fill="#08101f" stroke="#1e293b" stroke-width="4" />
+    <polyline
+      points="146,266 196,266 224,178 264,336 300,222 324,266 366,266"
+      fill="none"
+      stroke="url(#mPulse)"
+      stroke-width="22"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+    <circle cx="224" cy="178" r="15" fill="#f8fafc" stroke="#22d3ee" stroke-width="6" />
+    <circle cx="300" cy="222" r="12" fill="#34d399" />
+  </g>
+</svg>

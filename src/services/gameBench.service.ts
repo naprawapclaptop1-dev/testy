@@ -2237,7 +2237,7 @@ export class GameBenchService {
     renderer.info.autoReset = false;
     this.applyRendererToneMapping(renderer);
     renderer.shadowMap.enabled = this.shadowsEnabled;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
     renderer.setSize(w, h);
     container.innerHTML = '';
     container.appendChild(renderer.domElement);
