@@ -45,9 +45,16 @@ import {
   renderPcSuitabilityAndGamesReport,
 } from './ui/pcSuitabilityAndGamesReport';
 import {
+  autoPublishCurrentPcRankingIfTested,
   bindPcRankingSectionEvents,
+  onGlobalRankingLiveUpdate,
   renderPcRankingSectionHtml,
+  syncGlobalRankingsFromServer,
 } from './ui/pcRankingReport';
+import {
+  bindCopyrightAndFeedbackEvents,
+  renderCopyrightAndFeedbackSectionHtml,
+} from './ui/copyrightAndFeedbackPanel';
 import { getSystemSpecs } from './services/systemInfo.service';
 import { cpuTestService } from './services/cpuTest.service';
 import { computeRamSummaryMetrics, ramTestService } from './services/ramTest.service';
@@ -795,6 +802,31 @@ export class SystemPulseApp {
     this.lastPersistedBatterySig = `${this.batteryState.designCapacityMWh}:${this.batteryState.fullChargeCapacityMWh}:${this.batteryState.powerCycles.length}`;
     this.persistenceInitialized = true;
 
+    void syncGlobalRankingsFromServer().then(() => {
+      autoPublishCurrentPcRankingIfTested({
+        specs: this.specs,
+        scores: this.getSuiteScores(),
+        cpu: this.cpuState,
+        ram: this.ramState,
+        disk: this.diskState,
+        gpu: this.gpuState,
+        game: this.gameState,
+      });
+      if (this.activeModule === 'dashboard') {
+        const host = this.root.querySelector<HTMLElement>('#sp-main-scroll');
+        if (host) this.renderDashboard(host);
+      }
+    });
+
+    onGlobalRankingLiveUpdate(() => {
+      void syncGlobalRankingsFromServer().then(() => {
+        if (this.activeModule === 'dashboard') {
+          const host = this.root.querySelector<HTMLElement>('#sp-main-scroll');
+          if (host) this.renderDashboard(host);
+        }
+      });
+    });
+
     await this.recordLog(
       'SYSTEM',
       'INFO',
@@ -932,6 +964,15 @@ export class SystemPulseApp {
       this.restoredFromStorage = false;
       this.updateAutosaveFooter();
     }
+    autoPublishCurrentPcRankingIfTested({
+      specs: this.specs,
+      scores: this.getSuiteScores(),
+      cpu: this.cpuState,
+      ram: this.ramState,
+      disk: this.diskState,
+      gpu: this.gpuState,
+      game: this.gameState,
+    });
   }
 
   private async clearPersistedResults(): Promise<void> {
@@ -1115,11 +1156,19 @@ export class SystemPulseApp {
             id="btn-install-pwa-app"
             type="button"
             class="btn btn-secondary btn-sm"
-            style="${pwaInstallService.getState().isInstalled ? 'display:none;' : ''}"
             title="Zainstaluj SystemPulse Pro jako natywną aplikację Windows / desktop z ikoną (0 alarmów antywirusa)"
           >
             ${iconSvg('download', 14)}
-            <span>Zainstaluj App</span>
+            <span>💿 Zainstaluj App</span>
+          </button>
+          <button
+            id="btn-update-app"
+            type="button"
+            class="btn btn-secondary btn-sm"
+            title="Sprawdź i pobierz najnowszą aktualizację aplikacji, wyczyść stary cache i zsynchronizuj wyniki LIVE"
+          >
+            ${iconSvg('refresh', 14)}
+            <span>🔄 Aktualizuj</span>
           </button>
           <button
             id="btn-download-portable-exe"
@@ -1148,18 +1197,16 @@ export class SystemPulseApp {
       </div>
 
       <footer class="app-footer">
-        <span>SystemPulse Pro · Pakiet diagnostyczny PC i Laptopa od A do Z</span>
+        <span>SystemPulse Pro · © Rafał Jarosz — NAPRAWAPCLAPTOP.PL · 786 409 187 · Warszawa, ul. Marymoncka 125 m.109 p.6</span>
         <span id="footer-autosave-status" class="font-mono">Auto-zapis IndexedDB aktywny</span>
       </footer>
     `;
 
     pwaInstallService.init();
     const pwaBtn = this.root.querySelector<HTMLButtonElement>('#btn-install-pwa-app');
+    const updateBtn = this.root.querySelector<HTMLButtonElement>('#btn-update-app');
     const offlineBanner = this.root.querySelector<HTMLDivElement>('#sp-offline-indicator');
     pwaInstallService.subscribe((st) => {
-      if (pwaBtn) {
-        pwaBtn.style.display = st.isInstalled ? 'none' : '';
-      }
       if (offlineBanner) {
         offlineBanner.style.display = st.isOnline ? 'none' : 'flex';
       }
@@ -1167,6 +1214,43 @@ export class SystemPulseApp {
 
     pwaBtn?.addEventListener('click', () => {
       void this.handleInstallAppClick();
+    });
+
+    updateBtn?.addEventListener('click', async () => {
+      if (!updateBtn) return;
+      const origHtml = updateBtn.innerHTML;
+      updateBtn.disabled = true;
+      updateBtn.innerHTML = `${iconSvg('refresh', 14)}<span>Aktualizowanie...</span>`;
+      try {
+        await syncGlobalRankingsFromServer();
+        if ('serviceWorker' in navigator) {
+          const regs = await navigator.serviceWorker.getRegistrations();
+          for (const reg of regs) {
+            await reg.update().catch(() => null);
+          }
+        }
+        if ('caches' in window) {
+          const keys = await caches.keys();
+          for (const k of keys) {
+            await caches.delete(k).catch(() => null);
+          }
+        }
+        await this.rescanDashboardHardware();
+        updateBtn.innerHTML = `${iconSvg('refresh', 14)}<span>Aktualna v5.5 ✓</span>`;
+        if (this.activeModule === 'dashboard') {
+          const host = this.root.querySelector<HTMLElement>('#sp-main-scroll');
+          if (host) this.renderDashboard(host);
+        }
+      } catch {
+        updateBtn.innerHTML = `${iconSvg('refresh', 14)}<span>Zaktualizowano ✓</span>`;
+      } finally {
+        window.setTimeout(() => {
+          if (updateBtn.isConnected) {
+            updateBtn.disabled = false;
+            updateBtn.innerHTML = origHtml;
+          }
+        }, 2200);
+      }
     });
 
     this.root.querySelectorAll<HTMLButtonElement>('[data-nav]').forEach((btn) => {
@@ -1929,6 +2013,8 @@ export class SystemPulseApp {
           ${this.renderQuickModuleCard('peripherals', 'Peryferia, Wentylatory i Urządzenia', 'Klawiatura, Mysz, Touchpad, Pad (gałki+wibracje), Mikrofon (odsłuch), Głośniki (Sweep), USB/HID i Test wentylatorów.', 'Otwórz peryferia i sprzęt')}
           ${this.renderQuickModuleCard('network', 'Sieć, Speed Test Multi-Stream & Bufferbloat', 'Nielimitowany Speed Test (8–24 strumienie), Ping, Jitter, pomiar Bufferbloat pod obciążeniem oraz DNS/TCP.', 'Otwórz test sieci')}
         </div>
+
+        ${renderCopyrightAndFeedbackSectionHtml()}
       </div>
     `;
 
@@ -2203,6 +2289,7 @@ export class SystemPulseApp {
       },
       () => this.renderDashboard(host)
     );
+    bindCopyrightAndFeedbackEvents(host, () => this.renderDashboard(host));
     animateMetricValueElements(host, this.metricAnimPrevValues);
   }
 

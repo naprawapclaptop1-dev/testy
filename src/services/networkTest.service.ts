@@ -854,14 +854,40 @@ export class NetworkTestService {
     return `https://speed.cloudflare.com/__up?_r=${Date.now()}_${burstIndex}_${streamIdx}`;
   }
 
+  private fillHighEntropyUploadPayload(buf: Uint8Array, seed: number): void {
+    let state = (seed ^ 0x9e3779b9) >>> 0;
+    if (state === 0) state = 0x6d2b79f5;
+    const len32 = buf.byteLength >>> 2;
+    const view32 = new Uint32Array(buf.buffer, buf.byteOffset, len32);
+    for (let i = 0; i < len32; i++) {
+      state ^= state << 13;
+      state ^= state >>> 17;
+      state ^= state << 5;
+      view32[i] = state >>> 0;
+    }
+    for (let i = len32 << 2; i < buf.byteLength; i++) {
+      state ^= state << 13;
+      state ^= state >>> 17;
+      state ^= state << 5;
+      buf[i] = state & 0xff;
+    }
+  }
+
   /**
    * Executes a 100% REAL multi-stream HTTP download + upload measurement.
-   * Uses ReadableStream byte-counting starting after response headers arrive so throughput
-   * reflects genuine wire transfer rate over parallel TCP/HTTP streams. Zero synthetic caps or fake RAM copies.
+   * - Download timer starts at request dispatch (`burstReqStartTs`) minus 1 baseline RTT, so local
+   *   antivirus proxies (e.g. Bitdefender Encrypted Web Scan) that buffer payloads before delivering
+   *   chunks to `reader.read()` cannot inflate download Mbps with localhost RAM-flush timings.
+   * - Upload uses 100% high-entropy Xorshift32 pseudo-random bytes (immune to zero-compression)
+   *   and counts bytes ONLY when the remote server returns HTTP 200 OK (`res.ok`), preventing
+   *   local OS TCP send buffer (`SO_SNDBUF` / `xhr.upload.onprogress`) from faking upload speed.
    */
   private async measureRealBandwidthPhase(
     burstIndex: number,
     direction: NetworkTransferDirection,
+    baselineRttMs: number,
+    lastMeasuredDlMbps: number,
+    lastMeasuredUlMbps: number,
     onLiveSample?: (phase: 'down' | 'up', liveMbps: number, liveBytes: number) => void
   ): Promise<{
     downloadMbps: number;
@@ -871,14 +897,31 @@ export class NetworkTestService {
     sourceLabel: string;
   }> {
     const srv = this.getSelectedServer();
-    const streamCount = Math.max(6, Math.min(12, this.activeStreams));
-    const chunkBytes = burstIndex <= 2 ? 12_000_000 : 25_000_000;
-    const maxWindowMs = direction === 'both' ? 2200 : 2800;
+    const configuredStreams = Math.max(4, Math.min(12, this.activeStreams));
+    const dlStreams = burstIndex === 1 ? Math.min(6, configuredStreams) : configuredStreams;
+
+    // Adaptive download chunk size per stream (~1.1s target wire transfer) so we don't force
+    // 200 MB per burst through AV proxies on medium links while still scaling up for 1G+ fiber.
+    let chunkBytes = 1_500_000;
+    if (burstIndex > 1) {
+      if (lastMeasuredDlMbps > 0) {
+        const targetBytesPerStream = Math.round(
+          ((lastMeasuredDlMbps * 1_000_000) / 8) * 1.1 / dlStreams
+        );
+        chunkBytes = Math.max(1_000_000, Math.min(10_000_000, targetBytesPerStream));
+      } else {
+        chunkBytes = 2_500_000;
+      }
+    }
+
+    const maxWindowMs = direction === 'both' ? 2400 : 3000;
+    const rttOffsetMs = Math.min(110, Math.max(8, baselineRttMs > 0 ? baselineRttMs : 24));
 
     let totalDownBytes = 0;
-    let firstByteTs = 0;
-    let lastByteTs = 0;
+    let burstReqStartTs = 0;
+    let lastChunkTs = 0;
     let loadedPingMs = 0;
+    let verifiedColo = '';
     let sourceLabel = 'Cloudflare Edge Multi-Stream (HTTPS)';
 
     const runDownload = direction === 'both' || direction === 'download';
@@ -889,9 +932,9 @@ export class NetworkTestService {
 
     const runDownloadStreams = async (useLocalFallback: boolean): Promise<number> => {
       totalDownBytes = 0;
-      firstByteTs = 0;
-      lastByteTs = 0;
-      let lastReportTs = performance.now();
+      burstReqStartTs = performance.now();
+      lastChunkTs = burstReqStartTs;
+      let lastReportTs = burstReqStartTs;
 
       const streamCtrls: AbortController[] = [];
       const windowTimer = window.setTimeout(() => {
@@ -902,23 +945,31 @@ export class NetworkTestService {
             // ignore
           }
         }
-      }, maxWindowMs + 1400);
+      }, maxWindowMs + 400);
 
       try {
         await Promise.all(
-          Array.from({ length: streamCount }, async (_, k) => {
+          Array.from({ length: dlStreams }, async (_, k) => {
             if (this.abortRequested) return;
             const ctrl = new AbortController();
             streamCtrls.push(ctrl);
             this.activeControllers.add(ctrl);
 
             const url = useLocalFallback
-              ? `${window.location.origin}/api/speedtest/download?bytes=${8 * 1024 * 1024}&_r=${Date.now()}_${burstIndex}_${k}`
+              ? `${window.location.origin}/api/speedtest/download?bytes=${4 * 1024 * 1024}&_r=${Date.now()}_${burstIndex}_${k}`
               : this.getDownloadStreamUrl(chunkBytes, burstIndex, k);
 
             try {
               const res = await fetch(url, { cache: 'no-store', signal: ctrl.signal });
               if (!res.ok) return;
+
+              if (!verifiedColo && !useLocalFallback) {
+                const colo = res.headers.get('cf-meta-colo') || '';
+                const city = res.headers.get('cf-meta-city') || '';
+                if (colo) {
+                  verifiedColo = city ? `${colo} · ${city}` : colo;
+                }
+              }
 
               if (res.body && typeof res.body.getReader === 'function') {
                 const reader = res.body.getReader();
@@ -926,18 +977,19 @@ export class NetworkTestService {
                   const { done, value } = await reader.read();
                   if (done) break;
                   const now = performance.now();
-                  if (firstByteTs === 0) firstByteTs = now;
-                  lastByteTs = now;
+                  if (now > lastChunkTs) lastChunkTs = now;
                   totalDownBytes += value.byteLength;
 
-                  if (onLiveSample && now - firstByteTs > 120 && now - lastReportTs > 130) {
+                  const wallElapsedMs = now - burstReqStartTs;
+                  if (onLiveSample && wallElapsedMs >= 420 && now - lastReportTs >= 160) {
                     lastReportTs = now;
-                    const sec = Math.max(0.05, (now - firstByteTs) / 1000);
+                    const wireMs = Math.max(wallElapsedMs * 0.8, wallElapsedMs - rttOffsetMs);
+                    const sec = Math.max(0.1, wireMs / 1000);
                     const liveMbps = Number((((totalDownBytes * 8) / 1_000_000) / sec).toFixed(1));
                     onLiveSample('down', liveMbps, totalDownBytes);
                   }
 
-                  if (now - firstByteTs >= maxWindowMs) {
+                  if (wallElapsedMs >= maxWindowMs) {
                     try {
                       await reader.cancel();
                     } catch {
@@ -947,11 +999,9 @@ export class NetworkTestService {
                   }
                 }
               } else {
-                const tBody0 = performance.now();
                 const buf = await res.arrayBuffer();
                 const tBody1 = performance.now();
-                if (firstByteTs === 0 || tBody0 < firstByteTs) firstByteTs = tBody0;
-                if (tBody1 > lastByteTs) lastByteTs = tBody1;
+                if (tBody1 > lastChunkTs) lastChunkTs = tBody1;
                 totalDownBytes += buf.byteLength;
               }
             } catch {
@@ -969,6 +1019,9 @@ export class NetworkTestService {
 
     if (runDownload) {
       await runDownloadStreams(false);
+      if (verifiedColo) {
+        sourceLabel = `Cloudflare Edge [${verifiedColo}] (Real HTTPS)`;
+      }
       if (
         totalDownBytes === 0 &&
         !this.abortRequested &&
@@ -976,7 +1029,7 @@ export class NetworkTestService {
       ) {
         const localBytes = await runDownloadStreams(true);
         if (localBytes > 0) {
-          sourceLabel = 'Localhost Bridge (.EXE) — Pętla lokalna';
+          sourceLabel = 'Localhost Bridge (.EXE) — Pętla lokalna (Tryb Offline)';
         }
       }
     }
@@ -984,31 +1037,42 @@ export class NetworkTestService {
     const loadedRes = await loadedPingPromise;
     loadedPingMs = loadedRes.ok ? loadedRes.latencyMs : 0;
 
-    const dlSec = firstByteTs > 0 && lastByteTs > firstByteTs ? (lastByteTs - firstByteTs) / 1000 : 0;
+    const rawDlWallMs = Math.max(0, lastChunkTs - burstReqStartTs);
+    const dlWireMs = Math.max(rawDlWallMs * 0.8, rawDlWallMs - rttOffsetMs);
+    const dlSec = dlWireMs > 0 ? dlWireMs / 1000 : 0;
     const downloadMbps =
-      runDownload && totalDownBytes > 0 && dlSec > 0
+      runDownload && totalDownBytes > 0 && dlSec >= 0.05
         ? Number((((totalDownBytes * 8) / 1_000_000) / dlSec).toFixed(1))
         : 0;
 
-    // 2. Real Multi-Stream Upload via XHR upload.onprogress (live streaming) with fetch fallback
+    // 2. Real Multi-Stream Upload: High-entropy incompressible payload + strict HTTP 200 OK confirmation
     let totalUpBytes = 0;
     let uploadMbps = 0;
     if (runUpload && !this.abortRequested) {
-      const upStreams = Math.max(4, Math.min(10, direction === 'upload' ? streamCount : Math.round(streamCount * 0.65)));
-      const uploadChunkSize = (direction === 'upload' ? 6 : 4) * 1024 * 1024;
-      const upPayload = new Uint8Array(uploadChunkSize);
-      for (let i = 0; i < uploadChunkSize; i += 64) {
-        upPayload[i] = (i * 31 + burstIndex) & 0xff;
+      const upStreams = Math.max(
+        3,
+        Math.min(6, direction === 'upload' ? Math.min(6, configuredStreams) : Math.min(4, Math.round(configuredStreams * 0.5)))
+      );
+
+      let uploadChunkSize = 512 * 1024; // 512 KB default calibration per stream
+      if (burstIndex > 1 && lastMeasuredUlMbps > 0) {
+        const targetUpBytesPerStream = Math.round(
+          ((lastMeasuredUlMbps * 1_000_000) / 8) * 0.85 / upStreams
+        );
+        uploadChunkSize = Math.max(256 * 1024, Math.min(2560 * 1024, targetUpBytesPerStream));
       }
+
+      const upPayload = new Uint8Array(uploadChunkSize);
+      this.fillHighEntropyUploadPayload(upPayload, (burstIndex * 0x45d9f3b) ^ Date.now());
 
       const isLocalOrigin =
         window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost';
       const useLocalUp = sourceLabel.startsWith('Localhost');
 
       const runUploadPass = async (localFallback: boolean): Promise<{ bytes: number; sec: number }> => {
-        const streamLoaded = new Array<number>(upStreams).fill(0);
         const tUp0 = performance.now();
-        let lastUpReportTs = tUp0;
+        let confirmedUpBytes = 0;
+        let lastUpAckTs = tUp0;
 
         const sendOneStream = async (k: number): Promise<number> => {
           if (this.abortRequested) return 0;
@@ -1016,57 +1080,9 @@ export class NetworkTestService {
             ? `${window.location.origin}/api/speedtest/upload?_r=${Date.now()}_${burstIndex}_${k}`
             : this.getUploadEndpointUrl(burstIndex, k);
 
-          if (typeof XMLHttpRequest !== 'undefined') {
-            return await new Promise<number>((resolve) => {
-              const xhr = new XMLHttpRequest();
-              this.activeXhrs.add(xhr);
-              const timer = window.setTimeout(() => {
-                try {
-                  xhr.abort();
-                } catch {
-                  // ignore
-                }
-              }, maxWindowMs + 1600);
-
-              let settled = false;
-              const finish = (bytesSent: number) => {
-                if (settled) return;
-                settled = true;
-                window.clearTimeout(timer);
-                this.activeXhrs.delete(xhr);
-                resolve(bytesSent);
-              };
-
-              xhr.open('POST', url, true);
-              xhr.upload.onprogress = (ev) => {
-                if (this.abortRequested) return;
-                streamLoaded[k] = ev.loaded;
-                const now = performance.now();
-                const aggBytes = streamLoaded.reduce((a, b) => a + b, 0);
-                if (onLiveSample && now - tUp0 > 130 && now - lastUpReportTs > 130 && aggBytes > 0) {
-                  lastUpReportTs = now;
-                  const sec = Math.max(0.05, (now - tUp0) / 1000);
-                  const liveUpMbps = Number((((aggBytes * 8) / 1_000_000) / sec).toFixed(1));
-                  onLiveSample('up', liveUpMbps, totalDownBytes + aggBytes);
-                }
-              };
-              xhr.onload = () => {
-                const ok = xhr.status >= 200 && xhr.status < 300;
-                finish(ok ? Math.max(streamLoaded[k], uploadChunkSize) : streamLoaded[k]);
-              };
-              xhr.onerror = () => finish(0);
-              xhr.onabort = () => finish(streamLoaded[k]);
-              try {
-                xhr.send(upPayload);
-              } catch {
-                finish(0);
-              }
-            });
-          }
-
           const ctrl = new AbortController();
           this.activeControllers.add(ctrl);
-          const timer = window.setTimeout(() => ctrl.abort(), maxWindowMs + 1600);
+          const timer = window.setTimeout(() => ctrl.abort(), maxWindowMs + 1800);
           try {
             const res = await fetch(url, {
               method: 'POST',
@@ -1074,7 +1090,20 @@ export class NetworkTestService {
               cache: 'no-store',
               signal: ctrl.signal,
             });
-            return res.ok ? uploadChunkSize : 0;
+            if (!res.ok) return 0;
+            const now = performance.now();
+            confirmedUpBytes += uploadChunkSize;
+            if (now > lastUpAckTs) lastUpAckTs = now;
+
+            const upWallMs = now - tUp0;
+            if (onLiveSample && upWallMs >= 250 && confirmedUpBytes > 0) {
+              const upWireMs = Math.max(upWallMs * 0.8, upWallMs - rttOffsetMs);
+              const liveUpMbps = Number(
+                (((confirmedUpBytes * 8) / 1_000_000) / Math.max(0.08, upWireMs / 1000)).toFixed(1)
+              );
+              onLiveSample('up', liveUpMbps, totalDownBytes + confirmedUpBytes);
+            }
+            return uploadChunkSize;
           } catch {
             return 0;
           } finally {
@@ -1087,7 +1116,9 @@ export class NetworkTestService {
           Array.from({ length: upStreams }, (_, k) => sendOneStream(k))
         );
         const bytes = sentPerStream.reduce((a, b) => a + b, 0);
-        const sec = Math.max(0.02, (performance.now() - tUp0) / 1000);
+        const totalUpWallMs = Math.max(0, lastUpAckTs - tUp0);
+        const totalUpWireMs = Math.max(totalUpWallMs * 0.8, totalUpWallMs - rttOffsetMs);
+        const sec = Math.max(0.08, totalUpWireMs / 1000);
         return { bytes, sec };
       };
 
@@ -1095,7 +1126,7 @@ export class NetworkTestService {
       if (upPass.bytes === 0 && !useLocalUp && isLocalOrigin && !this.abortRequested) {
         upPass = await runUploadPass(true);
         if (upPass.bytes > 0) {
-          sourceLabel = 'Localhost Bridge (.EXE) — Pętla lokalna';
+          sourceLabel = 'Localhost Bridge (.EXE) — Pętla lokalna (Tryb Offline)';
         }
       }
       totalUpBytes = upPass.bytes;
@@ -1210,17 +1241,25 @@ export class NetworkTestService {
 
       if (i === 1 || i % speedProbeInterval === 0 || i === totalProbes) {
         const burstIdx = speedSamples.length + 1;
+        const baseRtt = result.pingMinMs > 0 ? result.pingMinMs : warmupPing.ok ? warmupPing.latencyMs : 24;
         const burst = await this.measureRealBandwidthPhase(
           burstIdx,
           direction,
+          baseRtt,
+          result.downloadEstMbps || 0,
+          result.uploadEstMbps || 0,
           (phase, liveMbps, liveBytes) => {
             if (this.abortRequested) return;
             if (phase === 'down') {
               result.downloadEstMbps = liveMbps;
-              result.peakDownloadMbps = Math.max(result.peakDownloadMbps || 0, liveMbps);
+              if (result.peakDownloadMbps === 0) {
+                result.peakDownloadMbps = liveMbps;
+              }
             } else {
               result.uploadEstMbps = liveMbps;
-              result.peakUploadMbps = Math.max(result.peakUploadMbps || 0, liveMbps);
+              if (result.peakUploadMbps === 0) {
+                result.peakUploadMbps = liveMbps;
+              }
             }
             result.transferredMB = Number(((totalBytesTransferred + liveBytes) / (1024 * 1024)).toFixed(1));
             onProgress({ ...result });

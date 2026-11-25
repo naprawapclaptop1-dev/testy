@@ -356,6 +356,7 @@ class HardwareScannerService {
 
   constructor() {
     this.restoreSavedEdid();
+    this.restoreSavedDeepInventory();
     void this.autoProbeFullLocalBridge();
     void this.autoProbeLocalEdidBridge();
   }
@@ -430,6 +431,34 @@ class HardwareScannerService {
     }
   }
 
+  private restoreSavedDeepInventory(): void {
+    try {
+      const raw = localStorage.getItem('sp_saved_deep_hardware_inventory_v1');
+      if (!raw) return;
+      const inv = JSON.parse(raw) as ParsedDeepHardwareInventory;
+      if (inv && typeof inv === 'object' && Array.isArray(inv.ramModules) && Array.isArray(inv.disks)) {
+        this.deepInventory = inv;
+        if (inv.disks.length > 0 || (inv.logicalDisks && inv.logicalDisks.length > 0)) {
+          diskTestService.registerHardwareInventoryDrives(inv.disks, inv.logicalDisks || []);
+        }
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  private persistSavedDeepInventory(inv: ParsedDeepHardwareInventory | null): void {
+    try {
+      if (!inv) {
+        localStorage.removeItem('sp_saved_deep_hardware_inventory_v1');
+      } else {
+        localStorage.setItem('sp_saved_deep_hardware_inventory_v1', JSON.stringify(inv));
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
   public async autoProbeLocalEdidBridge(force = false): Promise<boolean> {
     if (this.autoEdidProbed && !force) return Boolean(this.cachedPanelLabel);
     this.autoEdidProbed = true;
@@ -492,6 +521,7 @@ class HardwareScannerService {
 
   public clearDeepInventory(): void {
     this.deepInventory = null;
+    this.persistSavedDeepInventory(null);
   }
 
   public async scanAll(
@@ -748,7 +778,17 @@ class HardwareScannerService {
       });
     }
 
-    const resolvedHz = this.measuredExactHz ?? refreshRateHz;
+    const rawHzCandidate = this.measuredExactHz ?? refreshRateHz;
+    const stdHzList = [60, 75, 90, 100, 120, 144, 165, 170, 175, 180, 200, 240, 280, 300, 360, 480];
+    let resolvedHz = Math.round(rawHzCandidate);
+    let bestHzDiff = Infinity;
+    for (const std of stdHzList) {
+      const diff = Math.abs(rawHzCandidate - std);
+      if (diff <= Math.max(3.5, std * 0.025) && diff < bestHzDiff) {
+        bestHzDiff = diff;
+        resolvedHz = std;
+      }
+    }
     const edidMonitor = this.deepInventory?.monitors[0];
     const primaryScreen = this.cachedScreens.find((s) => s.isPrimary) || this.cachedScreens[0];
     const panelLabel =
@@ -798,17 +838,15 @@ class HardwareScannerService {
   private async probeWebGpuDetails(): Promise<string> {
     try {
       const gpu = (navigator as any).gpu;
-      if (!gpu?.requestAdapter) return 'WebGPU: brak';
+      if (!gpu?.requestAdapter) return 'Brak obsługi WebGPU';
       const adapter = await gpu.requestAdapter({ powerPreference: 'high-performance' });
-      if (!adapter) return 'WebGPU: brak adaptera';
+      if (!adapter) return 'Brak adaptera WebGPU';
       const info = adapter.info || (typeof adapter.requestAdapterInfo === 'function' ? await adapter.requestAdapterInfo() : null);
-      const maxBufMB = adapter.limits?.maxBufferSize
-        ? Math.round(adapter.limits.maxBufferSize / (1024 * 1024))
-        : 0;
+      const hasF16 = Boolean(adapter.features && typeof adapter.features.has === 'function' && adapter.features.has('shader-f16'));
       const desc = [info?.vendor, info?.architecture, info?.description || info?.device].filter(Boolean).join(' / ');
-      return `WebGPU: ${desc || 'Aktywny'}${maxBufMB ? ` (MaxBuf ${maxBufMB} MB)` : ''}`;
+      return `${desc || 'Aktywny'}${hasF16 ? ' · Shader FP16 Aktywny' : ' · Compute Shaders Aktywne'}`;
     } catch {
-      return 'WebGPU: niedostępny';
+      return 'Niedostępny';
     }
   }
 
@@ -854,13 +892,15 @@ class HardwareScannerService {
           deltas.sort((a, b) => a - b);
           const median = deltas[Math.floor(deltas.length / 2)];
           const rawHz = 1000 / Math.max(1, median);
-          // Snap close to standard panel refresh rates within ±3.5%
+          // Snap close to the NEAREST standard panel refresh rate within ±2.5%
           const standards = [60, 75, 90, 100, 120, 144, 165, 170, 175, 180, 200, 240, 280, 300, 360, 480];
           let snapped = Math.round(rawHz);
+          let bestDiff = Infinity;
           for (const std of standards) {
-            if (Math.abs(rawHz - std) / std <= 0.035) {
+            const diff = Math.abs(rawHz - std);
+            if (diff <= Math.max(3.5, std * 0.025) && diff < bestDiff) {
+              bestDiff = diff;
               snapped = std;
-              break;
             }
           }
           resolve(snapped);
@@ -1295,6 +1335,7 @@ class HardwareScannerService {
           const inv = this.parseWindowsJson(json, trimmed.split('\n').length);
           inv.rawDumpPreview = preview;
           this.deepInventory = inv;
+          this.persistSavedDeepInventory(inv);
           if (inv.disks.length > 0 || (inv.logicalDisks && inv.logicalDisks.length > 0)) {
             diskTestService.registerHardwareInventoryDrives(inv.disks, inv.logicalDisks || []);
           }
@@ -1309,6 +1350,7 @@ class HardwareScannerService {
           const inv = this.parseMacOsJson(json, trimmed.split('\n').length);
           inv.rawDumpPreview = preview;
           this.deepInventory = inv;
+          this.persistSavedDeepInventory(inv);
           if (inv.disks.length > 0) {
             diskTestService.registerHardwareInventoryDrives(inv.disks, []);
           }
@@ -1327,6 +1369,7 @@ class HardwareScannerService {
     const inv = this.parseLinuxOrTextDump(trimmed);
     inv.rawDumpPreview = preview;
     this.deepInventory = inv;
+    this.persistSavedDeepInventory(inv);
     if (inv.disks.length > 0) {
       diskTestService.registerHardwareInventoryDrives(inv.disks, []);
     }
@@ -1749,7 +1792,7 @@ class HardwareScannerService {
         title: '2. Karta Graficzna (GPU 3D & WebGPU)',
         category: 'GPU',
         status: context.gpuState.isSoftwareGl ? 'UWAGA' : 'OK',
-        score: context.gpuState.isSoftwareGl ? 52 : 96,
+        score: context.gpuState.overallScore > 0 ? context.gpuState.overallScore : context.gpuState.isSoftwareGl ? 52 : 96,
         headline: gpuName.slice(0, 62),
         summary: `${specs?.webglVersion || 'WebGL 2.0'} · ${scan?.webGpuSummary || 'WebGPU Gotowy'}`,
         source: deep?.gpus?.length ? (isNative ? 'Auto (.EXE Native)' : 'SMBIOS') : 'Auto (Web API)',
@@ -1765,13 +1808,20 @@ class HardwareScannerService {
         title: '3. Pamięć RAM (DIMM & Heap)',
         category: 'RAM',
         status: context.ramState.errorsFound > 0 ? 'UWAGA' : 'OK',
-        score: context.ramState.errorsFound > 0 ? 45 : deep?.ramModules?.length ? 97 : 86,
+        score:
+          context.ramState.errorsFound > 0
+            ? 45
+            : context.ramState.overallScore > 0
+              ? context.ramState.overallScore
+              : deep?.ramModules?.length
+                ? 97
+                : 92,
         headline: deep?.ramModules?.length
           ? `${ramTotalGB} GB (${deep.ramModules.length}× ${deep.ramModules[0].memoryType} @ ${deep.ramModules[0].speedMHz} MHz)`
           : `${ramTotalGB > 0 ? `≥ ${ramTotalGB} GB RAM` : 'Pamięć operacyjna aktywna'}`,
         summary: context.ramState.bandwidthReadMBs > 0
-          ? `Odczyt ${context.ramState.bandwidthReadMBs.toLocaleString('pl-PL')} MB/s · Opóźnienie ${context.ramState.latencyNs} ns · ${context.ramState.errorsFound} błędów`
-          : 'Auto-detekcja pamięci zakończona — uruchom test 14-etapowy MemTest86+ dla przepustowości.',
+          ? `Odczyt ${context.ramState.bandwidthReadMBs.toLocaleString('pl-PL')} MB/s · Zapis ${context.ramState.bandwidthWriteMBs.toLocaleString('pl-PL')} MB/s · Opóźnienie ${context.ramState.latencyNs} ns · ${context.ramState.errorsFound} błędów`
+          : 'Auto-detekcja pamięci zakończona — uruchom test 18-etapowy MemTest86+ dla przepustowości.',
         source: deep?.ramModules?.length ? (isNative ? 'Auto (.EXE Native)' : 'SMBIOS') : 'Auto (Web API)',
         metrics: [
           { label: 'Kości DIMM', value: deep?.ramModules?.length ? `${deep.ramModules.length} wykryte` : 'Web Heap' },
@@ -1785,7 +1835,7 @@ class HardwareScannerService {
         title: '4. Dyski i Partycje (NVMe / SSD / USB)',
         category: 'DISK',
         status: context.diskState.smartStatus === 'KRYTYCZNY' ? 'UWAGA' : 'OK',
-        score: context.diskState.smartHealthPct || 94,
+        score: context.diskState.overallScore > 0 ? context.diskState.overallScore : context.diskState.smartHealthPct || 94,
         headline: `${drives.length} dysk(ów) / woluminów · Aktywny: ${activeDrive.path}`,
         summary: deep?.disks?.length
           ? deep.disks.map((d) => `${d.model} (${d.sizeGB} GB)`).join(' · ')

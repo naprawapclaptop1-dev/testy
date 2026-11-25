@@ -160,8 +160,21 @@ function writeU32(buf: Uint8Array, offset: number, val: number): void {
   buf[offset + 3] = (val >>> 24) & 0xff;
 }
 
+function getDosDateTime(now = new Date()): { dosTime: number; dosDate: number } {
+  const year = Math.max(1980, Math.min(2107, now.getFullYear()));
+  const month = now.getMonth() + 1;
+  const day = now.getDate();
+  const hours = now.getHours();
+  const minutes = now.getMinutes();
+  const seconds = Math.floor(now.getSeconds() / 2);
+  const dosTime = ((hours & 0x1f) << 11) | ((minutes & 0x3f) << 5) | (seconds & 0x1f);
+  const dosDate = (((year - 1980) & 0x7f) << 9) | ((month & 0x0f) << 5) | (day & 0x1f);
+  return { dosTime, dosDate };
+}
+
 export function buildZipArchive(entries: ZipEntryInput[]): Uint8Array {
   const encoder = new TextEncoder();
+  const { dosTime, dosDate } = getDosDateTime(new Date());
   const prepared = entries.map((e) => {
     const nameBytes = encoder.encode(e.name);
     const dataBytes =
@@ -188,8 +201,8 @@ export function buildZipArchive(entries: ZipEntryInput[]): Uint8Array {
     writeU16(out, cursor + 4, 20);
     writeU16(out, cursor + 6, 0x0800);
     writeU16(out, cursor + 8, 0);
-    writeU16(out, cursor + 10, 0x6000);
-    writeU16(out, cursor + 12, 0x5777);
+    writeU16(out, cursor + 10, dosTime);
+    writeU16(out, cursor + 12, dosDate);
     writeU32(out, cursor + 14, item.crc);
     writeU32(out, cursor + 18, item.dataBytes.length);
     writeU32(out, cursor + 22, item.dataBytes.length);
@@ -209,8 +222,8 @@ export function buildZipArchive(entries: ZipEntryInput[]): Uint8Array {
     writeU16(out, cursor + 6, 20);
     writeU16(out, cursor + 8, 0x0800);
     writeU16(out, cursor + 10, 0);
-    writeU16(out, cursor + 12, 0x6000);
-    writeU16(out, cursor + 14, 0x5777);
+    writeU16(out, cursor + 12, dosTime);
+    writeU16(out, cursor + 14, dosDate);
     writeU32(out, cursor + 16, item.crc);
     writeU32(out, cursor + 20, item.dataBytes.length);
     writeU32(out, cursor + 24, item.dataBytes.length);
@@ -249,6 +262,7 @@ export function sanitizePortableBundleJs(rawBundle: string): string {
 
 export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
   const localServerUrl = 'http://127.0.0.1:45880/index.html';
+  const buildStamp = Date.now();
   const stylesContent = cachedStylesCss || collectDocumentStylesFallback();
   // Strip trailing ES module exports and replace all import.meta references (including import.meta.resolve)
   // so the bundle executes cleanly as a classic <script> on both file:/// and http://127.0.0.1:45880
@@ -263,25 +277,41 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#070b14" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
     <title>SystemPulse Pro — Diagnostyka Sprzętu i Benchmarki 3D (Standalone Desktop Edition)</title>
-    <meta name="description" content="SystemPulse Pro — 40 scen GPU 3D WebGL, 28 światów i wyścigów Gra 3D MAX, Zasilacz PC ATX PSU, CPU 10-Test, RAM MemTest86+, Dysk QD64 i Speed Test 10 Gbps." />
-    <link rel="icon" type="image/svg+xml" href="./icon.svg" />
-    <link rel="icon" type="image/x-icon" href="./favicon.ico" />
-    <link rel="shortcut icon" href="./favicon.ico" />
-    <link rel="stylesheet" href="./portable-styles.css" />
+    <meta name="description" content="SystemPulse Pro — 40 scen GPU 3D WebGL, 50 światów i wyścigów Gra 3D MAX, Zasilacz PC ATX PSU, CPU 10-Test, RAM MemTest86+, Dysk QD64 i Speed Test 10 Gbps." />
+    <link rel="icon" type="image/svg+xml" href="./icon.svg?v=${buildStamp}" />
+    <link rel="icon" type="image/x-icon" href="./favicon.ico?v=${buildStamp}" />
+    <link rel="shortcut icon" href="./favicon.ico?v=${buildStamp}" />
+    <link rel="stylesheet" href="./portable-styles.css?v=${buildStamp}" />
   </head>
   <body style="margin:0;background:#070b14;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;">
     <div id="root">
       <div id="sp-offline-boot-fallback" style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:#070b14;color:#e2e8f0;">
         <div style="max-width:640px;width:100%;background:#0f172a;border:1px solid #1e293b;border-radius:16px;padding:28px;box-shadow:0 20px 50px rgba(0,0,0,0.6);">
-          <div style="display:inline-block;padding:4px 12px;border-radius:999px;background:rgba(6,182,212,0.15);color:#22d3ee;font-size:12px;font-weight:700;">SYSTEMPULSE PRO WIN64 DESKTOP EDITION</div>
+          <div style="display:inline-block;padding:4px 12px;border-radius:999px;background:rgba(6,182,212,0.15);color:#22d3ee;font-size:12px;font-weight:700;">SYSTEMPULSE PRO WIN64 DESKTOP EDITION · BUILD ${buildStamp}</div>
           <h1 style="margin:14px 0 8px;font-size:22px;color:#f8fafc;">Inicjalizacja silnika diagnostycznego 3D WebGL2 &amp; WMI...</h1>
-          <p id="sp-offline-boot-msg" style="margin:0;color:#94a3b8;font-size:14px;line-height:1.6;">Trwa ładowanie modułów testowych CPU, RAM, Dysków, Zasilacza ATX PSU oraz 40 scen i gier 3D MAX.</p>
+          <p id="sp-offline-boot-msg" style="margin:0;color:#94a3b8;font-size:14px;line-height:1.6;">Trwa ładowanie modułów testowych CPU, RAM, Dysków, Zasilacza ATX PSU oraz 50 scen i gier 3D MAX.</p>
         </div>
       </div>
     </div>
     <script>
       window.__SYSTEMPULSE_STANDALONE_OFFLINE__ = true;
+      window.__SYSTEMPULSE_BUILD_STAMP__ = ${buildStamp};
+      try {
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.getRegistrations().then(function(regs) {
+            for (var i = 0; i < regs.length; i++) { regs[i].unregister(); }
+          }).catch(function(){});
+        }
+        if ('caches' in window) {
+          caches.keys().then(function(keys) {
+            for (var j = 0; j < keys.length; j++) { caches.delete(keys[j]); }
+          }).catch(function(){});
+        }
+      } catch (e) {}
       function __spShowBundleError(detail) {
         var el = document.getElementById('sp-offline-boot-msg');
         if (el) {
@@ -295,7 +325,7 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
         }
       });
     </script>
-    <script src="./portable-bundle.js" defer onerror="__spShowBundleError()"></script>
+    <script src="./portable-bundle.js?v=${buildStamp}" defer onerror="__spShowBundleError()"></script>
   </body>
 </html>`;
 
@@ -334,32 +364,25 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     'set "INSTALL_DIR=%LOCALAPPDATA%\\Programs\\SystemPulsePro"',
     'if not exist "%INSTALL_DIR%\\app" mkdir "%INSTALL_DIR%\\app"',
     'if /I not "%SRC_DIR%"=="%INSTALL_DIR%\\" (',
-    '  echo [1/4] Kopiowanie plikow aplikacji do "%INSTALL_DIR%"...',
+    '  echo [1/4] Kopiowanie najnowszych plikow aplikacji do "%INSTALL_DIR%"...',
     '  xcopy /E /I /Y "%SRC_DIR%app" "%INSTALL_DIR%\\app" >nul',
     '  if errorlevel 1 (',
     '    echo [BLAD] Nie udalo sie skopiowac katalogu app\\. Sprawdz uprawnienia zapisu.',
     '    pause',
     '    exit /b 1',
     '  )',
-    '  for %%F in (SystemPulse-Pro.ico SystemPulse-Pro-Portable.bat SystemPulse-Portal.html SystemPulseLauncher.cs SystemPulsePro.csproj SystemPulseSetupGui.cs SystemPulseSetup.csproj SystemPulse-Pro-Installer.iss INSTRUKCJA-PORTABLE-EXE.txt SystemPulse-Pro.exe) do (',
+    '  for %%F in (SystemPulse-Pro.ico SystemPulse-Pro-Portable.bat SystemPulse-Portal.html SystemPulseLauncher.cs SystemPulsePro.csproj SystemPulseSetupGui.cs SystemPulseSetup.csproj SystemPulse-Pro-Installer.iss INSTRUKCJA-PORTABLE-EXE.txt SystemPulse-Pro.exe SystemPulse-Pro-Setup.exe) do (',
     '    if exist "%SRC_DIR%%%F" copy /Y "%SRC_DIR%%%F" "%INSTALL_DIR%\\" >nul',
     '  )',
     ') else (',
     '  echo [1/4] Pliki juz znajduja sie w katalogu docelowym.',
     ')',
-    'echo [2/4] Sprawdzanie kompilatora Microsoft .NET ^(opcjonalny natywny SystemPulse-Pro.exe^)...',
+    'echo [2/4] Sprawdzanie natywnego pliku wykonywalnego SystemPulse-Pro.exe...',
     'if not exist "%INSTALL_DIR%\\SystemPulse-Pro.exe" (',
     '  where dotnet >nul 2>&1',
     '  if not errorlevel 1 (',
     '    echo       Wykryto .NET SDK - budowanie natywnego SystemPulse-Pro.exe z ikona aplikacji...',
     '    dotnet publish "%INSTALL_DIR%\\SystemPulsePro.csproj" -c Release -r win-x64 -o "%INSTALL_DIR%" --nologo >nul 2>&1',
-    '    if exist "%INSTALL_DIR%\\SystemPulse-Pro.exe" (',
-    '      echo       [OK] Zbudowano natywny program SystemPulse-Pro.exe!',
-    '    ) else (',
-    '      echo       [INFO] Pominieto kompilacje .NET ^(uzyty zostanie tryb Standalone App-Mode^).',
-    '    )',
-    '  ) else (',
-    '    echo       [INFO] Brak .NET SDK - aplikacja dziala w pelnym trybie Standalone Offline z ikona.',
     '  )',
     ')',
     'echo [3/4] Tworzenie deinstalatora i skrotow z ikona SystemPulse Pro na Pulpicie oraz w Menu Start...',
@@ -387,7 +410,7 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     '  if exist "!DESK_DIR!\\SystemPulse Pro.cmd" del /F /Q "!DESK_DIR!\\SystemPulse Pro.cmd" >nul 2>&1',
     '  (',
     '    echo [InternetShortcut]',
-    '    echo URL=file:///!APP_INDEX_URI!',
+    '    echo URL=file:///!APP_INDEX_URI!?v=' + buildStamp,
     '    echo IconFile=%INSTALL_DIR%\\SystemPulse-Pro.ico',
     '    echo IconIndex=0',
     '  ) > "!DESK_DIR!\\SystemPulse Pro.url"',
@@ -397,7 +420,7 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     'if exist "!START_DIR!" (',
     '  (',
     '    echo [InternetShortcut]',
-    '    echo URL=file:///!APP_INDEX_URI!',
+    '    echo URL=file:///!APP_INDEX_URI!?v=' + buildStamp,
     '    echo IconFile=%INSTALL_DIR%\\SystemPulse-Pro.ico',
     '    echo IconIndex=0',
     '  ) > "!START_DIR!\\SystemPulse Pro.url"',
@@ -441,6 +464,8 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     'set "APP_URI=!LOCAL_APP_FILE:\\=/!"',
     'set "APP_URI=!APP_URI: =%%20!"',
     'set "PROFILE_DIR=%LOCALAPPDATA%\\SystemPulsePro\\BrowserProfile"',
+    'if exist "!PROFILE_DIR!\\Default\\Cache" rmdir /S /Q "!PROFILE_DIR!\\Default\\Cache" >nul 2>&1',
+    'if exist "!PROFILE_DIR!\\Default\\Code Cache" rmdir /S /Q "!PROFILE_DIR!\\Default\\Code Cache" >nul 2>&1',
     'set "BROWSER_EXE="',
     'if not defined BROWSER_EXE if exist "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe" set "BROWSER_EXE=%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe"',
     'if not defined BROWSER_EXE if exist "%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe" set "BROWSER_EXE=%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe"',
@@ -450,7 +475,7 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     'if not defined BROWSER_EXE if exist "%ProgramFiles%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe" set "BROWSER_EXE=%ProgramFiles%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"',
     'if not defined BROWSER_EXE if exist "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe" set "BROWSER_EXE=%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"',
     'if defined BROWSER_EXE (',
-    '  start "" "!BROWSER_EXE!" --app="file:///!APP_URI!" --user-data-dir="!PROFILE_DIR!" --start-maximized --disable-frame-rate-limit --disable-gpu-vsync --no-first-run --no-default-browser-check',
+    '  start "" "!BROWSER_EXE!" --app="file:///!APP_URI!?v=' + buildStamp + '" --user-data-dir="!PROFILE_DIR!" --start-maximized --disable-frame-rate-limit --disable-gpu-vsync --disk-cache-size=1 --no-first-run --no-default-browser-check',
     '  exit /b 0',
     ')',
     'start "" "!LOCAL_APP_FILE!"',

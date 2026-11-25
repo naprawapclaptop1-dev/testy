@@ -53,10 +53,10 @@ describe('Network Transfer Direction, Continuous Mode & LAN Diagnostics', () => 
   });
 });
 
-describe('GameBench 3D Catalog (44 Worlds), GPU Stress (48 Scenes), Combat Campaigns, AI Graphics Tuner & Smooth Mode', () => {
-  it('exposes 44 unique Game Bench worlds and 48 GPU stress tests and classifies combat/racing/flight/soccer modes', () => {
+describe('GameBench 3D Catalog (50 Worlds), GPU Stress (48 Scenes), Combat Campaigns, AI Graphics Tuner & Smooth Mode', () => {
+  it('exposes 50 unique Game Bench worlds and 48 GPU stress tests and classifies combat/racing/flight/soccer modes', () => {
     const ids = GAME_CATALOG.map((g) => g.id);
-    expect(GAME_CATALOG.length).toBe(44);
+    expect(GAME_CATALOG.length).toBe(50);
     expect(new Set(ids).size).toBe(GAME_CATALOG.length);
     expect(ids).toContain('soccer_champions_3d');
     expect(ids).toContain('bugatti_hypercar_450');
@@ -64,7 +64,7 @@ describe('GameBench 3D Catalog (44 Worlds), GPU Stress (48 Scenes), Combat Campa
     expect(ids).toContain('sr71_mach_plane');
     expect(ids).toContain('apache_gunship_heli');
 
-    // Playable AAA campaigns & new worlds
+    // Playable AAA campaigns & new worlds (including Spider-Man, 007 Bond, FIFA 2027)
     expect(ids).toContain('tank_blitz_3d');
     expect(ids).toContain('mech_titan_3d');
     expect(ids).toContain('f18_naval_strike');
@@ -75,6 +75,12 @@ describe('GameBench 3D Catalog (44 Worlds), GPU Stress (48 Scenes), Combat Campa
     expect(ids).toContain('cyber_hoverbike_3d');
     expect(ids).toContain('volcano_heli_rescue');
     expect(ids).toContain('battleship_yamato_3d');
+    expect(ids).toContain('spiderman_ny_3d');
+    expect(ids).toContain('bond_007_aston_3d');
+    expect(ids).toContain('fifa_2027_stadium_3d');
+    expect(ids).toContain('gta6_vice_neon_3d');
+    expect(ids).toContain('witcher4_polaris_3d');
+    expect(ids).toContain('battlefield_2027_tank_3d');
 
     // GPU Stress 48 tests including 4 new AAA tests
     const gpuIds = GPU_SCENE_CATALOG.map((s) => s.id);

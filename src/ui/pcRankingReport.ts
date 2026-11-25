@@ -64,6 +64,38 @@ export interface PcRankingInputContext {
 }
 
 const STORAGE_KEY = 'systempulse_pc_ranking_v1';
+const MACHINE_ID_KEY = 'systempulse_machine_uid_v1';
+
+let rankingBroadcastChannel: BroadcastChannel | null = null;
+try {
+  if (typeof BroadcastChannel !== 'undefined') {
+    rankingBroadcastChannel = new BroadcastChannel('systempulse_global_ranking_live');
+  }
+} catch {
+  // BroadcastChannel optional
+}
+
+export function onGlobalRankingLiveUpdate(callback: () => void): void {
+  if (!rankingBroadcastChannel) return;
+  rankingBroadcastChannel.onmessage = () => {
+    callback();
+  };
+}
+
+function getPersistentMachineRankingId(): string {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const existing = localStorage.getItem(MACHINE_ID_KEY);
+      if (existing && existing.startsWith('live_pc_')) return existing;
+      const created = `live_pc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+      localStorage.setItem(MACHINE_ID_KEY, created);
+      return created;
+    }
+  } catch {
+    // ignore
+  }
+  return `live_pc_${Date.now()}`;
+}
 
 /**
  * Kept empty by default so that the ranking table NEVER mixes fictional/hardcoded
@@ -112,13 +144,89 @@ export function loadSavedPcRankings(): PcRankingEntry[] {
         (item): item is PcRankingEntry =>
           item &&
           typeof item.id === 'string' &&
+          !item.id.startsWith('ref_') &&
           typeof item.name === 'string' &&
           typeof item.overallScore === 'number' &&
           item.overallScore > 0
       )
-      .slice(0, 25);
+      .slice(0, 50);
   } catch {
     return [];
+  }
+}
+
+export async function syncGlobalRankingsFromServer(): Promise<PcRankingEntry[]> {
+  if (typeof window === 'undefined' || typeof fetch === 'undefined') {
+    return loadSavedPcRankings();
+  }
+  try {
+    const res = await fetch('/api/global/rankings', {
+      method: 'GET',
+      cache: 'no-store',
+    });
+    if (!res.ok) return loadSavedPcRankings();
+    const data = await res.json();
+    if (!data || !Array.isArray(data.entries)) return loadSavedPcRankings();
+    const localList = loadSavedPcRankings();
+    const map = new Map<string, PcRankingEntry>();
+    for (const item of localList) {
+      map.set(item.id, item);
+    }
+    for (const srv of data.entries) {
+      if (
+        srv &&
+        typeof srv.id === 'string' &&
+        !srv.id.startsWith('ref_') &&
+        typeof srv.name === 'string' &&
+        typeof srv.overallScore === 'number' &&
+        srv.overallScore > 0
+      ) {
+        map.set(srv.id, {
+          ...srv,
+          category: 'Twój Zapisany PC',
+          isCurrentPc: false,
+          isUserSaved: true,
+        });
+      }
+    }
+    const merged = Array.from(map.values())
+      .sort((a, b) => b.overallScore - a.overallScore || (b.savedAt || 0) - (a.savedAt || 0))
+      .slice(0, 50);
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+    }
+    return merged;
+  } catch {
+    return loadSavedPcRankings();
+  }
+}
+
+export async function publishPcRankingToGlobalServer(entry: PcRankingEntry): Promise<void> {
+  if (!entry || entry.overallScore <= 0) return;
+  if (typeof window === 'undefined' || typeof fetch === 'undefined') return;
+  try {
+    await fetch('/api/global/rankings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(entry),
+    });
+    rankingBroadcastChannel?.postMessage({ type: 'ranking_updated', id: entry.id });
+  } catch {
+    // Offline fallback remains in localStorage
+  }
+}
+
+export function clearAllSavedPcRankings(): void {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(STORAGE_KEY);
+    }
+    if (typeof window !== 'undefined' && typeof fetch !== 'undefined') {
+      void fetch('/api/global/rankings', { method: 'DELETE' }).catch(() => null);
+    }
+    rankingBroadcastChannel?.postMessage({ type: 'ranking_cleared' });
+  } catch {
+    // ignore
   }
 }
 
@@ -135,7 +243,7 @@ export function savePcToRanking(entry: PcRankingEntry): PcRankingEntry[] {
     isUserSaved: true,
     savedAt: entry.savedAt || Date.now(),
   };
-  const next = [normalized, ...list.filter((x) => x.id !== normalized.id)].slice(0, 25);
+  const next = [normalized, ...list.filter((x) => x.id !== normalized.id)].slice(0, 50);
   try {
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
@@ -143,7 +251,27 @@ export function savePcToRanking(entry: PcRankingEntry): PcRankingEntry[] {
   } catch {
     // ignore storage quota failures
   }
+  void publishPcRankingToGlobalServer(normalized);
   return next;
+}
+
+export function autoPublishCurrentPcRankingIfTested(ctx: PcRankingInputContext): PcRankingEntry | null {
+  const snap = computePcRankingSnapshot(ctx);
+  if (!snap.hasRealMeasurements || snap.currentEntry.overallScore <= 0) return null;
+  const machineId = getPersistentMachineRankingId();
+  const shortGpu = shortenGpuName(ctx.specs?.gpuRenderer || ctx.gpu?.rendererName || 'PC');
+  const cores = ctx.specs?.cpuCores || 8;
+  const published: PcRankingEntry = {
+    ...snap.currentEntry,
+    id: machineId,
+    name: `${shortGpu} · ${cores}T (Skan LIVE)`,
+    category: 'Twój Zapisany PC',
+    isCurrentPc: false,
+    isUserSaved: true,
+    savedAt: Date.now(),
+  };
+  savePcToRanking(published);
+  return published;
 }
 
 export function deleteSavedPcFromRanking(id: string): PcRankingEntry[] {
@@ -152,6 +280,10 @@ export function deleteSavedPcFromRanking(id: string): PcRankingEntry[] {
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
     }
+    if (typeof window !== 'undefined' && typeof fetch !== 'undefined') {
+      void fetch(`/api/global/rankings?id=${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => null);
+    }
+    rankingBroadcastChannel?.postMessage({ type: 'ranking_deleted', id });
   } catch {
     // ignore
   }
@@ -296,18 +428,28 @@ export function computePcRankingSnapshot(
   };
 
   const savedEntries = savedOverride ?? loadSavedPcRankings();
+  const ownMachineId = getPersistentMachineRankingId();
+  // Filter out the auto-published duplicate of the current live machine when currentEntry is already active
+  const filteredSaved = overallScore > 0
+    ? savedEntries.filter((e) => e.id !== ownMachineId)
+    : savedEntries;
+
   // ONLY real measured entries in the leaderboard — no invented reference machines
   const combined: PcRankingEntry[] = [
-    currentEntry,
-    ...savedEntries.map((e) => ({ ...e, isCurrentPc: false, isUserSaved: true })),
+    ...(overallScore > 0 ? [currentEntry] : []),
+    ...filteredSaved.map((e) => ({ ...e, isCurrentPc: false, isUserSaved: true })),
   ].sort((a, b) => {
     if (b.overallScore !== a.overallScore) return b.overallScore - a.overallScore;
     if (b.gpuScore !== a.gpuScore) return b.gpuScore - a.gpuScore;
     return a.isCurrentPc ? -1 : b.isCurrentPc ? 1 : 0;
   });
 
+  if (combined.length === 0) {
+    combined.push(currentEntry);
+  }
+
   const currentIdx = combined.findIndex((e) => e.isCurrentPc);
-  const currentRank = currentIdx >= 0 ? currentIdx + 1 : combined.length;
+  const currentRank = currentIdx >= 0 ? currentIdx + 1 : 1;
   const totalRanked = combined.length;
   const belowCount = Math.max(0, totalRanked - currentRank);
   const percentileBetterThan =
@@ -380,22 +522,27 @@ export function renderPcRankingSectionHtml(ctx: PcRankingInputContext): string {
       <section class="sp-panel sp-ranking-panel" id="sp-pc-ranking-section">
         <div class="sp-panel-head">
           <div>
-            <span class="sp-eyebrow">RANKING KOMPUTERÓW I LAPTOPÓW · TYLKO RZECZYWISTE POMIARY BENCHMARKOWE</span>
-            <h3>🏆 Ranking Przetestowanych Komputerów — Wymagany pomiar</h3>
+            <span class="sp-eyebrow">GLOBALNY RANKING LIVE · TYLKO RZECZYWISTE POMIARY BENCHMARKOWE</span>
+            <h3>🏆 Globalny Ranking Przetestowanych Komputerów LIVE — Wymagany pomiar</h3>
             <p class="sp-muted">
-              Ranking prezentuje wyłącznie <strong>prawdziwe, zmierzone wyniki</strong> po wykonaniu testów wydajności (bez sztucznych lub zmyślonych tabel).
-              Wykryto Twój sprzęt: <strong>${escHtml(shortGpu)} · ${cores} wątków CPU</strong> — uruchom test, aby zmierzyć realną punktację.
+              Ranking prezentuje wyłącznie <strong>prawdziwe, zmierzone wyniki</strong> po wykonaniu testów wydajności i automatycznie synchronizuje je między wszystkimi użytkownikami aplikacji.
+              Wykryto Twój sprzęt: <strong>${escHtml(shortGpu)} · ${cores} wątków CPU</strong> — uruchom test, aby Twój wynik automatycznie wskoczył do globalnego rankingu.
             </p>
           </div>
         </div>
         <div class="sp-ranking-kpi-grid" style="display:none;"></div>
         <div class="sp-ranking-table-wrap" style="padding:18px;text-align:center;">
           <p style="margin:0 0 12px;color:#94a3b8;font-size:13px;">
-            Brak wykonanych testów w bieżącej sesji. Kliknij poniższy przycisk, aby przeprowadzić prawdziwy pomiar CPU, RAM, Dysku i GPU 3D.
+            Brak wykonanych testów w bieżącej sesji. Kliknij poniższy przycisk, aby przeprowadzić prawdziwy pomiar CPU, RAM, Dysku i GPU 3D lub zsynchronizować wyniki z serwera LIVE.
           </p>
-          <button type="button" class="btn btn-primary" data-run-full-suite="true" style="padding:10px 20px;font-weight:700;">
-            🚀 Uruchom Pełny Test PC (Zmierz prawdziwy wynik do Rankingu)
-          </button>
+          <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
+            <button type="button" class="btn btn-primary" data-run-full-suite="true" style="padding:10px 20px;font-weight:700;">
+              🚀 Uruchom Pełny Test PC (Zmierz i wyślij wynik LIVE)
+            </button>
+            <button type="button" class="btn btn-secondary" id="sp-ranking-sync-global-btn" style="padding:10px 18px;font-weight:700;">
+              🌍 Synchronizuj wyniki LIVE ze świata
+            </button>
+          </div>
         </div>
       </section>
     `;
@@ -419,10 +566,10 @@ export function renderPcRankingSectionHtml(ctx: PcRankingInputContext): string {
     <section class="sp-panel sp-ranking-panel" id="sp-pc-ranking-section">
       <div class="sp-panel-head">
         <div>
-          <span class="sp-eyebrow">RANKING PRZETESTOWANYCH KOMPUTERÓW · 100% RZECZYWISTE WYNIKI Z TESTÓW (${snap.testedCount}/4 PODZESPOŁÓW)</span>
-          <h3>🏆 Ranking Komputerów — Pozycja #${snap.currentRank} z ${snap.totalRanked} (${snap.totalRanked > 1 ? `Lepszy niż ${snap.percentileBetterThan}% przetestowanych PC` : `Wynik pomiaru: ${snap.currentEntry.overallScore}/100 pkt`})</h3>
+          <span class="sp-eyebrow">GLOBALNY RANKING PRZETESTOWANYCH KOMPUTERÓW LIVE · 100% RZECZYWISTE WYNIKI Z TESTÓW (${snap.testedCount}/4 PODZESPOŁÓW)</span>
+          <h3>🏆 Globalny Ranking Komputerów LIVE — Pozycja #${snap.currentRank} z ${snap.totalRanked} (${snap.totalRanked > 1 ? `Lepszy niż ${snap.percentileBetterThan}% przetestowanych PC` : `Wynik pomiaru: ${snap.currentEntry.overallScore}/100 pkt`})</h3>
           <p class="sp-muted">
-            Tabela zawiera wyłącznie <strong>prawdziwe wyniki z wykonanych testów</strong> (Twój aktualnie przetestowany komputer oraz zapisane po testach maszyny). Nieprzetestowane podzespoły są oznaczane jako „—”.
+            Każdy wykonany skan i test automatycznie wskakuje do <strong>Globalnej Bazy LIVE</strong> widocznej u wszystkich użytkowników aplikacji. Nieprzetestowane podzespoły są oznaczane jako „—”.
           </p>
         </div>
         <div class="sp-ranking-controls">
@@ -461,8 +608,64 @@ export function renderPcRankingSectionHtml(ctx: PcRankingInputContext): string {
         </div>
       </div>
 
-      <!-- Zapisz aktualnie przetestowany komputer do lokalnego rankingu serwisowego -->
-      <div class="sp-ranking-save-bar">
+      <!-- Szczegółowe potwierdzenie rzeczywistych pomiarów sprzętowych 4 podzespołów -->
+      <div class="sp-ranking-kpi-grid" style="margin-top:10px;">
+        <div class="sp-ranking-kpi" style="border-left:3px solid ${snap.currentEntry.cpuScore > 0 ? '#38bdf8' : '#475569'};">
+          <span class="sp-ranking-kpi-lbl">1. Pomiar Procesora (CPU)</span>
+          <strong class="sp-ranking-kpi-val" style="font-size:13.5px;color:${snap.currentEntry.cpuScore > 0 ? '#38bdf8' : '#64748b'};">
+            ${snap.currentEntry.cpuScore > 0 ? `${snap.currentEntry.cpuScore}/100 pkt · ${escHtml(ctx.cpu.grade)}` : 'Brak pomiaru CPU'}
+          </strong>
+          <span class="sp-ranking-kpi-sub">
+            ${
+              ctx.cpu.multiCoreScore > 0
+                ? `Multi: ${ctx.cpu.multiCoreScore.toLocaleString('pl-PL')} pkt · Single: ${ctx.cpu.singleCoreScore.toLocaleString('pl-PL')} pkt (${ctx.cpu.scalingRatio}x) · SHA-256: ${ctx.cpu.cryptoSha256MBs} MB/s`
+                : 'Uruchom test CPU, aby zmierzyć punkty wielowątkowe'
+            }
+          </span>
+        </div>
+        <div class="sp-ranking-kpi" style="border-left:3px solid ${snap.currentEntry.gpuScore > 0 ? '#34d399' : '#475569'};">
+          <span class="sp-ranking-kpi-lbl">2. Pomiar Grafiki 3D (GPU)</span>
+          <strong class="sp-ranking-kpi-val" style="font-size:13.5px;color:${snap.currentEntry.gpuScore > 0 ? '#34d399' : '#64748b'};">
+            ${snap.currentEntry.gpuScore > 0 ? `${snap.currentEntry.gpuScore}/100 pkt · ${Math.max(ctx.gpu.avgFps || 0, ctx.game.avgFps || 0)} FPS` : 'Brak pomiaru GPU 3D'}
+          </strong>
+          <span class="sp-ranking-kpi-sub">
+            ${
+              snap.currentEntry.gpuScore > 0
+                ? `1% Low: ${Math.min(Math.max(ctx.gpu.avgFps || 0, ctx.game.avgFps || 0), Math.max(ctx.gpu.low1PctFps || 0, ctx.game.low1PctFps || 0))} FPS · Frametime: ${ctx.gpu.frameTimeMs || ctx.game.frameTimeMs || 0} ms · Stab. ${ctx.gpu.stabilityPct || ctx.game.stabilityPct || 0}%`
+                : 'Uruchom test GPU 3D lub Gra 3D MAX, aby zmierzyć FPS'
+            }
+          </span>
+        </div>
+        <div class="sp-ranking-kpi" style="border-left:3px solid ${snap.currentEntry.ramScore > 0 ? '#a78bfa' : '#475569'};">
+          <span class="sp-ranking-kpi-lbl">3. Pomiar Pamięci RAM</span>
+          <strong class="sp-ranking-kpi-val" style="font-size:13.5px;color:${snap.currentEntry.ramScore > 0 ? '#a78bfa' : '#64748b'};">
+            ${snap.currentEntry.ramScore > 0 ? `${snap.currentEntry.ramScore}/100 pkt · ${ctx.ram.errorsFound} błędów (${escHtml(ctx.ram.healthGrade)})` : 'Brak pomiaru RAM'}
+          </strong>
+          <span class="sp-ranking-kpi-sub">
+            ${
+              ctx.ram.bandwidthReadMBs > 0
+                ? `Odczyt: ${ctx.ram.bandwidthReadMBs.toLocaleString('pl-PL')} MB/s · Zapis: ${ctx.ram.bandwidthWriteMBs.toLocaleString('pl-PL')} MB/s · Opóźnienie: ${ctx.ram.latencyNs} ns`
+                : 'Uruchom 18-etapowy test RAM, aby zmierzyć przepustowość MB/s'
+            }
+          </span>
+        </div>
+        <div class="sp-ranking-kpi" style="border-left:3px solid ${snap.currentEntry.diskScore > 0 ? '#fbbf24' : '#475569'};">
+          <span class="sp-ranking-kpi-lbl">4. Pomiar Dysku SSD / NVMe</span>
+          <strong class="sp-ranking-kpi-val" style="font-size:13.5px;color:${snap.currentEntry.diskScore > 0 ? '#fbbf24' : '#64748b'};">
+            ${snap.currentEntry.diskScore > 0 ? `${snap.currentEntry.diskScore}/100 pkt · SMART ${ctx.disk.smartStatus} (${ctx.disk.smartHealthPct}%)` : 'Brak pomiaru Dysku'}
+          </strong>
+          <span class="sp-ranking-kpi-sub">
+            ${
+              ctx.disk.seqReadMBs > 0
+                ? `Seq: ${ctx.disk.seqReadMBs}/${ctx.disk.seqWriteMBs} MB/s · 4K: ${ctx.disk.rand4kIops} IOPS · Dostęp: ${ctx.disk.accessTimeAvgMs} ms`
+                : 'Uruchom test Dysku, aby zmierzyć transfery I/O i SMART'
+            }
+          </span>
+        </div>
+      </div>
+
+      <!-- Zapisz, opublikuj LIVE lub wyeksportuj/zaimportuj aktualnie przetestowany komputer -->
+      <div class="sp-ranking-save-bar" style="flex-wrap:wrap;gap:8px;">
         <input
           type="text"
           id="sp-ranking-pc-name"
@@ -472,8 +675,23 @@ export function renderPcRankingSectionHtml(ctx: PcRankingInputContext): string {
           style="flex:1;min-width:220px;"
         />
         <button type="button" class="btn btn-primary btn-sm" id="sp-ranking-save-btn" ${snap.hasRealMeasurements ? '' : 'disabled'}>
-          💾 Zapisz ten wynik testu do Rankingu (Porównaj kolejne PC)
+          🌍 Zapisz i Opublikuj Wynik LIVE
         </button>
+        <button type="button" class="btn btn-secondary btn-sm" id="sp-ranking-sync-global-btn" title="Pobierz najnowsze wyniki przetestowanych komputerów z serwera globalnego">
+          🔄 Synchronizuj LIVE ze świata
+        </button>
+        <button type="button" class="btn btn-secondary btn-sm" id="sp-ranking-export-json-btn" ${snap.hasRealMeasurements ? '' : 'disabled'} title="Pobierz plik .JSON z prawdziwym wynikiem testu tego komputera">
+          📤 Eksportuj (.JSON)
+        </button>
+        <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0;" title="Wczytaj plik .JSON z wynikiem testu innego komputera, aby porównać w rankingu">
+          📥 Importuj (.JSON)
+          <input type="file" id="sp-ranking-import-json-input" accept=".json,application/json" style="display:none;" />
+        </label>
+        ${
+          snap.savedEntries.length > 0
+            ? `<button type="button" class="btn btn-secondary btn-sm" id="sp-ranking-clear-all-btn" title="Usuń wszystkie zapisane wcześniej pozycje">🗑️ Wyczyść zapisane (${snap.savedEntries.length})</button>`
+            : ''
+        }
       </div>
       ${saveNotice ? `<div class="sp-scheme-feedback">${escHtml(saveNotice)}</div>` : ''}
 
@@ -511,7 +729,7 @@ export function renderPcRankingSectionHtml(ctx: PcRankingInputContext): string {
                 const tagHtml = entry.isCurrentPc
                   ? '<span class="sp-rank-tag sp-rank-tag--current">TWÓJ WYNIK LIVE</span>'
                   : entry.isUserSaved
-                    ? '<span class="sp-rank-tag sp-rank-tag--saved">ZAPISANY TEST</span>'
+                    ? '<span class="sp-rank-tag sp-rank-tag--saved">WYNIK LIVE / ZAPISANY</span>'
                     : `<span class="sp-rank-tag">${escHtml(entry.tierLabel)}</span>`;
                 const extraDetails = [entry.gpuSummary, entry.cpuSummary, entry.ramSummary, entry.diskSummary]
                   .filter(Boolean)
@@ -568,6 +786,15 @@ export function bindPcRankingSectionEvents(
     });
   });
 
+  const syncBtn = root.querySelector<HTMLButtonElement>('#sp-ranking-sync-global-btn');
+  syncBtn?.addEventListener('click', async () => {
+    saveNotice = '⏳ Synchronizowanie globalnego rankingu LIVE z serwerem...';
+    rerender();
+    const list = await syncGlobalRankingsFromServer();
+    saveNotice = `✓ Zsynchronizowano bazę LIVE (${list.length} przetestowanych komputerów w bazie globalnej).`;
+    rerender();
+  });
+
   const saveBtn = root.querySelector<HTMLButtonElement>('#sp-ranking-save-btn');
   saveBtn?.addEventListener('click', () => {
     const snap = computePcRankingSnapshot(ctx);
@@ -586,7 +813,72 @@ export function bindPcRankingSectionEvents(
       isUserSaved: true,
       savedAt: Date.now(),
     });
-    saveNotice = `✓ Zapisano prawdziwy wynik testu „${customName}” (${snap.currentEntry.overallScore}/100 pkt) do rankingu.`;
+    saveNotice = `✓ Zapisano i opublikowano LIVE wynik „${customName}” (${snap.currentEntry.overallScore}/100 pkt) w globalnym rankingu.`;
+    rerender();
+  });
+
+  const exportBtn = root.querySelector<HTMLButtonElement>('#sp-ranking-export-json-btn');
+  exportBtn?.addEventListener('click', () => {
+    const snap = computePcRankingSnapshot(ctx);
+    if (!snap.hasRealMeasurements || snap.currentEntry.overallScore <= 0) return;
+    const input = root.querySelector<HTMLInputElement>('#sp-ranking-pc-name');
+    const customName = input?.value.trim() || snap.currentEntry.name;
+    const exportPayload: PcRankingEntry = {
+      ...snap.currentEntry,
+      id: `imported_${Date.now()}`,
+      name: customName,
+      category: 'Twój Zapisany PC',
+      isCurrentPc: false,
+      isUserSaved: true,
+      savedAt: Date.now(),
+    };
+    const blob = new Blob([JSON.stringify(exportPayload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `systempulse-wynik-pc-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    saveNotice = `✓ Wyeksportowano prawdziwy wynik testu „${customName}” do pliku JSON.`;
+    rerender();
+  });
+
+  const importInput = root.querySelector<HTMLInputElement>('#sp-ranking-import-json-input');
+  importInput?.addEventListener('change', async () => {
+    const file = importInput.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      const candidates: PcRankingEntry[] = Array.isArray(parsed) ? parsed : [parsed];
+      let importedCount = 0;
+      for (const item of candidates) {
+        if (item && typeof item.name === 'string' && typeof item.overallScore === 'number' && item.overallScore > 0) {
+          savePcToRanking({
+            ...item,
+            id: item.id && !item.id.startsWith('ref_') ? item.id : `imported_${Date.now()}_${importedCount}`,
+            isCurrentPc: false,
+            isUserSaved: true,
+            savedAt: item.savedAt || Date.now(),
+          });
+          importedCount++;
+        }
+      }
+      saveNotice =
+        importedCount > 0
+          ? `✓ Zaimportowano i opublikowano LIVE ${importedCount} przetestowany(ch) komputer(ów) do rankingu.`
+          : '⚠️ Plik JSON nie zawierał prawidłowego wyniku testu.';
+    } catch {
+      saveNotice = '⚠️ Nie udało się odczytać pliku JSON z wynikiem testu.';
+    }
+    importInput.value = '';
+    rerender();
+  });
+
+  const clearAllBtn = root.querySelector<HTMLButtonElement>('#sp-ranking-clear-all-btn');
+  clearAllBtn?.addEventListener('click', () => {
+    clearAllSavedPcRankings();
+    saveNotice = 'Wyczyszczono wszystkie wcześniej zapisane pozycje z rankingu.';
     rerender();
   });
 

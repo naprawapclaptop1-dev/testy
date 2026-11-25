@@ -16,6 +16,7 @@ import {
   ThermalHeatMapSnapshot,
 } from '../types';
 import { HardwareScanSnapshot } from './hardwareScanner.service';
+import { diskTestService } from './diskTest.service';
 import {
   computeHardwarePowerIndex,
   evaluateGamePlayabilitySummary,
@@ -106,6 +107,175 @@ function fitTextToWidth(doc: jsPDF, rawText: string, maxWidthMm: number): string
     end -= 1;
   }
   return clean.slice(0, Math.max(1, end)) + '...';
+}
+
+export function snapStandardMonitorHz(rawHz: number | null | undefined): number {
+  const hz = Number(rawHz || 60);
+  if (!Number.isFinite(hz) || hz <= 0) return 60;
+  const standards = [60, 75, 90, 100, 120, 144, 165, 170, 175, 180, 200, 240, 280, 300, 360, 480];
+  let best = Math.round(hz);
+  let bestDiff = Infinity;
+  for (const std of standards) {
+    const diff = Math.abs(hz - std);
+    if (diff <= Math.max(3.5, std * 0.025) && diff < bestDiff) {
+      bestDiff = diff;
+      best = std;
+    }
+  }
+  return best;
+}
+
+export function cleanGpuModelFromAngle(
+  rawRenderer: string | null | undefined,
+  rawVendor: string | null | undefined
+): {
+  cleanModel: string;
+  cleanVendor: string;
+  backendApi: string;
+  pciId: string;
+} {
+  const r = String(rawRenderer || 'Akcelerator Graficzny 3D').trim();
+  const v = String(rawVendor || '').trim();
+
+  const pciMatch = r.match(/\((0x[0-9a-fA-F]+)\)/);
+  const pciId = pciMatch ? pciMatch[1] : '';
+
+  let cleanModel = r;
+  let backendApi = 'Direct3D 11 / WebGL 2.0';
+  const angleMatch = r.match(/ANGLE\s*\(\s*([^,]+),\s*([^,]+?)(?:\s*\(0x[0-9a-fA-F]+\))?(?:\s+Direct3D11|\s+Direct3D|\s+Vulkan|\s+OpenGL|,|$)/i);
+  if (angleMatch && angleMatch[2]) {
+    cleanModel = angleMatch[2].replace(/\s*\(0x[0-9a-fA-F]+\)\s*/i, '').trim();
+    if (/Direct3D11/i.test(r)) {
+      const sm = r.match(/vs_5_0\s+ps_5_0/i) ? ' (Shader Model 5.0)' : '';
+      backendApi = `Direct3D 11${sm}`;
+    } else if (/Vulkan/i.test(r)) {
+      backendApi = 'Vulkan API';
+    } else if (/OpenGL/i.test(r)) {
+      backendApi = 'OpenGL / ANGLE';
+    }
+  } else {
+    cleanModel = r.replace(/^ANGLE\s*\(/i, '').replace(/\)$/i, '').trim();
+  }
+
+  let cleanVendor = v || 'Nieznany producent';
+  if (/AMD|Radeon/i.test(r) || /AMD/i.test(v)) {
+    cleanVendor = 'AMD (Advanced Micro Devices)';
+  } else if (/NVIDIA|GeForce|RTX|GTX/i.test(r) || /NVIDIA/i.test(v)) {
+    cleanVendor = 'NVIDIA Corporation';
+  } else if (/Intel|Arc|Iris|UHD/i.test(r) || /Intel/i.test(v)) {
+    cleanVendor = 'Intel Corporation';
+  } else if (/Apple/i.test(r) || /Apple/i.test(v)) {
+    cleanVendor = 'Apple Silicon GPU';
+  }
+
+  return {
+    cleanModel: pciId ? `${cleanModel} (PCI ID: ${pciId})` : cleanModel,
+    cleanVendor,
+    backendApi,
+    pciId,
+  };
+}
+
+export function cleanWebGpuSummaryForPdf(rawSummary: string | null | undefined): string {
+  const s = String(rawSummary || 'Aktywny').trim();
+  return s
+    .replace(/^WebGPU:\s*/i, '')
+    .replace(/\s*\(MaxBuf\s*\d+\s*MB\)/gi, '')
+    .trim() || 'Aktywny (Shader FP16 / Compute)';
+}
+
+/**
+ * Draws the official vector service emblem & brand card from g.png:
+ * Glowing cyan monitor with 4 left circuit trace lines/nodes on dark navy PCB card:
+ * NAPRAWA KOMPUTEROW I LAPTOPOW - Rafal Jarosz
+ * NAPRAWAPCLAPTOP.PL | 786 409 187 | WARSZAWA, UL. MARYMONCKA 125 M.109 P.6
+ */
+export function drawRafalJaroszServiceLogoPdf(
+  doc: jsPDF,
+  x: number,
+  y: number,
+  w = 66,
+  h = 24
+): void {
+  // Dark Navy PCB background card (#02152b) with Cyan (#00d8ff) border
+  doc.setFillColor(2, 21, 43);
+  doc.setDrawColor(0, 216, 255);
+  doc.setLineWidth(0.45);
+  doc.roundedRect(x, y, w, h, 2.2, 2.2, 'FD');
+
+  // Subtle decorative circuit trace lines in corner
+  doc.setDrawColor(7, 58, 94);
+  doc.setLineWidth(0.2);
+  doc.line(x + w - 12, y + 1.5, x + w - 6, y + 1.5);
+  doc.line(x + w - 6, y + 1.5, x + w - 3, y + 4.5);
+  doc.circle(x + w - 12.6, y + 1.5, 0.45, 'S');
+
+  // Glowing cyan monitor icon with 4 left circuit trace lines & circular nodes (matching g.png)
+  const monX = x + 8.6;
+  const monY = y + 3.4;
+  const monW = 10.6;
+  const monH = 7.0;
+
+  doc.setDrawColor(0, 216, 255);
+  doc.setFillColor(0, 216, 255);
+  doc.setLineWidth(0.65);
+  // Outer monitor bezel
+  doc.roundedRect(monX, monY, monW, monH, 0.8, 0.8, 'S');
+  // Inner screen frame
+  doc.setLineWidth(0.25);
+  doc.rect(monX + 0.9, monY + 0.8, monW - 1.8, monH - 1.7, 'S');
+  // Monitor neck & base stand
+  doc.setFillColor(0, 216, 255);
+  doc.rect(monX + monW / 2 - 1.1, monY + monH, 2.2, 1.3, 'F');
+  doc.roundedRect(monX + monW / 2 - 3.1, monY + monH + 1.2, 6.2, 0.9, 0.4, 0.4, 'F');
+
+  // 4 left circuit trace lines & nodes extending from the left side of the monitor
+  doc.setLineWidth(0.48);
+  // Trace 1 (top angled up-left)
+  doc.line(monX, monY + 1.4, monX - 2.6, monY + 1.4);
+  doc.line(monX - 2.6, monY + 1.4, monX - 3.8, monY + 0.3);
+  doc.circle(monX - 4.2, monY + 0.1, 0.55, 'F');
+  // Trace 2 (upper-middle angled up-left)
+  doc.line(monX, monY + 2.9, monX - 3.6, monY + 2.9);
+  doc.line(monX - 3.6, monY + 2.9, monX - 4.7, monY + 2.0);
+  doc.circle(monX - 5.1, monY + 1.8, 0.55, 'F');
+  // Trace 3 (lower-middle angled down-left)
+  doc.line(monX, monY + 4.4, monX - 3.4, monY + 4.4);
+  doc.line(monX - 3.4, monY + 4.4, monX - 4.4, monY + 5.4);
+  doc.circle(monX - 4.8, monY + 5.6, 0.55, 'F');
+  // Trace 4 (bottom straight left)
+  doc.line(monX, monY + 5.8, monX - 2.3, monY + 5.8);
+  doc.circle(monX - 2.8, monY + 5.8, 0.55, 'F');
+
+  // Text block inside logo card (right of monitor emblem & bottom full width)
+  const tx = monX + monW + 2.4;
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(6.6);
+  doc.setTextColor(0, 216, 255);
+  doc.text('NAPRAWA KOMPUTEROW', tx, y + 5.5);
+  doc.text('I LAPTOPOW', tx, y + 8.6);
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(6.8);
+  doc.setTextColor(255, 255, 255);
+  doc.text('Rafal Jarosz', tx, y + 12.1);
+
+  // Divider line inside card
+  doc.setDrawColor(14, 116, 144);
+  doc.setLineWidth(0.22);
+  doc.line(x + 2.5, y + 14.2, x + w - 2.5, y + 14.2);
+
+  // Website & Phone
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(6.3);
+  doc.setTextColor(241, 245, 249);
+  doc.text('NAPRAWAPCLAPTOP.PL  |  786 409 187', x + w / 2, y + 17.7, { align: 'center' });
+
+  // Address
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(5.5);
+  doc.setTextColor(186, 230, 253);
+  doc.text('WARSZAWA, UL. MARYMONCKA 125 M.109 P.6', x + w / 2, y + 21.3, { align: 'center' });
 }
 
 export function buildDiagnosticPdfDocument(payload: PdfReportPayload): jsPDF {
@@ -286,7 +456,7 @@ export function buildDiagnosticPdfDocument(payload: PdfReportPayload): jsPDF {
   };
 
   // =========================================================================
-  // STRONA 1: NAGLOWEK, WERDYKT, SPECYFIKACJA, WYNIKI, SKAN 12 PODZESPOLOW
+  // STRONA 1: NAGLOWEK Z LOGO SERWISU RAFAL JAROSZ, WERDYKT, SPECYFIKACJA
   // =========================================================================
   doc.setFillColor(12, 18, 30);
   doc.rect(0, 0, pageW, 35, 'F');
@@ -295,46 +465,50 @@ export function buildDiagnosticPdfDocument(payload: PdfReportPayload): jsPDF {
 
   doc.setTextColor(241, 245, 249);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(17);
-  doc.text('SystemPulse Pro', margin, 13.5);
+  doc.setFontSize(15.5);
+  doc.text('SystemPulse Pro', margin, 12.5);
 
   doc.setFont('helvetica', 'normal');
-  doc.setFontSize(9);
+  doc.setFontSize(7.8);
   doc.setTextColor(148, 163, 184);
-  doc.text(pdfText('Kompleksowy Raport Diagnostyczny, Ranking PC i Wydajnosc w Grach (A4)'), margin, 20.5);
-  doc.text(pdfText(`Wygenerowano: ${nowStr}   |   Nr raportu: ${reportId}`), margin, 26.8);
+  doc.text(pdfText('Kompleksowy Raport Diagnostyczny PC / Laptopa (A4)'), margin, 18.8);
+  doc.text(pdfText(`Data: ${nowStr}`), margin, 24.0);
+  doc.text(pdfText(`Nr raportu: ${reportId}`), margin, 29.0);
+
+  // Official Service Logo Card (NAPRAWA KOMPUTEROW I LAPTOPOW - Rafal Jarosz)
+  drawRafalJaroszServiceLogoPdf(doc, pageW - margin - 115, 5.2, 62, 23.6);
 
   // Ranking & Grade Badge in Header
   doc.setFillColor(20, 29, 46);
   doc.setDrawColor(6, 182, 212);
   doc.setLineWidth(0.5);
-  doc.roundedRect(pageW - margin - 52, 5.5, 52, 23, 2.5, 2.5, 'FD');
+  doc.roundedRect(pageW - margin - 50, 5.2, 50, 23.6, 2.5, 2.5, 'FD');
 
   doc.setTextColor(6, 182, 212);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(18);
-  doc.text(scores.overall > 0 ? scores.grade : '--', pageW - margin - 42, 18.5, { align: 'center' });
+  doc.setFontSize(17.5);
+  doc.text(scores.overall > 0 ? scores.grade : '--', pageW - margin - 40.5, 18.5, { align: 'center' });
 
   doc.setTextColor(241, 245, 249);
-  doc.setFontSize(10.5);
+  doc.setFontSize(10.2);
   doc.text(
     scores.overall > 0 ? `${scores.overall}/100` : `${rankingSnap.currentEntry.overallScore}/100`,
-    pageW - margin - 18,
+    pageW - margin - 17.5,
     14.5,
     { align: 'center' }
   );
   doc.setTextColor(52, 211, 153);
-  doc.setFontSize(7.2);
+  doc.setFontSize(7.0);
   doc.text(
     pdfText(`POZ. #${rankingSnap.currentRank}/${rankingSnap.totalRanked} (TOP ${Math.max(1, 100 - rankingSnap.percentileBetterThan)}%)`),
-    pageW - margin - 18,
+    pageW - margin - 17.5,
     20.2,
     { align: 'center' }
   );
   doc.setTextColor(148, 163, 184);
   doc.setFont('helvetica', 'normal');
-  doc.setFontSize(6.5);
-  doc.text('INDEKS & RANKING', pageW - margin - 18, 25.2, { align: 'center' });
+  doc.setFontSize(6.3);
+  doc.text('INDEKS & RANKING', pageW - margin - 17.5, 25.2, { align: 'center' });
 
   // Service Verdict Banner
   y = 40;
@@ -356,13 +530,43 @@ export function buildDiagnosticPdfDocument(payload: PdfReportPayload): jsPDF {
   // --- Section 1: Hardware Inventory (ZERO OVERLAP — Safe single/two-column rows) ---
   drawSectionHeading(
     '1. Pelna specyfikacja wykrytego sprzetu i srodowiska',
-    'Automatyczny odczyt GPU, CPU, pamieci, ekranu oraz danych z lokalnego mostka sprzetowego (jesli dostepny)'
+    'Automatyczny odczyt GPU, CPU, pamieci RAM, matrycy EDID oraz danych z lokalnego skanera SMBIOS / WMI'
   );
+
+  const deep = hardwareScan?.deepInventory;
+  const gpuClean = cleanGpuModelFromAngle(specs?.gpuRenderer, specs?.gpuVendor);
+  const snappedHz = snapStandardMonitorHz(hardwareScan?.panel?.refreshRateHz ?? specs?.estimatedRefreshRate);
+  const totalSmbiosRamGb =
+    deep?.ramModules && deep.ramModules.length > 0
+      ? Math.round(deep.ramModules.reduce((acc, m) => acc + (m.capacityGB || 0), 0))
+      : 0;
+  const ramDisplayStr =
+    totalSmbiosRamGb > 0 && deep?.ramModules
+      ? `${totalSmbiosRamGb} GB (${deep.ramModules.length}x ${deep.ramModules[0].memoryType} @ ${deep.ramModules[0].speedMHz} MHz)`
+      : specs
+        ? typeof specs.deviceMemory === 'number'
+          ? `>= ${specs.deviceMemory} GB (limit prywatnosci API)`
+          : String(specs.deviceMemory)
+        : '-';
 
   const fullWidthSpecs: Array<[string, string]> = [
     ['System / Platforma', specs ? `${specs.os} (${specs.platform})` : 'Nieznany'],
-    ['Karta graficzna (GPU)', specs ? `${specs.gpuRenderer} [${specs.gpuVendor}]` : 'Nieznana'],
+    [
+      'Karta graficzna (GPU)',
+      deep?.gpus?.[0]?.name
+        ? `${deep.gpus[0].name} (${deep.gpus[0].vramGB || `~${hwIndex.vramEstGb} GB`}) [${gpuClean.cleanVendor}]`
+        : `${gpuClean.cleanModel} [${gpuClean.cleanVendor} | ${gpuClean.backendApi}]`,
+    ],
   ];
+  if (deep?.cpuModel) {
+    fullWidthSpecs.push(['Procesor (CPU Model)', `${deep.cpuModel} (${deep.cpuDetails || `${specs?.cpuCores ?? '-'} watkow`})`]);
+  }
+  if (hardwareScan?.panel?.label) {
+    fullWidthSpecs.push([
+      'Model matrycy (EDID)',
+      `${hardwareScan.panel.label} (${hardwareScan.panel.nativeResolution} @ ${snappedHz} Hz)`,
+    ]);
+  }
 
   doc.setFillColor(248, 250, 252);
   doc.setDrawColor(203, 213, 225);
@@ -370,29 +574,29 @@ export function buildDiagnosticPdfDocument(payload: PdfReportPayload): jsPDF {
   const specBoxY = y;
   const pairedSpecs: Array<[string, string, string, string]> = [
     [
-      'Rdzenie logiczne CPU',
+      'Watki logiczne CPU',
       specs ? `${specs.cpuCores} watkow` : '-',
-      'Pamiec RAM (API)',
-      specs ? (typeof specs.deviceMemory === 'number' ? `>= ${specs.deviceMemory} GB` : String(specs.deviceMemory)) : '-',
+      'Pamiec RAM',
+      ramDisplayStr,
     ],
     [
       'Ekran / Odswiezanie',
-      specs ? `${specs.screenResolution} | ~${specs.estimatedRefreshRate} Hz (${specs.colorDepth}-bit)` : '-',
-      'WebGL / Tekstury',
-      specs ? `${specs.webglVersion} | ${specs.maxTextureSize}px` : '-',
+      specs ? `${hardwareScan?.panel?.nativeResolution || specs.screenResolution} | ${snappedHz} Hz (${specs.colorDepth}-bit)` : '-',
+      'WebGL / WebGPU',
+      specs ? `${specs.webglVersion} | MaxTex ${specs.maxTextureSize}px` : '-',
     ],
     [
       'Przegladarka / Silnik',
       specs ? specs.browser : '-',
-      'Pula dyskowa / OPFS',
+      'Bufor I/O (OPFS)',
       specs && specs.storageQuotaGB
-        ? `${specs.storageQuotaGB} GB (uzyto ${specs.storageUsageMB ?? 0} MB)`
-        : 'Dostepna',
+        ? `Sandbox I/O: ${specs.storageQuotaGB} GB`
+        : 'Aktywny (Native OPFS)',
     ],
     [
-      'Klasa VRAM (szac.)',
-      `~${hwIndex.vramEstGb} GB VRAM`,
-      'Panel / Gamut',
+      'Pamiec VRAM (klasa)',
+      deep?.gpus?.[0]?.vramGB ? `${deep.gpus[0].vramGB} VRAM` : `~${hwIndex.vramEstGb} GB VRAM`,
+      'Przestrzen barw / HDR',
       hardwareScan?.panel
         ? `${hardwareScan.panel.colorGamut} | ${hardwareScan.panel.hdrSupported ? 'HDR' : 'SDR'}`
         : specs
@@ -402,16 +606,22 @@ export function buildDiagnosticPdfDocument(payload: PdfReportPayload): jsPDF {
   ];
 
   // Add Deep Inventory row if available (Motherboard / BIOS / Physical Disks)
-  const deep = hardwareScan?.deepInventory;
   if (deep?.motherboard) {
     fullWidthSpecs.push([
       'Plyta glowna / BIOS',
       `${deep.motherboard} | BIOS: ${deep.bios || '-'}`,
     ]);
   }
+  if (deep?.ramModules && deep.ramModules.length > 0) {
+    const ramSticksSummary = deep.ramModules
+      .slice(0, 4)
+      .map((m) => `${m.slot}: ${m.manufacturer} ${m.partNumber} (${m.capacityGB} GB ${m.memoryType}-${m.speedMHz})`)
+      .join(' ; ');
+    fullWidthSpecs.push(['Moduly RAM (SMBIOS)', ramSticksSummary]);
+  }
   if (deep?.disks && deep.disks.length > 0) {
     const diskNames = deep.disks
-      .slice(0, 2)
+      .slice(0, 3)
       .map((d) => `${d.model} (${d.sizeGB} GB ${d.interfaceType || ''})`)
       .join(' ; ');
     fullWidthSpecs.push(['Dyski fizyczne (WMI)', diskNames]);
@@ -1189,16 +1399,24 @@ export function buildDiagnosticPdfDocument(payload: PdfReportPayload): jsPDF {
     doc.setPage(p);
     doc.setDrawColor(226, 232, 240);
     doc.setLineWidth(0.25);
-    doc.line(margin, pageH - 14, pageW - margin, pageH - 14);
+    doc.line(margin, pageH - 14.5, pageW - margin, pageH - 14.5);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.0);
+    doc.setTextColor(15, 23, 42);
+    doc.text(
+      pdfText('NAPRAWA KOMPUTEROW I LAPTOPOW - Rafal Jarosz | NAPRAWAPCLAPTOP.PL | Tel. 786 409 187 | Warszawa, ul. Marymoncka 125 m.109 p.6'),
+      margin,
+      pageH - 10.5
+    );
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(7.3);
+    doc.setFontSize(6.8);
     doc.setTextColor(100, 116, 139);
     doc.text(
-      pdfText(`SystemPulse Pro | Kompleksowy Raport Diagnostyczny i Ranking PC (${reportId}) - Dokument A4`),
+      pdfText(`Copyright (c) Rafal Jarosz - SystemPulse Pro | Raport Diagnostyczny i Ranking PC (${reportId})`),
       margin,
-      pageH - 9.5
+      pageH - 6.8
     );
-    doc.text(`Strona ${p} / ${totalPages}`, pageW - margin, pageH - 9.5, { align: 'right' });
+    doc.text(`Strona ${p} / ${totalPages}`, pageW - margin, pageH - 8.5, { align: 'right' });
   }
 
   return doc;
@@ -1227,24 +1445,27 @@ export function generateSchedulerPdfReport(
 
   doc.setTextColor(241, 245, 249);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(16);
-  doc.text('SystemPulse Pro - Raport Harmonogramu', margin, 14);
+  doc.setFontSize(15);
+  doc.text('SystemPulse Pro - Raport Harmonogramu', margin, 13);
 
   doc.setFont('helvetica', 'normal');
-  doc.setFontSize(9);
+  doc.setFontSize(8.2);
   doc.setTextColor(148, 163, 184);
   doc.text(
     pdfText(`Kolejka sekwencyjna (${report.steps.length} testow) | Czas: ${report.totalDurationSec.toFixed(1)} s`),
     margin,
-    21
+    20
   );
-  doc.text(pdfText(`Zakonczono: ${new Date(report.finishedAt).toLocaleString('pl-PL')}`), margin, 27);
+  doc.text(pdfText(`Zakonczono: ${new Date(report.finishedAt).toLocaleString('pl-PL')}`), margin, 26);
+
+  // Official Service Logo Card
+  drawRafalJaroszServiceLogoPdf(doc, pageW - margin - 106, 4.8, 60, 23.4);
 
   // Score badge
   doc.setFillColor(20, 29, 46);
   doc.setDrawColor(6, 182, 212);
   doc.setLineWidth(0.5);
-  doc.roundedRect(pageW - margin - 42, 6, 42, 22, 2.5, 2.5, 'FD');
+  doc.roundedRect(pageW - margin - 42, 4.8, 42, 23.4, 2.5, 2.5, 'FD');
   doc.setTextColor(6, 182, 212);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(17);
@@ -1330,12 +1551,21 @@ export function generateSchedulerPdfReport(
     y += 5.2;
   });
 
-  doc.setFontSize(7.5);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7.0);
+  doc.setTextColor(15, 23, 42);
+  doc.text(
+    pdfText('NAPRAWA KOMPUTEROW I LAPTOPOW - Rafal Jarosz | NAPRAWAPCLAPTOP.PL | Tel. 786 409 187 | Warszawa, ul. Marymoncka 125 m.109 p.6'),
+    margin,
+    284
+  );
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.0);
   doc.setTextColor(100, 116, 139);
   doc.text(
-    pdfText('SystemPulse Pro | Jednolity raport zbiorczy z kolejki testow obciazeniowych.'),
+    pdfText('Copyright (c) Rafal Jarosz - SystemPulse Pro | Jednolity raport zbiorczy z kolejki testow obciazeniowych.'),
     margin,
-    287
+    288
   );
 
   doc.save(`systempulse-harmonogram-${new Date().toISOString().slice(0, 10)}.pdf`);
@@ -1347,10 +1577,12 @@ export function generateHardwareInventoryPdfReport(
 ): void {
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const pageW = 210;
+  const pageH = 297;
   const margin = 14;
   const contentW = pageW - margin * 2;
+  const valColOffset = 64; // Generous 64mm label column so labels NEVER collide with values
 
-  // Header band
+  // Header band with Official Service Logo (NAPRAWA KOMPUTEROW I LAPTOPOW - Rafal Jarosz)
   doc.setFillColor(12, 18, 30);
   doc.rect(0, 0, pageW, 34, 'F');
   doc.setFillColor(6, 182, 212);
@@ -1358,108 +1590,267 @@ export function generateHardwareInventoryPdfReport(
 
   doc.setTextColor(241, 245, 249);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(16);
-  doc.text('SystemPulse Pro - Inwentarz Sprzetu', margin, 14);
+  doc.setFontSize(15.5);
+  doc.text('SystemPulse Pro - Inwentarz Sprzetu', margin, 13);
 
   doc.setFont('helvetica', 'normal');
-  doc.setFontSize(9);
+  doc.setFontSize(8.4);
   doc.setTextColor(148, 163, 184);
-  doc.text(pdfText('Szczegolowy raport wykrytych podzespolow (RAM, dyski, matryca, GPU, CPU)'), margin, 21);
-  doc.text(pdfText(`Wygenerowano: ${new Date().toLocaleString('pl-PL')}`), margin, 27);
+  doc.text(pdfText('Szczegolowy raport wykrytych podzespolow (CPU, plyta, RAM DIMM, GPU, EDID, dyski)'), margin, 19.8);
+  doc.text(pdfText(`Wygenerowano: ${new Date().toLocaleString('pl-PL')}`), margin, 26);
 
-  let y = 43;
+  drawRafalJaroszServiceLogoPdf(doc, pageW - margin - 66, 4.6, 66, 24);
+
+  let y = 42;
+  const ensurePageSpace = (needMm: number) => {
+    if (y + needMm > 274) {
+      doc.addPage();
+      doc.setFillColor(12, 18, 30);
+      doc.rect(0, 0, pageW, 15, 'F');
+      doc.setFillColor(6, 182, 212);
+      doc.rect(0, 14.2, pageW, 0.8, 'F');
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9);
+      doc.setTextColor(241, 245, 249);
+      doc.text('SystemPulse Pro - Inwentarz Sprzetu (Kontynuacja)', margin, 9.8);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.5);
+      doc.setTextColor(148, 163, 184);
+      doc.text('NAPRAWAPCLAPTOP.PL | 786 409 187', pageW - margin, 9.8, { align: 'right' });
+      y = 23;
+    }
+  };
+
   const drawHeading = (title: string) => {
+    ensurePageSpace(14);
+    doc.setFillColor(6, 182, 212);
+    doc.rect(margin, y - 3.4, 2.0, 4.5, 'F');
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(10.5);
+    doc.setFontSize(10.2);
     doc.setTextColor(15, 23, 42);
-    doc.text(pdfText(title), margin, y);
+    doc.text(pdfText(title), margin + 4, y);
     doc.setDrawColor(203, 213, 225);
     doc.setLineWidth(0.3);
     doc.line(margin, y + 1.8, margin + contentW, y + 1.8);
-    y += 7;
+    y += 6.8;
   };
 
-  drawHeading('1. Specyfikacja procesora i platformy systemowej');
-  const cpuLines = [
-    ['System operacyjny / Arch', specs ? `${specs.os} (${specs.platform})` : 'Nieznany'],
-    ['Watki logiczne CPU', specs ? `${specs.cpuCores} watkow logicznych` : 'Nieznany'],
-    ['Przegladarka / Srodowisko', specs ? specs.browser : 'Nieznana'],
-    ['Pamiec RAM (API)', specs ? (typeof specs.deviceMemory === 'number' ? `>= ${specs.deviceMemory} GB` : String(specs.deviceMemory)) : 'Nieznana'],
-  ];
-  doc.setFontSize(8.5);
-  for (const [k, v] of cpuLines) {
-    doc.setFont('helvetica', 'bold');
-    doc.setTextColor(71, 85, 105);
-    doc.text(pdfText(k + ':'), margin, y);
-    doc.setFont('helvetica', 'normal');
-    doc.setTextColor(15, 23, 42);
-    doc.text(fitTextToWidth(doc, v, contentW - 58), margin + 55, y);
-    y += 5.5;
-  }
-  y += 4;
+  const drawKvRows = (rows: Array<[string, string]>) => {
+    doc.setFontSize(8.3);
+    for (const [k, v] of rows) {
+      ensurePageSpace(6);
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(71, 85, 105);
+      doc.text(fitTextToWidth(doc, k + ':', valColOffset - 3), margin, y);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(15, 23, 42);
+      doc.text(fitTextToWidth(doc, v, contentW - valColOffset), margin + valColOffset, y);
+      y += 5.2;
+    }
+    y += 3;
+  };
 
-  drawHeading('2. Matryca i Parametry Wyswietlacza (EDID)');
+  const deep = hardwareScan?.deepInventory || null;
+  const gpuClean = cleanGpuModelFromAngle(specs?.gpuRenderer, specs?.gpuVendor);
   const panel = hardwareScan?.panel;
-  const panelLines = [
-    ['Model matrycy / Panel', panel ? panel.label : specs ? specs.screenResolution : 'Standardowy monitor'],
+  const snappedHz = snapStandardMonitorHz(panel?.refreshRateHz ?? specs?.estimatedRefreshRate);
+
+  // Estimate VRAM class accurately from GPU name
+  let estVramStr = 'Dedykowana pamiec VRAM';
+  const gpuRefStr = `${deep?.gpus?.[0]?.name || ''} ${specs?.gpuRenderer || ''}`;
+  if (/7900\s*XTX|4090|3090/i.test(gpuRefStr)) estVramStr = '24 GB GDDR6 / GDDR6X (Flagship 24GB)';
+  else if (/5090/i.test(gpuRefStr)) estVramStr = '32 GB GDDR7 (Flagship 32GB)';
+  else if (/7900\s*XT/i.test(gpuRefStr)) estVramStr = '20 GB GDDR6';
+  else if (/7900\s*GRE|7800\s*XT|6800|6900|6950|4080|4070\s*Ti\s*Super|5080|5070\s*Ti/i.test(gpuRefStr)) estVramStr = '16 GB GDDR6 / GDDR6X';
+  else if (/4070|3080|6700\s*XT|6750\s*XT|7700\s*XT|5070/i.test(gpuRefStr)) estVramStr = '12 GB GDDR6 / GDDR6X';
+  else if (/4060|3070|3060\s*Ti|7600|6600/i.test(gpuRefStr)) estVramStr = '8 GB GDDR6';
+  else if (deep?.gpus?.[0]?.vramGB) estVramStr = deep.gpus[0].vramGB;
+
+  // 1. CPU, Platform, Motherboard & RAM
+  drawHeading('1. Specyfikacja procesora, plyty glownej i pamieci RAM');
+  const totalSmbiosRamGb =
+    deep?.ramModules && deep.ramModules.length > 0
+      ? Math.round(deep.ramModules.reduce((acc, m) => acc + (m.capacityGB || 0), 0))
+      : 0;
+
+  const cpuLines: Array<[string, string]> = [
+    ['System operacyjny / Arch', specs ? `${specs.os} (${specs.platform})` : 'Nieznany'],
+    [
+      'Procesor (CPU)',
+      deep?.cpuModel
+        ? `${deep.cpuModel} (${deep.cpuDetails || `${specs?.cpuCores ?? '-'} watkow logicznych`})`
+        : specs
+          ? `${specs.cpuCores} watkow logicznych (${specs.platform})`
+          : 'Nieznany',
+    ],
+  ];
+  if (deep?.motherboard) {
+    cpuLines.push(['Plyta glowna / BIOS', `${deep.motherboard} | BIOS: ${deep.bios || '-'}`]);
+  }
+  if (deep?.computerModel) {
+    cpuLines.push(['Model komputera / System', deep.computerModel]);
+  }
+  if (totalSmbiosRamGb > 0 && deep?.ramModules) {
+    const firstMod = deep.ramModules[0];
+    const chLabel = deep.ramModules.length >= 2 ? 'Dual-Channel' : 'Single-Channel';
+    cpuLines.push([
+      'Zainstalowana pamiec RAM',
+      `${totalSmbiosRamGb} GB ${firstMod.memoryType} @ ${firstMod.speedMHz} MHz (${deep.ramModules.length} moduly DIMM, ${chLabel})`,
+    ]);
+    deep.ramModules.forEach((mod, idx) => {
+      cpuLines.push([
+        `Kosc RAM #${idx + 1} (${mod.slot})`,
+        `${mod.manufacturer} ${mod.partNumber} | ${mod.capacityGB} GB ${mod.memoryType} @ ${mod.speedMHz} MHz | S/N: ${mod.serial}`,
+      ]);
+    });
+  } else {
+    cpuLines.push([
+      'Pamiec RAM (status odczytu)',
+      specs && typeof specs.deviceMemory === 'number'
+        ? `Wykryto >= ${specs.deviceMemory} GB (limit prywatnosci Web API - wczytaj skan SMBIOS/WMI w zakladce Peryferia dla pelnej listy kosci DIMM)`
+        : 'Uzyj Skanera SMBIOS w zakladce Peryferia, aby odczytac dokladne kosci DIMM i taktowanie MHz',
+    ]);
+  }
+  cpuLines.push(['Srodowisko wykonawcze', specs ? `${specs.browser} (Silnik diagnostyczny 64-bit)` : 'Nieznane']);
+  drawKvRows(cpuLines);
+
+  // 2. Display / EDID
+  drawHeading('2. Matryca i Parametry Wyswietlacza (EDID)');
+  const edidMonitor = deep?.monitors?.[0];
+  const panelLines: Array<[string, string]> = [
+    [
+      'Model matrycy / Monitora',
+      panel?.label || (edidMonitor ? `${edidMonitor.manufacturer} ${edidMonitor.model}` : specs?.screenResolution || 'Standardowy monitor'),
+    ],
     ['Rozdzielczosc natywna', panel ? panel.nativeResolution : specs ? specs.screenResolution : '-'],
-    ['Odswiezanie ekranu', panel ? `${panel.refreshRateHz} Hz` : specs ? `~${specs.estimatedRefreshRate} Hz` : '-'],
-    ['Przestrzen barw / HDR', panel ? `${panel.colorGamut} | ${panel.hdrSupported ? 'HDR obslugiwany' : 'SDR'}` : specs ? `${specs.colorDepth}-bit` : '-'],
+    ['Odswiezanie ekranu (Hz)', `${snappedHz} Hz (Synchronizacja V-Blank)`],
+    [
+      'Przestrzen barw / Glebia',
+      panel
+        ? `${panel.colorGamut} | ${panel.colorDepthBit}-bit | ${panel.hdrSupported ? 'HDR Obslugiwany' : 'SDR'}`
+        : specs
+          ? `${specs.colorDepth}-bit SDR`
+          : '-',
+    ],
+    ['Klasa panelu / Szczegoly', panel?.estimatedClass || 'Monitor zewnetrzny / Matryca PC'],
   ];
-  for (const [k, v] of panelLines) {
-    doc.setFont('helvetica', 'bold');
-    doc.setTextColor(71, 85, 105);
-    doc.text(pdfText(k + ':'), margin, y);
-    doc.setFont('helvetica', 'normal');
-    doc.setTextColor(15, 23, 42);
-    doc.text(fitTextToWidth(doc, v, contentW - 58), margin + 55, y);
-    y += 5.5;
+  if (edidMonitor?.serial && edidMonitor.serial !== '—') {
+    panelLines.push(['Numer seryjny EDID (S/N)', edidMonitor.serial]);
   }
-  y += 4;
+  drawKvRows(panelLines);
 
-  drawHeading('3. Podsystem Graficzny (GPU)');
-  const gpuLines = [
-    ['Renderer GPU', specs ? specs.gpuRenderer : 'Brak danych'],
-    ['Dostawca (Vendor)', specs ? specs.gpuVendor : 'Brak danych'],
-    ['Wersja WebGL', specs ? `${specs.webglVersion} | Max tekstura: ${specs.maxTextureSize}px` : 'Brak danych'],
-    ['WebGPU', hardwareScan?.webGpuSummary || 'Sprawdzono w przegladarce'],
+  // 3. GPU Subsystem
+  drawHeading('3. Podsystem Graficzny (GPU 3D)');
+  const gpuLines: Array<[string, string]> = [
+    ['Model karty graficznej', deep?.gpus?.[0]?.name || gpuClean.cleanModel],
+    ['Producent ukladu (Vendor)', gpuClean.cleanVendor],
+    ['Pamiec wideo (VRAM / Klasa)', estVramStr],
+    ['Silnik renderowania 3D', `${gpuClean.backendApi} | ${specs?.webglVersion || 'WebGL 2.0'}`],
+    ['Maks. rozmiar tekstur GPU', specs ? `${specs.maxTextureSize} x ${specs.maxTextureSize} px` : '16384 x 16384 px'],
+    ['Akceleracja WebGPU Compute', cleanWebGpuSummaryForPdf(hardwareScan?.webGpuSummary)],
+    ['Pelny identyfikator sterownika', specs ? specs.gpuRenderer : 'Brak danych'],
   ];
-  for (const [k, v] of gpuLines) {
-    doc.setFont('helvetica', 'bold');
-    doc.setTextColor(71, 85, 105);
-    doc.text(pdfText(k + ':'), margin, y);
-    doc.setFont('helvetica', 'normal');
-    doc.setTextColor(15, 23, 42);
-    doc.text(fitTextToWidth(doc, v, contentW - 58), margin + 55, y);
-    y += 5.5;
+  if (deep?.gpus?.[0]?.driver) {
+    gpuLines.push(['Wersja sterownika WMI', deep.gpus[0].driver]);
   }
-  y += 4;
+  drawKvRows(gpuLines);
 
-  drawHeading('4. Pamiec Masowa i Zasoby Dyskowe');
-  const storageLines = [
-    ['Pula magazynowa przegladarki', hardwareScan && hardwareScan.storageSummary.quotaGB ? `${hardwareScan.storageSummary.quotaGB} GB` : specs && specs.storageQuotaGB ? `${specs.storageQuotaGB} GB` : 'Dostepna'],
-    ['Uzycie przestrzeni', hardwareScan ? `${hardwareScan.storageSummary.usageMB} MB` : specs && specs.storageUsageMB ? `${specs.storageUsageMB} MB` : 'Brak danych'],
-    ['Obsluga OPFS (Native FS)', hardwareScan ? (hardwareScan.storageSummary.opfsSupported ? 'Tak (Wysoka wydajnosc I/O)' : 'Ograniczona (IndexedDB)') : 'Tak'],
-    ['Trwalosc danych (Persisted)', hardwareScan ? (hardwareScan.storageSummary.persisted ? 'Trwale (Chronione przed czyszczeniem)' : 'Standardowa') : 'Standardowa'],
-  ];
-  for (const [k, v] of storageLines) {
-    doc.setFont('helvetica', 'bold');
-    doc.setTextColor(71, 85, 105);
-    doc.text(pdfText(k + ':'), margin, y);
-    doc.setFont('helvetica', 'normal');
-    doc.setTextColor(15, 23, 42);
-    doc.text(fitTextToWidth(doc, v, contentW - 58), margin + 55, y);
-    y += 5.5;
+  // 4. Physical Disks, Partitions & Storage
+  drawHeading('4. Dyski Fizyczne (NVMe / SSD / HDD), Partycje i Pamiec Masowa');
+  const storageLines: Array<[string, string]> = [];
+  const registeredDrives = diskTestService.getAvailableDrives();
+  const physicalOrSmbiosDrives = registeredDrives.filter((d) => d.kind === 'native_exe' || d.kind === 'smbios' || d.kind === 'fs_picker');
+
+  if (deep?.disks && deep.disks.length > 0) {
+    deep.disks.forEach((d, idx) => {
+      storageLines.push([
+        `Dysk fizyczny #${idx + 1}`,
+        `${d.model} | Pojemnosc: ${d.sizeGB} GB | Interfejs: ${d.interfaceType} (${d.mediaType}) | SMART: ${d.status}`,
+      ]);
+    });
+  }
+  if (deep?.logicalDisks && deep.logicalDisks.length > 0) {
+    deep.logicalDisks.forEach((ld) => {
+      storageLines.push([
+        `Partycja logiczna ${ld.letter}`,
+        `${ld.volumeName ? `${ld.volumeName} ` : ''}(${ld.fileSystem || 'NTFS'}) | Rozmiar: ${ld.totalGB} GB | Wolne: ${ld.freeGB} GB`,
+      ]);
+    });
+  } else if (physicalOrSmbiosDrives.length > 0) {
+    physicalOrSmbiosDrives.forEach((d, idx) => {
+      storageLines.push([
+        `Wykryty wolumin #${idx + 1}`,
+        `${d.label} | ${d.totalGB ? `Pojemnosc: ${d.totalGB} GB` : d.interfaceType}${d.freeGB ? ` (Wolne: ${d.freeGB} GB)` : ''} | Status: ${d.smartStatus || 'OK'}`,
+      ]);
+    });
+  } else {
+    storageLines.push([
+      'Dyski fizyczne NVMe / SSD',
+      'Wczytaj skan 1-Klik SMBIOS w zakladce Peryferia lub uruchom SystemPulse-Pro.exe, aby odczytac modele i pojemnosci dyskow (GB/TB)',
+    ]);
   }
 
-  // Footer
-  doc.setDrawColor(226, 232, 240);
-  doc.line(margin, 282, pageW - margin, 282);
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(7.5);
-  doc.setTextColor(100, 116, 139);
-  doc.text(pdfText('SystemPulse Pro | Szczegolowy inwentarz sprzetu wygenerowany lokalnie.'), margin, 287);
-  doc.text('Strona 1 / 1', pageW - margin, 287, { align: 'right' });
+  const opfsQuota =
+    hardwareScan && hardwareScan.storageSummary.quotaGB
+      ? `${hardwareScan.storageSummary.quotaGB} GB`
+      : specs && specs.storageQuotaGB
+        ? `${specs.storageQuotaGB} GB`
+        : 'Aktywny';
+  const opfsUsed =
+    hardwareScan
+      ? `${hardwareScan.storageSummary.usageMB} MB`
+      : specs && specs.storageUsageMB
+        ? `${specs.storageUsageMB} MB`
+        : '0 MB';
+
+  storageLines.push([
+    'Bufor testowy I/O (OPFS)',
+    `${opfsQuota} przydzielone na tymczasowe pliki benchmarku (uzyto ${opfsUsed} - to NIE jest rozmiar dysku fizycznego)`,
+  ]);
+  storageLines.push([
+    'Silnik plikow OPFS Native',
+    hardwareScan?.storageSummary.opfsSupported
+      ? 'Aktywny (Bezposredni zapis/odczyt strumieniowy I/O)'
+      : 'Standardowy',
+  ]);
+  drawKvRows(storageLines);
+
+  // 5. Network Adapters & Peripherals
+  if ((deep?.networkAdapters && deep.networkAdapters.length > 0) || (hardwareScan?.devices && hardwareScan.devices.length > 0)) {
+    drawHeading('5. Karty Sieciowe, Audio i Wykryte Urzadzenia Peryferyjne');
+    const periphLines: Array<[string, string]> = [];
+    if (deep?.networkAdapters && deep.networkAdapters.length > 0) {
+      periphLines.push(['Karty sieciowe (NIC)', deep.networkAdapters.join(' ; ')]);
+    }
+    const audioOut = (hardwareScan?.devices || []).filter((d) => d.category.includes('Audio') || d.category.includes('Mikrofon') || d.category.includes('Kamera'));
+    for (const dev of audioOut.slice(0, 5)) {
+      periphLines.push([dev.category, dev.name]);
+    }
+    if (periphLines.length > 0) {
+      drawKvRows(periphLines);
+    }
+  }
+
+  // Stamp Footer on all pages
+  const invPages = doc.getNumberOfPages();
+  for (let p = 1; p <= invPages; p++) {
+    doc.setPage(p);
+    doc.setDrawColor(226, 232, 240);
+    doc.line(margin, pageH - 14.5, pageW - margin, pageH - 14.5);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.0);
+    doc.setTextColor(15, 23, 42);
+    doc.text(
+      pdfText('NAPRAWA KOMPUTEROW I LAPTOPOW - Rafal Jarosz | NAPRAWAPCLAPTOP.PL | Tel. 786 409 187 | Warszawa, ul. Marymoncka 125 m.109 p.6'),
+      margin,
+      pageH - 10.5
+    );
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(6.8);
+    doc.setTextColor(100, 116, 139);
+    doc.text(pdfText('Copyright (c) Rafal Jarosz - SystemPulse Pro | Szczegolowy inwentarz sprzetu wygenerowany lokalnie.'), margin, pageH - 6.8);
+    doc.text(`Strona ${p} / ${invPages}`, pageW - margin, pageH - 8.5, { align: 'right' });
+  }
 
   doc.save(`systempulse-inwentarz-sprzetu-${new Date().toISOString().slice(0, 10)}.pdf`);
 }

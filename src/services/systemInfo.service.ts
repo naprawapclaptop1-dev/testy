@@ -4,22 +4,24 @@ export async function detectRefreshRate(): Promise<number> {
   return new Promise((resolve) => {
     const samples: number[] = [];
     let last = 0;
-    const count = 18;
+    const count = 24;
     const step = (ts: number) => {
       if (last > 0) {
         const dt = ts - last;
-        if (dt > 2 && dt < 100) samples.push(1000 / dt);
+        if (dt > 1.5 && dt < 100) samples.push(1000 / dt);
       }
       last = ts;
       if (samples.length >= count) {
         samples.sort((a, b) => a - b);
         const median = samples[Math.floor(samples.length / 2)] || 60;
-        const standard = [60, 75, 90, 100, 120, 144, 165, 240, 360];
+        const standard = [60, 75, 90, 100, 120, 144, 165, 170, 175, 180, 200, 240, 280, 300, 360, 480];
         let closest = Math.round(median);
+        let bestDiff = Infinity;
         for (const hz of standard) {
-          if (Math.abs(median - hz) <= 4) {
+          const diff = Math.abs(median - hz);
+          if (diff <= Math.max(3.5, hz * 0.025) && diff < bestDiff) {
+            bestDiff = diff;
             closest = hz;
-            break;
           }
         }
         resolve(closest);

@@ -734,7 +734,13 @@ export type GameSceneId =
   | 'ac130_gunship_3d'
   | 'cyber_hoverbike_3d'
   | 'volcano_heli_rescue'
-  | 'battleship_yamato_3d';
+  | 'battleship_yamato_3d'
+  | 'spiderman_ny_3d'
+  | 'bond_007_aston_3d'
+  | 'fifa_2027_stadium_3d'
+  | 'gta6_vice_neon_3d'
+  | 'witcher4_polaris_3d'
+  | 'battlefield_2027_tank_3d';
 
 export type PsuStressProfile = 'normal' | 'gpu_intense' | 'cpu_multicore' | 'transient_spike';
 
