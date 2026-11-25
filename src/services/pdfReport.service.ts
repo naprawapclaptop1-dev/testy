@@ -661,7 +661,24 @@ export function generateHardwareInventoryPdfReport(
   doc.save(`systempulse-inwentarz-sprzetu-${new Date().toISOString().slice(0, 10)}.pdf`);
 }
 
-export function generateBatteryTrendReportPdf(battery: BatteryHealthState): void {
+export interface BatteryReportPdfOptions {
+  summary?: boolean;
+  cycleLog?: boolean;
+  stats?: boolean;
+  forecast?: boolean;
+}
+
+export function generateBatteryTrendReportPdf(
+  battery: BatteryHealthState,
+  options?: BatteryReportPdfOptions
+): void {
+  const opts = {
+    summary: options?.summary ?? true,
+    cycleLog: options?.cycleLog ?? true,
+    stats: options?.stats ?? true,
+    forecast: options?.forecast ?? true,
+  };
+
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const pageW = 210;
   const margin = 14;
@@ -685,68 +702,86 @@ export function generateBatteryTrendReportPdf(battery: BatteryHealthState): void
   doc.text(pdfText(`Analiza trendu poboru mocy vs degradacja ogniw (ostatnie 30+ dni) · Wygenerowano: ${nowStr}`), margin, 21);
 
   let y = 38;
+  let sectionIdx = 1;
 
   // --- Summary KPIs ---
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(11);
-  doc.setTextColor(15, 23, 42);
-  doc.text(pdfText('1. Podsumowanie kondycji ogniw i degradacji'), margin, y);
-  y += 6;
+  if (opts.summary) {
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11);
+    doc.setTextColor(15, 23, 42);
+    doc.text(pdfText(`${sectionIdx++}. Podsumowanie kondycji ogniw i degradacji`), margin, y);
+    y += 6;
 
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(9.5);
-  doc.setTextColor(51, 65, 85);
-  doc.text(pdfText(`Pojemność fabryczna (Design): ${battery.designCapacityMWh} mWh`), margin, y);
-  doc.text(pdfText(`Obecna pełna pojemność: ${battery.fullChargeCapacityMWh} mWh`), margin + 95, y);
-  y += 6;
-  doc.text(pdfText(`Stopień zużycia (Wear Level): ${battery.wearLevelPct}%`), margin, y);
-  doc.text(pdfText(`Kondycja ogniw: ${battery.condition}`), margin + 95, y);
-  y += 6;
-  doc.text(pdfText(`Szacowany spadek na cykl: ${battery.avgDegradationPerCycleMWh} mWh / cykl`), margin, y);
-  doc.text(pdfText(`Łączna utrata pojemności: ${battery.totalCapacityLostMWh} mWh`), margin + 95, y);
-  y += 10;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9.5);
+    doc.setTextColor(51, 65, 85);
+    doc.text(pdfText(`Pojemność fabryczna (Design): ${battery.designCapacityMWh} mWh`), margin, y);
+    doc.text(pdfText(`Obecna pełna pojemność: ${battery.fullChargeCapacityMWh} mWh`), margin + 95, y);
+    y += 6;
+    doc.text(pdfText(`Stopień zużycia (Wear Level): ${battery.wearLevelPct}%`), margin, y);
+    doc.text(pdfText(`Kondycja ogniw: ${battery.condition}`), margin + 95, y);
+    y += 6;
+    if (opts.stats) {
+      doc.text(pdfText(`Szacowany spadek na cykl: ${battery.avgDegradationPerCycleMWh} mWh / cykl`), margin, y);
+      doc.text(pdfText(`Łączna utrata pojemności: ${battery.totalCapacityLostMWh} mWh`), margin + 95, y);
+      y += 6;
+    }
+    if (opts.forecast) {
+      const projLabel = battery.projectedCyclesTo80Pct !== null ? `~${battery.projectedCyclesTo80Pct} cykli` : 'Stabilna';
+      doc.text(pdfText(`Prognoza do progu 80%: ${projLabel}`), margin, y);
+      y += 6;
+    }
+    y += 4;
+  }
 
   // --- Power Cycles Table ---
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(11);
-  doc.text(pdfText('2. Rejestr cykli ładowania i spadek pojemności (Power Cycle Log)'), margin, y);
-  y += 6;
-
-  // Table Headers
-  doc.setFillColor(241, 245, 249);
-  doc.rect(margin, y, contentW, 7, 'F');
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(8.5);
-  doc.setTextColor(71, 85, 105);
-  doc.text('Data', margin + 3, y + 4.5);
-  doc.text('Cykl', margin + 45, y + 4.5);
-  doc.text('Zakres (%)', margin + 65, y + 4.5);
-  doc.text('Czas (min)', margin + 100, y + 4.5);
-  doc.text('Pojemność (mWh)', margin + 130, y + 4.5);
-  doc.text('Zużycie (%)', margin + 165, y + 4.5);
-  y += 8;
-
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(8.5);
-  doc.setTextColor(15, 23, 42);
-
-  const cycles = [...battery.powerCycles].slice(-15);
-  for (const c of cycles) {
-    if (y > 275) {
+  if (opts.cycleLog) {
+    if (y > 250) {
       doc.addPage();
       y = 20;
     }
-    doc.text(pdfText(c.dateLabel), margin + 3, y + 4);
-    doc.text(pdfText(`#${c.cycleNumber}`), margin + 45, y + 4);
-    doc.text(pdfText(`${c.startPct}% -> ${c.endPct}%`), margin + 65, y + 4);
-    doc.text(pdfText(`${c.durationMin} min`), margin + 100, y + 4);
-    doc.text(pdfText(`${c.fullChargeCapacityMWh} mWh`), margin + 130, y + 4);
-    doc.text(pdfText(`${c.cumulativeWearPct}%`), margin + 165, y + 4);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11);
+    doc.setTextColor(15, 23, 42);
+    doc.text(pdfText(`${sectionIdx++}. Rejestr cykli ładowania i spadek pojemności (Power Cycle Log)`), margin, y);
+    y += 6;
 
-    doc.setDrawColor(226, 232, 240);
-    doc.setLineWidth(0.2);
-    doc.line(margin, y + 5.5, pageW - margin, y + 5.5);
-    y += 7;
+    // Table Headers
+    doc.setFillColor(241, 245, 249);
+    doc.rect(margin, y, contentW, 7, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8.5);
+    doc.setTextColor(71, 85, 105);
+    doc.text('Data', margin + 3, y + 4.5);
+    doc.text('Cykl', margin + 45, y + 4.5);
+    doc.text('Zakres (%)', margin + 65, y + 4.5);
+    doc.text('Czas (min)', margin + 100, y + 4.5);
+    doc.text('Pojemność (mWh)', margin + 130, y + 4.5);
+    doc.text('Zużycie (%)', margin + 165, y + 4.5);
+    y += 8;
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8.5);
+    doc.setTextColor(15, 23, 42);
+
+    const cycles = [...battery.powerCycles].slice(-15);
+    for (const c of cycles) {
+      if (y > 275) {
+        doc.addPage();
+        y = 20;
+      }
+      doc.text(pdfText(c.dateLabel), margin + 3, y + 4);
+      doc.text(pdfText(`#${c.cycleNumber}`), margin + 45, y + 4);
+      doc.text(pdfText(`${c.startPct}% -> ${c.endPct}%`), margin + 65, y + 4);
+      doc.text(pdfText(`${c.durationMin} min`), margin + 100, y + 4);
+      doc.text(pdfText(`${c.fullChargeCapacityMWh} mWh`), margin + 130, y + 4);
+      doc.text(pdfText(`${c.cumulativeWearPct}%`), margin + 165, y + 4);
+
+      doc.setDrawColor(226, 232, 240);
+      doc.setLineWidth(0.2);
+      doc.line(margin, y + 5.5, pageW - margin, y + 5.5);
+      y += 7;
+    }
   }
 
   // Footer
