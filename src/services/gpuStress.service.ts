@@ -1379,6 +1379,21 @@ export class GpuStressEngine {
     container.appendChild(renderer.domElement);
     this.renderer = renderer;
 
+    const fsBtn = document.createElement('button');
+    fsBtn.type = 'button';
+    fsBtn.className = 'btn btn-secondary btn-sm';
+    fsBtn.style.cssText = 'position:absolute;top:10px;right:10px;z-index:20;background:rgba(15,23,42,0.92);color:#38bdf8;border:1px solid rgba(56,189,248,0.5);padding:6px 12px;border-radius:6px;font-size:11.5px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;gap:6px;box-shadow:0 4px 12px rgba(0,0,0,0.5);';
+    fsBtn.innerHTML = '⛶ Pełny ekran';
+    fsBtn.onclick = () => {
+      if (!document.fullscreenElement) {
+        container.requestFullscreen?.().catch(() => {});
+      } else {
+        document.exitFullscreen?.().catch(() => {});
+      }
+    };
+    container.style.position = container.style.position || 'relative';
+    container.appendChild(fsBtn);
+
     renderer.domElement.addEventListener('webglcontextlost', (e) => {
       e.preventDefault();
       this.stop();
