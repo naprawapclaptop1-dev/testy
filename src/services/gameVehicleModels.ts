@@ -888,157 +888,162 @@ export function createDetailedRaceCarModel(opts: RaceCarBuildOptions): THREE.Gro
   const exhaustMat = opts.plasmaMat || new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.85 });
 
   if (opts.style === 'formula_gp') {
-    // === FORMULA 1 / CYBER-GP OPEN-WHEEL MONOPOSTO ===
-    // 1. Sleek Needle Nosecone + Tapered Monocoque Tub (Lathe + Sculpted Extrude)
-    const tubShape = new THREE.Shape();
-    tubShape.moveTo(-2.75, 0.18);
-    tubShape.lineTo(-2.65, 0.36);
-    tubShape.quadraticCurveTo(-1.35, 0.62, -0.45, 0.68);
-    tubShape.lineTo(0.45, 1.06); // airbox intake behind helmet
-    tubShape.quadraticCurveTo(1.35, 0.98, 2.25, 0.56); // tapered engine cover shark-fin
-    tubShape.lineTo(2.45, 0.24);
-    tubShape.lineTo(-2.75, 0.18);
-
-    const tubGeo = new THREE.ExtrudeGeometry(tubShape, {
-      depth: 0.62,
-      bevelEnabled: true,
-      bevelThickness: 0.09,
-      bevelSize: 0.07,
-      bevelSegments: 4,
-      curveSegments: 16,
-    });
-    tubGeo.rotateY(Math.PI / 2);
-    tubGeo.translate(-0.31, 0, 0);
-    const tubMesh = new THREE.Mesh(tubGeo, bodyMat);
-    tubMesh.castShadow = true;
-    car.add(tubMesh);
-
-    // Sculpted Undercut Sidepods (Left & Right)
-    const podShape = new THREE.Shape();
-    podShape.moveTo(-0.82, 0.16);
-    podShape.lineTo(-0.88, 0.56);
-    podShape.quadraticCurveTo(0.15, 0.62, 1.45, 0.44);
-    podShape.lineTo(1.75, 0.18);
-    podShape.lineTo(-0.82, 0.16);
-    const podGeo = new THREE.ExtrudeGeometry(podShape, {
-      depth: 0.58,
-      bevelEnabled: true,
-      bevelThickness: 0.08,
-      bevelSize: 0.07,
-      bevelSegments: 4,
-    });
-    podGeo.rotateY(Math.PI / 2);
-    const podL = new THREE.Mesh(podGeo, bodyMat);
-    podL.position.x = -0.92;
-    podL.castShadow = true;
-    const podR = new THREE.Mesh(podGeo, bodyMat);
-    podR.position.x = 0.34;
-    podR.castShadow = true;
-    car.add(podL, podR);
-
-    // Dark sidepod air inlets + floor plank
-    const floorPlank = new THREE.Mesh(new THREE.BoxGeometry(1.96, 0.06, 4.1), carbonMat);
-    floorPlank.position.set(0, 0.13, 0.15);
-    car.add(floorPlank);
-
-    for (const sx of [-0.64, 0.64]) {
-      const inlet = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.28, 0.14), secondaryMat);
-      inlet.position.set(sx, 0.42, -0.84);
-      car.add(inlet);
+    // === ULTRA-REALISTIC F1 MONOPOSTO RACING CAR ===
+    // 1. Sleek Aerodynamic Monocoque Tub + Tapered Needle Nosecone
+    const noseCurvePoints: THREE.Vector3[] = [];
+    for (let i = 0; i <= 16; i++) {
+      const t = i / 16;
+      const z = -2.8 + t * 4.6;
+      const w = Math.sin(t * Math.PI) * 0.58 + (1 - t) * 0.18 + 0.32;
+      const h = (1 - t * 0.5) * 0.42;
+      noseCurvePoints.push(new THREE.Vector3(0, h, z));
     }
 
-    // Driver Helmet + Titanium Halo Safety Cockpit
-    const helmet = new THREE.Mesh(
-      new THREE.SphereGeometry(0.19, 16, 16),
-      new THREE.MeshPhysicalMaterial({ color: opts.accentHex, metalness: 0.8, roughness: 0.12, clearcoat: 1 })
+    const chassisBody = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.35, 0.52, 4.4, 24, 16),
+      bodyMat
     );
-    helmet.position.set(0, 0.72, -0.05);
-    const visor = new THREE.Mesh(new THREE.CylinderGeometry(0.195, 0.195, 0.09, 16, 1, false, -0.9, 1.8), glassMat);
-    visor.position.set(0, 0.74, -0.07);
+    chassisBody.rotation.x = Math.PI / 2;
+    chassisBody.position.set(0, 0.44, 0.05);
+    chassisBody.castShadow = true;
+    car.add(chassisBody);
+
+    // Sculpted Tapered Nose Cone
+    const noseCone = new THREE.Mesh(
+      new THREE.ConeGeometry(0.32, 1.9, 20),
+      bodyMat
+    );
+    noseCone.rotation.x = -Math.PI / 2;
+    noseCone.position.set(0, 0.38, -1.95);
+    noseCone.castShadow = true;
+    car.add(noseCone);
+
+    // Aerodynamic Undercut Sidepods (Left & Right) with Carbon Inlets
+    for (const sx of [-0.78, 0.78]) {
+      const sidepod = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.34, 0.38, 2.6, 18),
+        bodyMat
+      );
+      sidepod.rotation.x = Math.PI / 2;
+      sidepod.position.set(sx, 0.42, 0.25);
+      sidepod.castShadow = true;
+
+      // Carbon Air Intake Scoop
+      const intake = new THREE.Mesh(
+        new THREE.BoxGeometry(0.36, 0.28, 0.16),
+        carbonMat
+      );
+      intake.position.set(sx, 0.45, -0.95);
+
+      car.add(sidepod, intake);
+    }
+
+    // Flat Carbon Floor Plank
+    const floorPlank = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.05, 4.4), carbonMat);
+    floorPlank.position.set(0, 0.16, 0.15);
+    car.add(floorPlank);
+
+    // Driver Helmet, Visor & Titanium Halo
+    const helmet = new THREE.Mesh(
+      new THREE.SphereGeometry(0.2, 20, 20),
+      new THREE.MeshPhysicalMaterial({ color: opts.accentHex, metalness: 0.85, roughness: 0.1, clearcoat: 1 })
+    );
+    helmet.position.set(0, 0.82, -0.04);
+    const visor = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.205, 0.205, 0.1, 20, 1, false, -1.0, 2.0),
+      glassMat
+    );
+    visor.position.set(0, 0.84, -0.06);
     visor.rotation.y = Math.PI;
     car.add(helmet, visor);
 
-    const haloArch = new THREE.Mesh(new THREE.TorusGeometry(0.32, 0.036, 10, 24, Math.PI), carbonMat);
-    haloArch.rotation.x = Math.PI / 2 + 0.12;
-    haloArch.position.set(0, 0.82, -0.18);
-    const haloPillar = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.03, 0.32, 10), carbonMat);
-    haloPillar.position.set(0, 0.72, -0.49);
-    haloPillar.rotation.x = 0.45;
+    const haloArch = new THREE.Mesh(
+      new THREE.TorusGeometry(0.34, 0.038, 12, 28, Math.PI),
+      carbonMat
+    );
+    haloArch.rotation.x = Math.PI / 2 + 0.14;
+    haloArch.position.set(0, 0.94, -0.18);
+    const haloPillar = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.026, 0.032, 0.36, 12),
+      carbonMat
+    );
+    haloPillar.position.set(0, 0.82, -0.52);
+    haloPillar.rotation.x = 0.48;
     car.add(haloArch, haloPillar);
 
-    // Multi-element Front Wing + Endplates
-    const frontWingMain = new THREE.Mesh(new THREE.BoxGeometry(2.38, 0.05, 0.52), carbonMat);
-    frontWingMain.position.set(0, 0.16, -2.58);
-    const frontWingFlap = new THREE.Mesh(new THREE.BoxGeometry(2.34, 0.04, 0.24), bodyMat);
-    frontWingFlap.position.set(0, 0.23, -2.42);
-    frontWingFlap.rotation.x = 0.25;
-    for (const sx of [-1.2, 1.2]) {
-      const endPlate = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.28, 0.62), bodyMat);
-      endPlate.position.set(sx, 0.26, -2.55);
+    // Multi-element Carbon Front Wing & Endplates
+    const frontWingMain = new THREE.Mesh(new THREE.BoxGeometry(2.52, 0.05, 0.62), carbonMat);
+    frontWingMain.position.set(0, 0.22, -2.75);
+    const frontWingFlap = new THREE.Mesh(new THREE.BoxGeometry(2.46, 0.04, 0.28), bodyMat);
+    frontWingFlap.position.set(0, 0.3, -2.58);
+    frontWingFlap.rotation.x = 0.28;
+    for (const sx of [-1.28, 1.28]) {
+      const endPlate = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.34, 0.72), bodyMat);
+      endPlate.position.set(sx, 0.32, -2.72);
       car.add(endPlate);
     }
     car.add(frontWingMain, frontWingFlap);
 
-    // Swan-neck Multi-Plane F1 Rear Wing + DRS Actuator + Rain Light
-    const wingTop = new THREE.Mesh(new THREE.BoxGeometry(2.05, 0.055, 0.38), carbonMat);
-    wingTop.position.set(0, 1.18, 2.34);
-    wingTop.rotation.x = 0.18;
-    const wingMain = new THREE.Mesh(new THREE.BoxGeometry(2.05, 0.05, 0.42), bodyMat);
-    wingMain.position.set(0, 1.06, 2.28);
-    for (const sx of [-1.04, 1.04]) {
-      const end = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.56, 0.56), bodyMat);
-      end.position.set(sx, 1.02, 2.3);
+    // Swan-Neck Multi-Plane F1 Rear Wing + DRS Actuator + Rain Light
+    const wingTop = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.06, 0.42), carbonMat);
+    wingTop.position.set(0, 1.34, 2.38);
+    wingTop.rotation.x = 0.15;
+    const wingMain = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.055, 0.48), bodyMat);
+    wingMain.position.set(0, 1.2, 2.32);
+    for (const sx of [-1.1, 1.1]) {
+      const end = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.62, 0.62), bodyMat);
+      end.position.set(sx, 1.16, 2.35);
       car.add(end);
     }
-    for (const sx of [-0.22, 0.22]) {
-      const strut = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.58, 0.22), carbonMat);
-      strut.position.set(sx, 0.84, 2.18);
+    for (const sx of [-0.24, 0.24]) {
+      const strut = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.65, 0.24), carbonMat);
+      strut.position.set(sx, 0.92, 2.22);
       car.add(strut);
     }
     car.add(wingTop, wingMain);
 
-    // F1 Diffuser Fins + Center FIA Blinking Rain Light + Exhaust
+    // Rear Diffuser Fins + FIA Rain Light + Titanium Exhaust & Plasma Flame
     for (let f = -3; f <= 3; f++) {
-      const fin = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.22, 0.42), carbonMat);
-      fin.position.set(f * 0.22, 0.2, 2.35);
+      const fin = new THREE.Mesh(new THREE.BoxGeometry(0.038, 0.26, 0.48), carbonMat);
+      fin.position.set(f * 0.24, 0.24, 2.42);
       car.add(fin);
     }
-    const rainLight = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.16, 0.06), tailLedMat);
-    rainLight.position.set(0, 0.38, 2.52);
-    const exhaust = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.12, 0.26, 16), secondaryMat);
+    const rainLight = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.18, 0.07), tailLedMat);
+    rainLight.position.set(0, 0.42, 2.62);
+    const exhaust = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.13, 0.3, 18), secondaryMat);
     exhaust.rotation.x = Math.PI / 2;
-    exhaust.position.set(0, 0.56, 2.48);
-    const flame = new THREE.Mesh(new THREE.ConeGeometry(0.12, 1.15, 14), exhaustMat);
+    exhaust.position.set(0, 0.62, 2.55);
+    const flame = new THREE.Mesh(new THREE.ConeGeometry(0.14, 1.35, 16), exhaustMat);
     flame.rotation.x = Math.PI / 2;
-    flame.position.set(0, 0.56, 3.08);
+    flame.position.set(0, 0.62, 3.25);
     flames.push(flame);
     car.add(rainLight, exhaust, flame);
 
-    // Exposed Carbon Suspension Wishbones (A-arms)
-    const armCoords: Array<[number, number, number, number]> = [
-      [-0.65, 0.42, -1.62, 0.95],
-      [0.65, 0.42, -1.62, 0.95],
-      [-0.68, 0.44, 1.54, 0.98],
-      [0.68, 0.44, 1.54, 0.98],
+    // Exposed Suspension A-Arms
+    const suspensionCoords: Array<[number, number, number, number]> = [
+      [-0.72, 0.48, -1.75, 1.05],
+      [0.72, 0.48, -1.75, 1.05],
+      [-0.75, 0.52, 1.62, 1.12],
+      [0.75, 0.52, 1.62, 1.12],
     ];
-    for (const [ax, ay, az, len] of armCoords) {
-      const arm1 = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, len, 8), carbonMat);
-      arm1.rotation.z = Math.PI / 2;
-      arm1.rotation.y = ax < 0 ? 0.22 : -0.22;
-      arm1.position.set(ax, ay, az - 0.12);
-      const arm2 = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, len, 8), carbonMat);
-      arm2.rotation.z = Math.PI / 2;
-      arm2.rotation.y = ax < 0 ? -0.22 : 0.22;
-      arm2.position.set(ax, ay - 0.08, az + 0.12);
-      car.add(arm1, arm2);
+    for (const [ax, ay, az, len] of suspensionCoords) {
+      const armA = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.028, len, 8), carbonMat);
+      armA.rotation.z = Math.PI / 2;
+      armA.rotation.y = ax < 0 ? 0.25 : -0.25;
+      armA.position.set(ax, ay, az - 0.14);
+      const armB = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.028, len, 8), carbonMat);
+      armB.rotation.z = Math.PI / 2;
+      armB.rotation.y = ax < 0 ? -0.25 : 0.25;
+      armB.position.set(ax, ay - 0.09, az + 0.14);
+      car.add(armA, armB);
     }
 
-    // 4 Open Slick Wheels
+    // 4 Wide Slick Racing Wheels
     const wheelSpecs = [
-      { x: -1.16, y: 0.44, z: -1.62, r: 0.44, w: 0.42, front: true },
-      { x: 1.16, y: 0.44, z: -1.62, r: 0.44, w: 0.42, front: true },
-      { x: -1.2, y: 0.48, z: 1.54, r: 0.48, w: 0.52, front: false },
-      { x: 1.2, y: 0.48, z: 1.54, r: 0.48, w: 0.52, front: false },
+      { x: -1.24, y: 0.48, z: -1.75, r: 0.46, w: 0.45, front: true },
+      { x: 1.24, y: 0.48, z: -1.75, r: 0.46, w: 0.45, front: true },
+      { x: -1.28, y: 0.52, z: 1.62, r: 0.5, w: 0.55, front: false },
+      { x: 1.28, y: 0.52, z: 1.62, r: 0.5, w: 0.55, front: false },
     ];
     for (const ws of wheelSpecs) {
       addDetailedWheelAssembly(car, {
