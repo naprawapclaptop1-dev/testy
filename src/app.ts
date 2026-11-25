@@ -75,6 +75,7 @@ import {
   bindBatteryHistoryChartTooltip,
   renderBatteryDegradationTrendChart,
   renderBatteryHistoryChart,
+  renderBatteryWearLevel30DaysChartD3,
   renderDualLineChart,
   renderRadarChart,
 } from './ui/charts';
@@ -5527,7 +5528,7 @@ export class SystemPulseApp {
               <span id="disp-oled-protect-label">${
                 displayDiagnostics.isOledProtectionActive()
                   ? `Zatrzymaj OLED Protection (${formatCountdownMmSs(displayDiagnostics.getOledProtectionRemainingSec())})`
-                  : 'OLED Burn-in Protection (30 min)'
+                  : 'OLED Burn-in Protection (60 min)'
               }</span>
             </button>
             <button id="disp-slideshow-btn" type="button" class="btn ${this.displaySlideshowTimer ? 'btn-danger' : 'btn-secondary'}">
@@ -5836,15 +5837,15 @@ export class SystemPulseApp {
         },
         onComplete: () => {
           this.oledProtectionNotice =
-            'Zakończono 30-minutową sesję OLED Burn-in Protection. Piksele matrycy zostały równomiernie odświeżone.';
+            'Zakończono 60-minutową sesję OLED Burn-in Protection. Piksele matrycy zostały równomiernie odświeżone.';
           soundNotificationService.playCompletionChime('complete');
           void this.recordLog(
             'DISPLAY',
             'OK',
             'Zakończono OLED Burn-in Protection',
             'Status',
-            '30:00 ukończone',
-            'Pełny 30-minutowy cykl ochrony matrycy OLED przed wypaleniem zakończył się pomyślnie.'
+            '60:00 ukończone',
+            'Pełny 60-minutowy cykl ochrony matrycy OLED przed wypaleniem zakończył się pomyślnie.'
           );
         },
         onStop: (completed) => {
@@ -6075,6 +6076,14 @@ export class SystemPulseApp {
 
           <div id="bat-cycle-summary" class="grid-4">
             ${this.renderBatteryCycleSummaryHtml(b)}
+          </div>
+
+          <div class="stack-sm">
+            <div class="row-between" style="flex-wrap:wrap;gap:6px;">
+              <span style="font-size:13px;font-weight:600;">Trend stopnia zużycia (Wear Level) vs Szacowane cykle ładowania (Ostatnie 30 Dni)</span>
+              <span class="panel-caption">Wykres D3.js · Oś Y1: Wear Level (%) · Oś Y2: Est. Power Cycles</span>
+            </div>
+            <div id="bat-wear-30d-d3-container"></div>
           </div>
 
           <div class="stack-sm">
@@ -7113,6 +7122,11 @@ export class SystemPulseApp {
 
     const degChart = this.root.querySelector('#bat-degradation-chart');
     if (degChart) degChart.innerHTML = this.renderBatteryDegradationChartHtml(b);
+
+    const wear30El = this.root.querySelector('#bat-wear-30d-d3-container');
+    if (wear30El) {
+      renderBatteryWearLevel30DaysChartD3(wear30El as HTMLElement, b.powerCycles, 220);
+    }
 
     const cycleTable = this.root.querySelector('#bat-cycle-log-table');
     if (cycleTable) cycleTable.innerHTML = this.renderBatteryCycleTableHtml(b);

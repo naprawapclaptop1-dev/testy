@@ -156,9 +156,9 @@ describe('OLED Burn-in Protection Mode', () => {
     vi.restoreAllMocks();
   });
 
-  it('registers OLED Burn-in Protection pattern and defaults to 30 minutes (1800s)', () => {
-    expect(OLED_PROTECTION_DURATION_SEC).toBe(1800);
-    expect(formatCountdownMmSs(1800)).toBe('30:00');
+  it('registers OLED Burn-in Protection pattern and defaults to 60 minutes (3600s)', () => {
+    expect(OLED_PROTECTION_DURATION_SEC).toBe(3600);
+    expect(formatCountdownMmSs(3600)).toBe('60:00');
     expect(formatCountdownMmSs(65)).toBe('01:05');
     expect(formatCountdownMmSs(-10)).toBe('00:00');
 
@@ -186,7 +186,7 @@ describe('OLED Burn-in Protection Mode', () => {
     }
   });
 
-  it('runs for 30 minutes, emits countdown ticks, and auto-completes at 00:00', () => {
+  it('runs for 60 minutes, emits countdown ticks, and auto-completes at 00:00', () => {
     const { bodyChildren } = setupFakeDom();
     const controller = new DisplayDiagnosticController();
     const ticks: number[] = [];
@@ -202,15 +202,15 @@ describe('OLED Burn-in Protection Mode', () => {
     expect(controller.isOledProtectionActive()).toBe(true);
     expect(bodyChildren.length).toBe(1);
     expect(bodyChildren[0].dataset.oledProtection).toBe('active');
-    expect(ticks[0]).toBe(1800);
+    expect(ticks[0]).toBe(3600);
 
-    // Advance 10 minutes
-    vi.advanceTimersByTime(10 * 60 * 1000);
-    expect(controller.isOledProtectionActive()).toBe(true);
-    expect(controller.getOledProtectionRemainingSec()).toBe(1200);
-
-    // Advance remaining 20 minutes
+    // Advance 20 minutes
     vi.advanceTimersByTime(20 * 60 * 1000);
+    expect(controller.isOledProtectionActive()).toBe(true);
+    expect(controller.getOledProtectionRemainingSec()).toBe(2400);
+
+    // Advance remaining 40 minutes
+    vi.advanceTimersByTime(40 * 60 * 1000);
     expect(controller.isOledProtectionActive()).toBe(false);
     expect(onComplete).toHaveBeenCalledTimes(1);
     expect(onStop).toHaveBeenCalledWith(true);

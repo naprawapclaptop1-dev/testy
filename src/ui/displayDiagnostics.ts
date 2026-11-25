@@ -1146,7 +1146,7 @@ export const DISPLAY_PATTERNS: DisplayPatternDef[] = [
   },
 ];
 
-export const OLED_PROTECTION_DURATION_SEC = 30 * 60;
+export const OLED_PROTECTION_DURATION_SEC = 60 * 60;
 
 export function formatCountdownMmSs(totalSeconds: number): string {
   const clamped = Math.max(0, Math.floor(totalSeconds));
