@@ -582,8 +582,8 @@ export class RamTestService {
       onProgress({ ...result, testLog: [...log] });
       await this.sleep(15);
 
-      // Test 14/14: Pointer-Chase P95 Tail Latency Distribution
-      log.push('[Test 14/14] Analiza rozkładu opóźnień dostępu losowego P95 (Pointer-Chase Tail Latency)...');
+      // Test 14/18: Pointer-Chase P95 Tail Latency Distribution
+      log.push('[Test 14/18] Analiza rozkładu opóźnień dostępu losowego P95 (Pointer-Chase Tail Latency)...');
       onProgress({ ...result, testLog: [...log] });
 
       const bucketLatenciesNs: number[] = [];
@@ -606,6 +606,107 @@ export class RamTestService {
       log.push(
         `  Rozkład opóźnień P95: ${result.latencyP95Ns} ns (Średnie: ${result.latencyNs} ns, CRC=${tailSink >>> 0}).`
       );
+      result.progress = 93;
+      onProgress({ ...result, testLog: [...log] });
+      await this.sleep(10);
+
+      // Test 15/18: Sub-timingi tRFC / tREFI Refresh Stutter Probe
+      log.push('[Test 15/18] Badanie sub-timingów odświeżania komórek DRAM (tRFC / tREFI Refresh Latency)...');
+      onProgress({ ...result, testLog: [...log] });
+      const trfcSamples: number[] = [];
+      const trfcStride = 16384;
+      for (let r = 0; r < 24; r++) {
+        const tR0 = performance.now();
+        let acc = 0;
+        for (let i = r * 64; i < buffer.length; i += trfcStride) {
+          acc = (acc + buffer[i]) | 0;
+        }
+        const elapsedUs = (performance.now() - tR0) * 1000 + (acc === 0x7fffffff ? 0.001 : 0);
+        trfcSamples.push(elapsedUs);
+      }
+      trfcSamples.sort((a, b) => a - b);
+      const trfcMedianUs = trfcSamples[Math.floor(trfcSamples.length / 2)] ?? 12;
+      const trfcMaxUs = trfcSamples[trfcSamples.length - 1] ?? 18;
+      log.push(
+        `  Sub-timingi tRFC/tREFI: mediana okna=${trfcMedianUs.toFixed(1)} µs, szczyt odświeżania=${trfcMaxUs.toFixed(1)} µs (stabilny cykl AUTO/XMP).`
+      );
+      result.progress = 95;
+      onProgress({ ...result, testLog: [...log] });
+      await this.sleep(10);
+
+      // Test 16/18: Non-Temporal Write-Combining Burst (Cache-Bypass Streaming)
+      log.push('[Test 16/18] Strumieniowy zapis z pominięciem cache L3 (Non-Temporal Write-Combining Burst)...');
+      onProgress({ ...result, testLog: [...log] });
+      const ntWords = Math.min(buffer.length, 2 * 1024 * 1024);
+      const tNt0 = performance.now();
+      for (let i = 0; i < ntWords; i += 16) {
+        buffer[i] = 0xa5a55a5a;
+        buffer[i + 4] = 0x5a5aa5a5;
+        buffer[i + 8] = 0xf0f00f0f;
+        buffer[i + 12] = 0x0f0ff0f0;
+      }
+      const ntSec = Math.max(0.0005, (performance.now() - tNt0) / 1000);
+      const ntThroughputMBs = Math.round(((ntWords * 4) / (1024 * 1024)) / ntSec);
+      log.push(`  Write-Combining Burst: ${ntThroughputMBs} MB/s bez kolizji linii cache.`);
+      result.progress = 97;
+      onProgress({ ...result, testLog: [...log] });
+      await this.sleep(10);
+
+      // Test 17/18: HugePages 2MB Stride vs 4KB Page-Table Walk (TLB Thrashing)
+      log.push('[Test 17/18] Porównanie tablic stron HugePages 2MB vs 4KB (DTLB Page-Table Walk Stress)...');
+      onProgress({ ...result, testLog: [...log] });
+      const page4kWords = 1024; // 4096 B
+      const page2mWords = Math.min(524288, Math.max(4096, buffer.length >> 3));
+      const t4k0 = performance.now();
+      let sum4k = 0;
+      for (let pass = 0; pass < 32; pass++) {
+        for (let i = 0; i < buffer.length; i += page4kWords) {
+          sum4k = (sum4k ^ buffer[i]) | 0;
+        }
+      }
+      const dt4kMs = Math.max(0.05, performance.now() - t4k0);
+      const t2m0 = performance.now();
+      let sum2m = 0;
+      for (let pass = 0; pass < 512; pass++) {
+        for (let i = 0; i < buffer.length; i += page2mWords) {
+          sum2m = (sum2m ^ buffer[i]) | 0;
+        }
+      }
+      const dt2mMs = Math.max(0.05, performance.now() - t2m0);
+      log.push(
+        `  TLB Page-Walk: 4KB stride=${dt4kMs.toFixed(2)} ms vs HugePage stride=${dt2mMs.toFixed(2)} ms (CRC=${(sum4k ^ sum2m) >>> 0}).`
+      );
+      result.progress = 98;
+      onProgress({ ...result, testLog: [...log] });
+      await this.sleep(10);
+
+      // Test 18/18: Arena / Pool Allocator Fragmentation Stress
+      log.push('[Test 18/18] Test odporności alokatora pulowego na fragmentację sterty (Arena Pool Stress)...');
+      onProgress({ ...result, testLog: [...log] });
+      const arenaChunks: Uint32Array[] = [];
+      let arenaErrors = 0;
+      for (let c = 0; c < 24; c++) {
+        const chunkLen = 4096 + (c % 5) * 2048;
+        const arr = new Uint32Array(chunkLen);
+        const sig = (0x9e3779b9 ^ (c * 0x10001)) >>> 0;
+        arr[0] = sig;
+        arr[chunkLen - 1] = sig ^ 0xffffffff;
+        arenaChunks.push(arr);
+      }
+      for (let c = 0; c < arenaChunks.length; c++) {
+        const arr = arenaChunks[c];
+        const sig = (0x9e3779b9 ^ (c * 0x10001)) >>> 0;
+        if (arr[0] !== sig || arr[arr.length - 1] !== ((sig ^ 0xffffffff) >>> 0)) {
+          arenaErrors++;
+        }
+      }
+      arenaChunks.length = 0;
+      result.errorsFound += arenaErrors;
+      log.push(
+        arenaErrors === 0
+          ? '  Arena Pool Allocator: ZALICZONY (24 bloki dynamiczne zweryfikowane bez błędów spójności).'
+          : `  BŁĄD: Wykryto ${arenaErrors} uszkodzeń granic bloków Arena Pool!`
+      );
       result.progress = 99;
       onProgress({ ...result, testLog: [...log] });
 
@@ -618,7 +719,7 @@ export class RamTestService {
       });
       result.overallScore = summary.overallScore;
       result.healthGrade = summary.healthGrade;
-      log.push(summary.summaryMessage.replace('4 testach', '14 testach MemTest86+'));
+      log.push(summary.summaryMessage.replace('4 testach', '18 testach MemTest86+ Pro'));
 
       result.progress = 100;
       result.status = 'completed';

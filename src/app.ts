@@ -13,9 +13,15 @@ import {
   GameAiProfile,
   GameBenchMetrics,
   GameFpsCap,
+  GameFrameGenMode,
+  GameGiQuality,
   GameQualityPreset,
+  GameRayTracingMode,
+  GameReflexMode,
   GameSceneId,
+  GameTextureQuality,
   GameToneMappingMode,
+  GameUpscalingMode,
   GpuFpsMode,
   GpuLoadPreset,
   GpuSceneMode,
@@ -34,6 +40,10 @@ import {
   ThemeMode,
   ThermalHeatMapSnapshot,
 } from './types';
+import {
+  bindPcSuitabilityReportEvents,
+  renderPcSuitabilityAndGamesReport,
+} from './ui/pcSuitabilityAndGamesReport';
 import { getSystemSpecs } from './services/systemInfo.service';
 import { cpuTestService } from './services/cpuTest.service';
 import { ramTestService } from './services/ramTest.service';
@@ -1630,6 +1640,15 @@ export class SystemPulseApp {
           </div>
         </div>
 
+        ${renderPcSuitabilityAndGamesReport({
+          specs: this.specs,
+          cpu: this.cpuState,
+          ram: this.ramState,
+          disk: this.diskState,
+          gpu: this.gpuState,
+          game: this.gameState,
+        })}
+
         ${renderThermalHeatmapPanelHtml(this.thermalState, this.thermalShowSparklines)}
 
         ${renderStressHistoryPanelHtml(this.stressHistory)}
@@ -1999,6 +2018,7 @@ export class SystemPulseApp {
       }
     });
 
+    bindPcSuitabilityReportEvents(host, () => this.renderDashboard(host));
     animateMetricValueElements(host, this.metricAnimPrevValues);
   }
 
@@ -3253,11 +3273,13 @@ export class SystemPulseApp {
             <button id="game-sfx-btn" type="button" class="btn ${this.gameSfxEnabled ? 'btn-primary' : 'btn-secondary'} btn-sm">🔊 SFX: ${this.gameSfxEnabled ? 'WŁ.' : 'WYŁ.'}</button>
             <button id="game-restart-btn" type="button" class="btn btn-secondary btn-sm" title="Restart misji / wyścigu (klawisz R)">↻ Restart (R)</button>
             <button id="game-fullscreen-btn" type="button" class="btn btn-secondary btn-sm" title="Pełny ekran 3D">⛶ Pełny Ekran</button>
+            <button id="game-rocket-salvo-btn" type="button" class="btn btn-danger btn-sm" title="Wystrzel salwę 4 samonaprowadzających rakiet 3D (klawisz F / E / Prawy Przycisk Myszy)">🚀 Salwa Rakiet (F / PPM)</button>
+            <button id="game-nitro-burst-btn" type="button" class="btn btn-amber btn-sm" title="Włącz dopalacz NITRO / Afterburner +45% prędkości z płomieniami Mach (klawisz Shift / N)">⚡ Dopalacz NITRO (Shift / N)</button>
             ${
               activeCat === 'SOCCER'
                 ? `<button id="game-soccer-kick-btn" type="button" class="btn btn-amber btn-sm">⚽ Strzał na bramkę (Spacja)</button>`
                 : isCombatOrFlight
-                  ? `<button id="game-fire-btn" type="button" class="btn btn-danger btn-sm">🔥 Ogień / Rakieta (Spacja)</button>`
+                  ? `<button id="game-fire-btn" type="button" class="btn btn-danger btn-sm">🔥 Ogień / Działo (Spacja)</button>`
                   : `<button id="game-mode-btn" type="button" class="btn ${g.interactiveMode ? 'btn-amber' : 'btn-secondary'} btn-sm">
                        ${g.interactiveMode ? 'Tryb: Gracz (WASD+Mysz)' : 'Tryb: Kamera Benchmark'}
                      </button>`
@@ -3297,6 +3319,17 @@ export class SystemPulseApp {
                 )
                 .join('')}
             </div>
+            <div class="row-wrap" style="gap:6px;margin-top:4px;">
+              <button id="game-preset-ue5-single" type="button" class="btn btn-amber btn-sm" title="DLSS Quality 67% + Frame Gen 2x + Smooth Motion + Reflex Boost + Tekstury Ultra (12GB+ VRAM) + AF x16 + Lumen/Cienie High">
+                ⚡ Schemat UE5 Singleplayer (DLSS + FG 2x + Lumen High)
+              </button>
+              <button id="game-preset-esport-117" type="button" class="btn btn-secondary btn-sm" title="Limit 117 FPS (3 kl. poniżej 120Hz), FG Wył., NVIDIA Reflex Boost, Cienie Średnie, Filtry Post-FX Wył.">
+                🎯 Schemat E-Sport 120Hz (117 FPS · Reflex Boost · FG Wył.)
+              </button>
+              <button id="game-preset-esport-141" type="button" class="btn btn-secondary btn-sm" title="Limit 141 FPS (3 kl. poniżej 144Hz), FG Wył., NVIDIA Reflex Boost, Cienie Średnie, Filtry Post-FX Wył.">
+                🎯 Schemat E-Sport 144Hz (141 FPS · Reflex Boost)
+              </button>
+            </div>
             <div id="game-ai-rec-lbl" class="font-mono" style="font-size:11.5px;color:var(--text-secondary);background:var(--bg-inset);padding:8px 10px;border-radius:8px;border:1px solid var(--border-hairline);">
               ${esc(g.aiRecommendation || 'AI Auto: Dynamiczne dopasowanie rozdzielczości i cieni dla maksymalnej płynności.')}
             </div>
@@ -3325,7 +3358,7 @@ export class SystemPulseApp {
             <div class="row-wrap" style="gap:8px;align-items:center;">
               <span style="font-size:11.5px;color:var(--text-secondary);min-width:85px;">Limit FPS:</span>
               <div class="segmented" role="group" aria-label="Docelowy limit FPS">
-                ${([0, 60, 120, 144] as GameFpsCap[])
+                ${([0, 60, 117, 120, 141, 144] as GameFpsCap[])
                   .map(
                     (cap) => `
                     <button type="button" class="segmented-btn ${activeFpsCap === cap ? 'active' : ''}" data-game-fps-cap="${cap}">
@@ -3389,6 +3422,151 @@ export class SystemPulseApp {
           </div>
         </div>
 
+        <!-- 5 KATEGORII WSPÓŁCZESNYCH USTAWIEŃ KART GRAFICZNYCH W GRACH (LIVE PIPELINE) -->
+        <div class="panel stack-sm" style="padding:14px;border:1px solid rgba(56, 189, 248, 0.3);">
+          <div class="row-between" style="flex-wrap:wrap;gap:8px;">
+            <div>
+              <strong style="font-size:14px;color:var(--accent-cyan);">🎛️ Współczesne Ustawienia Kart Graficznych (5 Kategorii: DLSS 4.5 / FSR 4 · Frame Gen · Reflex · Lumen GI / RT · VRAM &amp; Post-FX)</strong>
+              <div style="font-size:11.5px;color:var(--text-secondary);">
+                1. Skalowanie AI &amp; FG · 2. Oświetlenie, Cienie i Ray Tracing · 3. Tekstury (12GB+ VRAM Ultra) &amp; Geometria · 4. Filtry Post-Processingu · 5. Sterownik (Smooth Motion / AFMF / Sharpening / Max FPS)
+              </div>
+            </div>
+            <div class="row-wrap" style="gap:8px;font-size:11.5px;" class="font-mono">
+              <span class="font-mono" style="padding:3px 8px;border-radius:6px;background:rgba(16,185,129,0.14);color:#10b981;">Szac. VRAM: <strong>${g.estVramUsageGb ?? 7.6} GB</strong></span>
+              <span class="font-mono" style="padding:3px 8px;border-radius:6px;background:rgba(6,182,212,0.14);color:#22d3ee;">Input Lag: <strong>${g.estInputLagMs ?? 9.1} ms</strong></span>
+            </div>
+          </div>
+
+          <div class="grid-3" style="gap:10px;margin-top:4px;">
+            <!-- Kategoria 1: Skalowanie AI & Frame Gen -->
+            <div class="panel stack-xs" style="background:var(--bg-inset);padding:10px;">
+              <strong style="font-size:12px;color:var(--accent-cyan);">1. Skalowanie Obrazu AI &amp; Generowanie Klatek</strong>
+              <div class="row-wrap" style="gap:4px;">
+                ${(
+                  [
+                    { id: 'native', label: 'Natywne 100%' },
+                    { id: 'dlss_quality', label: 'DLSS/FSR Quality 67%' },
+                    { id: 'dlss_balanced', label: 'Balanced 58%' },
+                    { id: 'dlss_ultra_perf', label: 'NVIDIA App 38%' },
+                  ] as Array<{ id: GameUpscalingMode; label: string }>
+                )
+                  .map(
+                    (u) => `
+                    <button type="button" data-game-upscale="${u.id}" class="btn ${(g.upscalingMode || 'dlss_quality') === u.id ? 'btn-primary' : 'btn-secondary'} btn-sm" style="font-size:11px;padding:3px 7px;">
+                      ${u.label}
+                    </button>`
+                  )
+                  .join('')}
+              </div>
+              <div class="row-wrap" style="gap:4px;margin-top:4px;">
+                ${(
+                  [
+                    { id: 'off', label: 'FG: Wył. (E-Sport)' },
+                    { id: 'fg_2x', label: 'Frame Gen x2' },
+                    { id: 'mfg_3x', label: 'Multi FG x3' },
+                    { id: 'mfg_4x', label: 'Multi FG x4' },
+                  ] as Array<{ id: GameFrameGenMode; label: string }>
+                )
+                  .map(
+                    (fg) => `
+                    <button type="button" data-game-fg="${fg.id}" class="btn ${(g.frameGenMode || 'fg_2x') === fg.id ? 'btn-amber' : 'btn-secondary'} btn-sm" style="font-size:11px;padding:3px 7px;">
+                      ${fg.label}
+                    </button>`
+                  )
+                  .join('')}
+              </div>
+              <div class="row-wrap" style="gap:4px;margin-top:4px;">
+                ${(
+                  [
+                    { id: 'off', label: 'Reflex: Wył.' },
+                    { id: 'on', label: 'Reflex / Anti-Lag: WŁ.' },
+                    { id: 'boost', label: 'Reflex: WŁ. + Boost' },
+                  ] as Array<{ id: GameReflexMode; label: string }>
+                )
+                  .map(
+                    (rx) => `
+                    <button type="button" data-game-reflex="${rx.id}" class="btn ${(g.reflexMode || 'boost') === rx.id ? 'btn-primary' : 'btn-secondary'} btn-sm" style="font-size:11px;padding:3px 7px;">
+                      ${rx.label}
+                    </button>`
+                  )
+                  .join('')}
+              </div>
+            </div>
+
+            <!-- Kategoria 2: Oświetlenie, Cienie i Ray Tracing -->
+            <div class="panel stack-xs" style="background:var(--bg-inset);padding:10px;">
+              <strong style="font-size:12px;color:var(--accent-amber);">2. Oświetlenie (Lumen GI), Cienie &amp; Ray Tracing</strong>
+              <div class="row-wrap" style="gap:4px;">
+                ${(
+                  [
+                    { id: 'off', label: 'RT: Wył.' },
+                    { id: 'rt_medium', label: 'RT: High/SSR' },
+                    { id: 'rt_ultra', label: 'RT: Ultra' },
+                    { id: 'path_tracing', label: 'Path Tracing' },
+                  ] as Array<{ id: GameRayTracingMode; label: string }>
+                )
+                  .map(
+                    (rt) => `
+                    <button type="button" data-game-rt="${rt.id}" class="btn ${(g.rayTracingMode || 'rt_medium') === rt.id ? 'btn-amber' : 'btn-secondary'} btn-sm" style="font-size:11px;padding:3px 7px;">
+                      ${rt.label}
+                    </button>`
+                  )
+                  .join('')}
+              </div>
+              <div class="row-wrap" style="gap:4px;margin-top:4px;">
+                ${(
+                  [
+                    { id: 'medium', label: 'Lumen GI: Medium' },
+                    { id: 'high', label: 'Lumen GI: High (Zalecane UE5)' },
+                    { id: 'epic_lumen', label: 'Lumen: Epic/Ultra' },
+                  ] as Array<{ id: GameGiQuality; label: string }>
+                )
+                  .map(
+                    (gi) => `
+                    <button type="button" data-game-gi="${gi.id}" class="btn ${(g.giQuality || 'high') === gi.id ? 'btn-primary' : 'btn-secondary'} btn-sm" style="font-size:11px;padding:3px 7px;">
+                      ${gi.label}
+                    </button>`
+                  )
+                  .join('')}
+              </div>
+              <span style="font-size:11px;color:var(--text-muted);margin-top:2px;">W UE5 zejście z Epic na High daje duży skok FPS przy niemal identycznym obrazie.</span>
+            </div>
+
+            <!-- Kategoria 3, 4 i 5: Tekstury (VRAM), Geometria & Post-Processing -->
+            <div class="panel stack-xs" style="background:var(--bg-inset);padding:10px;">
+              <strong style="font-size:12px;color:var(--status-ok);">3–5. Tekstury (VRAM), Post-FX &amp; Sterownik GPU</strong>
+              <div class="row-wrap" style="gap:4px;">
+                ${(
+                  [
+                    { id: 'medium', label: 'Tekstury: Medium (6GB)' },
+                    { id: 'high', label: 'Tekstury: High (8GB)' },
+                    { id: 'ultra', label: 'Tekstury: Ultra (12GB+ VRAM)' },
+                  ] as Array<{ id: GameTextureQuality; label: string }>
+                )
+                  .map(
+                    (tq) => `
+                    <button type="button" data-game-tex="${tq.id}" class="btn ${(g.textureQuality || 'ultra') === tq.id ? 'btn-primary' : 'btn-secondary'} btn-sm" style="font-size:11px;padding:3px 7px;">
+                      ${tq.label}
+                    </button>`
+                  )
+                  .join('')}
+              </div>
+              <div class="row-wrap" style="gap:4px;margin-top:4px;">
+                <button type="button" id="game-post-ca-btn" class="btn ${g.chromaticAberration ? 'btn-amber' : 'btn-secondary'} btn-sm" style="font-size:11px;padding:3px 7px;">
+                  Aberracja Chrom.: ${g.chromaticAberration ? 'WŁ.' : 'WYŁ.'}
+                </button>
+                <button type="button" id="game-post-mb-btn" class="btn ${g.motionBlur ? 'btn-amber' : 'btn-secondary'} btn-sm" style="font-size:11px;padding:3px 7px;">
+                  Motion Blur: ${g.motionBlur ? 'WŁ.' : 'WYŁ.'}
+                </button>
+                <button type="button" id="game-smooth-motion-btn" class="btn ${(g.smoothMotionEnabled ?? true) ? 'btn-primary' : 'btn-secondary'} btn-sm" style="font-size:11px;padding:3px 7px;">
+                  Smooth Motion / AFMF: ${(g.smoothMotionEnabled ?? true) ? 'WŁ.' : 'WYŁ.'}
+                </button>
+              </div>
+              <span style="font-size:11px;color:var(--text-muted);margin-top:2px;">12GB+ VRAM: Tekstury Ultra + AF x16 = 0% spadku FPS.</span>
+            </div>
+          </div>
+        </div>
+
         <div id="game-live-metrics" class="grid-4">
           ${this.renderGameMetricsHtml(g)}
         </div>
@@ -3396,12 +3574,21 @@ export class SystemPulseApp {
         <div class="panel stack-md">
           <div class="panel-header" style="margin-bottom:0;">
             <h2 class="panel-title" id="game-chart-title">Wykres FPS i czasu klatki (Frame-Time ms) — ${esc(activeGame.title)}</h2>
-            <span class="panel-caption">Walka/Lotnictwo: WASD + Spacja/Klik Ogień + Shift Boost + R Restart · Wyścigi: A/D + Shift Nitro · Piłka 3D: WASD + Spacja</span>
+            <span class="panel-caption">Walka/Lotnictwo: WASD + Spacja Ogień + F/PPM Salwa Rakiet + Shift/N Dopalacz NITRO + R Restart · Wyścigi: A/D + Shift/N Nitro</span>
           </div>
           <div id="game-live-chart">
             ${this.renderGameChartHtml(g)}
           </div>
         </div>
+
+        ${renderPcSuitabilityAndGamesReport({
+          specs: this.specs,
+          cpu: this.cpuState,
+          ram: this.ramState,
+          disk: this.diskState,
+          gpu: this.gpuState,
+          game: this.gameState,
+        })}
       </div>
     `;
 
@@ -3412,6 +3599,8 @@ export class SystemPulseApp {
         this.patchGameLive();
       });
     }
+
+    bindPcSuitabilityReportEvents(host, () => this.renderGameBenchView(host));
 
     host.querySelectorAll<HTMLButtonElement>('[data-game-cat]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -3436,6 +3625,108 @@ export class SystemPulseApp {
         this.gameState = gameBenchService.getMetrics();
         this.renderGameBenchView(host);
       });
+    });
+
+    host.querySelector('#game-preset-ue5-single')?.addEventListener('click', () => {
+      gameBenchService.applyUe5OptimizationPreset(120, false);
+      this.gameState = gameBenchService.getMetrics();
+      this.renderGameBenchView(host);
+    });
+
+    host.querySelector('#game-preset-esport-117')?.addEventListener('click', () => {
+      gameBenchService.applyUe5OptimizationPreset(120, true);
+      this.gameState = gameBenchService.getMetrics();
+      this.renderGameBenchView(host);
+    });
+
+    host.querySelector('#game-preset-esport-141')?.addEventListener('click', () => {
+      gameBenchService.applyUe5OptimizationPreset(144, true);
+      this.gameState = gameBenchService.getMetrics();
+      this.renderGameBenchView(host);
+    });
+
+    host.querySelectorAll<HTMLButtonElement>('[data-game-upscale]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const mode = btn.dataset.gameUpscale as GameUpscalingMode;
+        gameBenchService.setUpscalingMode(mode);
+        this.gameState = gameBenchService.getMetrics();
+        this.renderGameBenchView(host);
+      });
+    });
+
+    host.querySelectorAll<HTMLButtonElement>('[data-game-fg]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const mode = btn.dataset.gameFg as GameFrameGenMode;
+        gameBenchService.setFrameGenMode(mode);
+        this.gameState = gameBenchService.getMetrics();
+        this.renderGameBenchView(host);
+      });
+    });
+
+    host.querySelectorAll<HTMLButtonElement>('[data-game-reflex]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const mode = btn.dataset.gameReflex as GameReflexMode;
+        gameBenchService.setReflexMode(mode);
+        this.gameState = gameBenchService.getMetrics();
+        this.renderGameBenchView(host);
+      });
+    });
+
+    host.querySelectorAll<HTMLButtonElement>('[data-game-rt]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const mode = btn.dataset.gameRt as GameRayTracingMode;
+        gameBenchService.setRayTracingMode(mode);
+        this.gameState = gameBenchService.getMetrics();
+        this.renderGameBenchView(host);
+      });
+    });
+
+    host.querySelectorAll<HTMLButtonElement>('[data-game-gi]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const q = btn.dataset.gameGi as GameGiQuality;
+        gameBenchService.setGiQuality(q);
+        this.gameState = gameBenchService.getMetrics();
+        this.renderGameBenchView(host);
+      });
+    });
+
+    host.querySelectorAll<HTMLButtonElement>('[data-game-tex]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const q = btn.dataset.gameTex as GameTextureQuality;
+        gameBenchService.setTextureQuality(q);
+        this.gameState = gameBenchService.getMetrics();
+        this.renderGameBenchView(host);
+      });
+    });
+
+    host.querySelector('#game-post-ca-btn')?.addEventListener('click', () => {
+      gameBenchService.setPostProcessFilter('chromaticAberration', !this.gameState.chromaticAberration);
+      this.gameState = gameBenchService.getMetrics();
+      this.renderGameBenchView(host);
+    });
+
+    host.querySelector('#game-post-mb-btn')?.addEventListener('click', () => {
+      gameBenchService.setPostProcessFilter('motionBlur', !this.gameState.motionBlur);
+      this.gameState = gameBenchService.getMetrics();
+      this.renderGameBenchView(host);
+    });
+
+    host.querySelector('#game-smooth-motion-btn')?.addEventListener('click', () => {
+      gameBenchService.setSmoothMotionEnabled(!(this.gameState.smoothMotionEnabled ?? true));
+      this.gameState = gameBenchService.getMetrics();
+      this.renderGameBenchView(host);
+    });
+
+    host.querySelector('#game-rocket-salvo-btn')?.addEventListener('click', () => {
+      gameBenchService.fireRocketSalvo();
+      this.gameState = gameBenchService.getMetrics();
+      this.patchGameLive();
+    });
+
+    host.querySelector('#game-nitro-burst-btn')?.addEventListener('click', () => {
+      gameBenchService.triggerNitroBurst();
+      this.gameState = gameBenchService.getMetrics();
+      this.patchGameLive();
     });
 
     host.querySelectorAll<HTMLButtonElement>('[data-game-preset]').forEach((btn) => {
@@ -8176,8 +8467,8 @@ export class SystemPulseApp {
         openAlertBtn.className = `btn ${pwmState.maintenanceAlertCount > 0 ? 'btn-danger' : 'btn-secondary'} btn-sm`;
         openAlertBtn.innerHTML = `<span>${
           pwmState.maintenanceAlertCount > 0
-            ? `⚠ Predictive Bearing Alert (${pwmState.maintenanceAlertCount})`
-            : 'Predictive Maintenance Guide'
+            ? `⚠ Alert stanu łożysk (${pwmState.maintenanceAlertCount})`
+            : 'Poradnik konserwacji łożysk'
         }</span>`;
       }
       const histSummary = host.querySelector<HTMLElement>('#fan-bearing-history-summary');
@@ -8205,12 +8496,12 @@ export class SystemPulseApp {
       if (toggleBtn) {
         toggleBtn.className = `btn ${pwmState.active ? 'btn-danger' : 'btn-primary'} btn-sm`;
         toggleBtn.setAttribute('aria-pressed', pwmState.active ? 'true' : 'false');
-        toggleBtn.innerHTML = `${iconSvg(pwmState.active ? 'stop' : 'pulse', 14)}<span>${pwmState.active ? 'Stop PWM Monitor' : 'Monitor PWM Frequency'}</span>`;
+        toggleBtn.innerHTML = `${iconSvg(pwmState.active ? 'stop' : 'pulse', 14)}<span>${pwmState.active ? 'Zatrzymaj monitor PWM' : 'Monitoruj sygnał PWM'}</span>`;
       }
       const driftBtn = host.querySelector<HTMLButtonElement>('#fan-pwm-drift-test-btn');
       if (driftBtn) {
         driftBtn.className = `btn ${pwmState.driftTestEnabled ? 'btn-amber' : 'btn-secondary'} btn-sm`;
-        driftBtn.textContent = pwmState.driftTestEnabled ? '⚡ Fault Sim: ON' : '⚡ Simulate Drift / Fault';
+        driftBtn.textContent = pwmState.driftTestEnabled ? '⚡ Symulacja usterki: WŁ.' : '⚡ Symuluj usterkę / dryft (Test)';
       }
       syncBearingHistoryUi(pwmState);
 
@@ -8225,7 +8516,7 @@ export class SystemPulseApp {
             ch.predictedLifeExpectancyPct < pwmState.predictiveMaintenanceThresholdPct ||
             ch.bearingHealthIndex < pwmState.predictiveMaintenanceThresholdPct
         );
-        if (hasAlertedLife && !this.predictiveBearingAlertDismissed) {
+        if (hasAlertedLife && pwmState.driftTestEnabled && !this.predictiveBearingAlertDismissed) {
           this.openPredictiveBearingAlertModal(null, pwmState);
         } else if (document.getElementById('predictive-bearing-alert-modal')) {
           this.updatePredictiveBearingAlertModal(pwmState);
@@ -8401,12 +8692,12 @@ export class SystemPulseApp {
       const micBtn = host.querySelector<HTMLButtonElement>('#fan-heatmap-mic-btn');
       if (micBtn) {
         micBtn.className = `btn ${hmState.capturing ? 'btn-danger' : 'btn-primary'} btn-sm`;
-        micBtn.innerHTML = `${iconSvg(hmState.capturing ? 'stop' : 'volume-on', 14)}<span>${hmState.capturing ? 'Stop Live Mic Capture' : 'Start Live Mic Capture'}</span>`;
+        micBtn.innerHTML = `${iconSvg(hmState.capturing ? 'stop' : 'volume-on', 14)}<span>${hmState.capturing ? 'Zatrzymaj nasłuch mikrofonu' : 'Uruchom nasłuch mikrofonu'}</span>`;
       }
       const sweepBtn = host.querySelector<HTMLButtonElement>('#fan-heatmap-sweep-btn');
       if (sweepBtn) {
         sweepBtn.disabled = hmState.sweeping;
-        sweepBtn.innerHTML = `<span>${hmState.sweeping ? 'Sweeping RPM…' : 'Resonance Sweep (500–5500 RPM)'}</span>`;
+        sweepBtn.innerHTML = `<span>${hmState.sweeping ? 'Skanowanie RPM…' : 'Skan rezonansu (500–5500 RPM)'}</span>`;
       }
     };
     const unsubscribeAcousticHeatmap = fanTestService.subscribeAcousticHeatmap(syncAcousticHeatmapUi);

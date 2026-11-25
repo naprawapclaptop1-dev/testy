@@ -648,7 +648,34 @@ export type GameAiProfile =
   | 'ai_balanced'
   | 'ai_quality_4k'
   | 'ai_esports';
-export type GameFpsCap = 0 | 60 | 120 | 144;
+export type GameFpsCap = 0 | 57 | 60 | 117 | 120 | 141 | 144 | 162 | 237;
+export type GameUpscalingMode =
+  | 'native'
+  | 'dlss_quality'
+  | 'dlss_balanced'
+  | 'dlss_performance'
+  | 'dlss_ultra_perf'
+  | 'fsr_quality'
+  | 'fsr_balanced'
+  | 'xess_quality'
+  | 'custom';
+export type GameUpscaleMode = GameUpscalingMode;
+export type GameFrameGenMode = 'off' | 'fg_2x' | 'mfg_3x' | 'mfg_4x' | 'fg_3x' | 'fg_4x' | 'smooth_motion';
+export type GameAaMode = 'dlaa' | 'taa' | 'fsr_native' | 'fxaa' | 'smaa' | 'off';
+export type GameAntiAliasingMode = GameAaMode;
+export type GameReflexMode = 'off' | 'on' | 'boost';
+export type GameTextureQuality = 'low' | 'medium' | 'high' | 'ultra' | 'ultra_12gb';
+export type GameShadowsQuality = 'low' | 'medium' | 'high' | 'ultra' | 'ultra_epic';
+export type GameShadowQuality = GameShadowsQuality;
+export type GameGiQuality = 'medium' | 'high' | 'ultra' | 'epic_lumen' | 'ultra_epic';
+export type GameGiReflectionsQuality = GameGiQuality;
+export type GameAoMode = 'off' | 'ssao' | 'hbao_plus' | 'rtao' | 'gtao';
+export type GameAmbientOcclusionMode = GameAoMode;
+export type GameReflectionsMode = 'ssr' | 'hybrid' | 'rt_reflections' | 'off';
+export type GameVolumetricFogQuality = 'low' | 'medium' | 'high' | 'ultra';
+export type GameLodDistanceQuality = 'medium' | 'high' | 'ultra';
+export type GameFoliageQuality = 'low' | 'medium' | 'high' | 'ultra';
+export type GameRayTracingMode = 'off' | 'rt_medium' | 'rt_high' | 'rt_ultra' | 'path_tracing' | 'pathtracing';
 
 export type GameSceneId =
   | 'hyperion'
@@ -707,6 +734,44 @@ export interface GameBenchMetrics {
   fpsMode: GpuFpsMode;
   fpsCap?: GameFpsCap;
   renderScale: number;
+  upscalingMode?: GameUpscalingMode;
+  upscalingPct?: number;
+  upscaleMode?: GameUpscaleMode;
+  upscaleCustomPct?: number;
+  frameGenMode?: GameFrameGenMode;
+  smoothMotionEnabled?: boolean;
+  aaMode?: GameAaMode;
+  antiAliasingMode?: GameAntiAliasingMode;
+  reflexMode?: GameReflexMode;
+  driverVsyncEnabled?: boolean;
+  hdrEnabled?: boolean;
+  vramBudgetGb?: number;
+  textureQuality?: GameTextureQuality;
+  shadowsQuality?: GameShadowsQuality;
+  shadowQuality?: GameShadowQuality;
+  giQuality?: GameGiQuality;
+  giReflectionsQuality?: GameGiReflectionsQuality;
+  aoMode?: GameAoMode;
+  ambientOcclusionMode?: GameAmbientOcclusionMode;
+  reflectionsMode?: GameReflectionsMode;
+  volumetricFogQuality?: GameVolumetricFogQuality;
+  lodQuality?: GameLodDistanceQuality;
+  lodDistanceQuality?: GameLodDistanceQuality;
+  foliageQuality?: GameFoliageQuality;
+  sssEnabled?: boolean;
+  subsurfaceScattering?: boolean;
+  rayTracingMode?: GameRayTracingMode;
+  driverSharpeningPct?: number;
+  chromaticAberration?: boolean;
+  motionBlur?: boolean;
+  depthOfField?: boolean;
+  filmGrain?: boolean;
+  lensFlare?: boolean;
+  sharpeningPct?: number;
+  effectiveFgFps?: number;
+  estInputLagMs?: number;
+  estVramUsageGb?: number;
+  estimatedInputLagMs?: number;
   bloomEnabled: boolean;
   shadowsEnabled: boolean;
   fogEnabled?: boolean;
@@ -740,9 +805,16 @@ export interface GameBenchMetrics {
   stabilityPct: number;
   overallScore: number;
   shotsFired: number;
+  rocketsFired?: number;
+  rocketAmmo?: number;
+  rocketMaxAmmo?: number;
   targetsHit: number;
   isRacingMode?: boolean;
   raceSpeedKmh?: number;
+  nitroActive?: boolean;
+  nitroBurstActive?: boolean;
+  nitroBurstsUsed?: number;
+  nitroBoostPct?: number;
   raceLap?: number;
   raceTotalLaps?: number;
   racePosition?: number;

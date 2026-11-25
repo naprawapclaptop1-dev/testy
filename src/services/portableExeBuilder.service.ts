@@ -46,24 +46,36 @@ function collectDocumentStylesFallback(): string {
 
 export async function preloadPortableAssets(): Promise<void> {
   if (typeof window === 'undefined' || typeof fetch === 'undefined') return;
-  if (preloadPromise) return preloadPromise;
+  if (preloadPromise && cachedBundleJs.length > 1000) return preloadPromise;
 
   preloadPromise = (async () => {
     try {
-      const [jsRes, cssRes] = await Promise.all([
-        fetch('./portable-bundle.js').catch(() => null),
-        fetch('./portable-styles.css').catch(() => null),
-      ]);
-      if (jsRes && jsRes.ok) {
-        const text = await jsRes.text();
-        if (text && !text.trim().startsWith('<!doctype html') && !text.trim().startsWith('<html')) {
-          cachedBundleJs = text;
+      const jsCandidates = ['./portable-bundle.js', '/portable-bundle.js'];
+      for (const url of jsCandidates) {
+        const jsRes = await fetch(url, { cache: 'no-store' }).catch(() => null);
+        if (jsRes && jsRes.ok) {
+          const text = await jsRes.text();
+          if (
+            text &&
+            text.length > 1000 &&
+            !text.trim().startsWith('<!doctype html') &&
+            !text.trim().startsWith('<html')
+          ) {
+            cachedBundleJs = text;
+            break;
+          }
         }
       }
-      if (cssRes && cssRes.ok) {
-        const text = await cssRes.text();
-        if (text && !text.trim().startsWith('<!doctype html')) {
-          cachedStylesCss = text;
+
+      const cssCandidates = ['./portable-styles.css', '/portable-styles.css'];
+      for (const url of cssCandidates) {
+        const cssRes = await fetch(url, { cache: 'no-store' }).catch(() => null);
+        if (cssRes && cssRes.ok) {
+          const text = await cssRes.text();
+          if (text && !text.trim().startsWith('<!doctype html') && !text.trim().startsWith('<html')) {
+            cachedStylesCss = text;
+            break;
+          }
         }
       }
     } catch {
@@ -74,8 +86,11 @@ export async function preloadPortableAssets(): Promise<void> {
   return preloadPromise;
 }
 
-if (isHostedOnExeBridge()) {
+if (typeof window !== 'undefined') {
   void preloadPortableAssets();
+  if (isHostedOnExeBridge()) {
+    void preloadPortableAssets();
+  }
 }
 
 const CRC_TABLE = (() => {
@@ -190,11 +205,17 @@ export function buildZipArchive(entries: ZipEntryInput[]): Uint8Array {
 export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
   const localServerUrl = 'http://127.0.0.1:45880/index.html';
   const stylesContent = cachedStylesCss || collectDocumentStylesFallback();
-  // Remove any trailing `export{...};` from the Vite bundle so it executes cleanly both as module and standard script
+  // Remove any trailing `export{...};` and replace `import.meta` references so the bundle executes cleanly
+  // both as a classic non-module <script> on file:/// (immune to CORS) and on http://127.0.0.1:45880
   const rawBundle =
     cachedBundleJs ||
     `console.log("SystemPulse Pro Standalone Offline Build Initialized");`;
-  const bundleJsContent = rawBundle.replace(/export\s*\{[^}]*\}\s*;?\s*$/u, '');
+  const bundleJsContent = rawBundle
+    .replace(/export\s*\{[^}]*\}\s*;?\s*$/u, '')
+    .replace(/import\.meta\.env/gu, '({DEV:false,PROD:true,MODE:"production"})')
+    .replace(/import\.meta\.url/gu, '(window.location.href)');
+  const safeInlineStyle = stylesContent.replace(/<\/style/giu, '<\\/style');
+  const safeInlineScript = bundleJsContent.replace(/<\/script/giu, '<\\/script');
 
   const standaloneAppHtml = `<!doctype html>
 <html lang="pl" class="dark">
@@ -204,10 +225,29 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     <title>SystemPulse Pro — Diagnostyka Sprzętu i Benchmarki 3D (Standalone Desktop Edition)</title>
     <meta name="description" content="SystemPulse Pro — 40 scen GPU 3D WebGL, 28 światów i wyścigów Gra 3D MAX, Zasilacz PC ATX PSU, CPU 10-Test, RAM MemTest86+, Dysk QD64 i Speed Test 10 Gbps." />
     <link rel="stylesheet" href="./portable-styles.css" />
+    <style>${safeInlineStyle}</style>
   </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="./portable-bundle.js"></script>
+  <body style="margin:0;background:#070b14;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;">
+    <div id="root">
+      <div id="sp-offline-boot-fallback" style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:#070b14;color:#e2e8f0;">
+        <div style="max-width:640px;width:100%;background:#0f172a;border:1px solid #1e293b;border-radius:16px;padding:28px;box-shadow:0 20px 50px rgba(0,0,0,0.6);">
+          <div style="display:inline-block;padding:4px 12px;border-radius:999px;background:rgba(6,182,212,0.15);color:#22d3ee;font-size:12px;font-weight:700;">SYSTEMPULSE PRO WIN64 DESKTOP EDITION</div>
+          <h1 style="margin:14px 0 8px;font-size:22px;color:#f8fafc;">Inicjalizacja silnika diagnostycznego 3D WebGL2 &amp; WMI...</h1>
+          <p style="margin:0;color:#94a3b8;font-size:14px;line-height:1.6;">Trwa ładowanie modułów testowych CPU, RAM, Dysków, Zasilacza ATX PSU oraz 40 scen i gier 3D MAX.</p>
+        </div>
+      </div>
+    </div>
+    <script>
+      window.__SYSTEMPULSE_STANDALONE_OFFLINE__ = true;
+    </script>
+    <script>${safeInlineScript}</script>
+    <script>
+      if (document.getElementById('sp-offline-boot-fallback')) {
+        var s = document.createElement('script');
+        s.src = './portable-bundle.js';
+        document.body.appendChild(s);
+      }
+    </script>
   </body>
 </html>`;
 
@@ -217,22 +257,30 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     'title Kreator Instalacji SystemPulse Pro (Win64 Offline)',
     'echo ====================================================================',
     'echo   INSTALATOR SYSTEMPULSE PRO - WINDOWS 10 / 11 (64-BIT)',
-    'echo   Czysta instalacja lokalna bez zewnetrznych skryptow kompilacji',
+    'echo   Instalacja lokalna pakietu diagnostycznego Win64',
     'echo ====================================================================',
+    'if exist "%~dp0SystemPulse-Pro-Setup.exe" (',
+    '  echo [OK] Uruchamianie graficznego instalatora SystemPulse-Pro-Setup.exe...',
+    '  start "" "%~dp0SystemPulse-Pro-Setup.exe"',
+    '  exit /b 0',
+    ')',
     'set "INSTALL_DIR=%LOCALAPPDATA%\\Programs\\SystemPulsePro"',
     'if not exist "%INSTALL_DIR%\\app" mkdir "%INSTALL_DIR%\\app"',
     'xcopy /E /I /Y "%~dp0app" "%INSTALL_DIR%\\app" >nul',
     'copy /Y "%~dp0SystemPulse-Pro-Portable.bat" "%INSTALL_DIR%\\" >nul',
     'copy /Y "%~dp0SystemPulse-Portal.html" "%INSTALL_DIR%\\" >nul',
+    'copy /Y "%~dp0SystemPulseLauncher.cs" "%INSTALL_DIR%\\" >nul',
+    'copy /Y "%~dp0SystemPulsePro.csproj" "%INSTALL_DIR%\\" >nul',
+    'if exist "%~dp0SystemPulse-Pro.exe" copy /Y "%~dp0SystemPulse-Pro.exe" "%INSTALL_DIR%\\" >nul',
     'set "DESK_SHORTCUT=%USERPROFILE%\\Desktop\\SystemPulse Pro.url"',
     '(',
     '  echo [InternetShortcut]',
-    '  echo URL=file:///%INSTALL_DIR%\\SystemPulse-Portal.html',
+    '  echo URL=file:///%INSTALL_DIR%\\app\\index.html',
     '  echo IconFile=%SystemRoot%\\System32\\shell32.dll',
     '  echo IconIndex=21',
     ') > "%DESK_SHORTCUT%"',
     'echo [OK] Zainstalowano w: %INSTALL_DIR%',
-    'echo [OK] Utworzono bezpieczny skrot na Pulpicie.',
+    'echo [OK] Utworzono skrot na Pulpicie.',
     'call "%INSTALL_DIR%\\SystemPulse-Pro-Portable.bat"',
     'exit /b 0',
   ].join('\r\n');
@@ -242,25 +290,26 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     'chcp 65001 >nul',
     'title SystemPulse Pro 64-bit - Standalone Desktop Edition',
     'echo ====================================================================',
-    'echo   SYSTEMPULSE PRO - SAMODZIELNA APLIKACJA DESKTOPOWA (OFFLINE)',
-    'echo   Akceleracja GPU D3D11/WebGL2 + Odblokowany FPS (--disable-frame-rate-limit)',
+    'echo   SYSTEMPULSE PRO - SAMODZIELNA APLIKACJA DESKTOPOWA (WIN64 .EXE)',
+    'echo   Akceleracja GPU D3D11/WebGL2 + Auto-Detekcja Sprzetu WMI / Dyskow',
     'echo ====================================================================',
     'if exist "%~dp0SystemPulse-Pro.exe" (',
-    '  echo [OK] Uruchamianie SystemPulse-Pro.exe...',
+    '  echo [OK] Uruchamianie natywnego silnika SystemPulse-Pro.exe ^(127.0.0.1:45880^)...',
     '  start "" "%~dp0SystemPulse-Pro.exe"',
     '  exit /b 0',
     ')',
     'set "LOCAL_APP_FILE=%~dp0app\\index.html"',
+    'set "PROFILE_DIR=%TEMP%\\SystemPulsePro_OfflineAppProfile_v6"',
     'if exist "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe" (',
-    '  start "" "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe" --app="file:///%LOCAL_APP_FILE:\\=/%" --start-maximized --allow-file-access-from-files --enable-gpu-rasterization --ignore-gpu-blocklist --disable-frame-rate-limit --disable-gpu-vsync',
+    '  start "" "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe" --app="file:///%LOCAL_APP_FILE:\\=/%" --user-data-dir="%PROFILE_DIR%" --start-maximized --allow-file-access-from-files --enable-gpu-rasterization --ignore-gpu-blocklist --disable-frame-rate-limit --disable-gpu-vsync --no-first-run',
     '  exit /b 0',
     ')',
     'if exist "%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe" (',
-    '  start "" "%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe" --app="file:///%LOCAL_APP_FILE:\\=/%" --start-maximized --allow-file-access-from-files --enable-gpu-rasterization --ignore-gpu-blocklist --disable-frame-rate-limit --disable-gpu-vsync',
+    '  start "" "%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe" --app="file:///%LOCAL_APP_FILE:\\=/%" --user-data-dir="%PROFILE_DIR%" --start-maximized --allow-file-access-from-files --enable-gpu-rasterization --ignore-gpu-blocklist --disable-frame-rate-limit --disable-gpu-vsync --no-first-run',
     '  exit /b 0',
     ')',
     'if exist "%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe" (',
-    '  start "" "%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe" --app="file:///%LOCAL_APP_FILE:\\=/%" --start-maximized --allow-file-access-from-files --enable-gpu-rasterization --ignore-gpu-blocklist --disable-frame-rate-limit --disable-gpu-vsync',
+    '  start "" "%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe" --app="file:///%LOCAL_APP_FILE:\\=/%" --user-data-dir="%PROFILE_DIR%" --start-maximized --allow-file-access-from-files --enable-gpu-rasterization --ignore-gpu-blocklist --disable-frame-rate-limit --disable-gpu-vsync --no-first-run',
     '  exit /b 0',
     ')',
     'start "" "%LOCAL_APP_FILE%"',

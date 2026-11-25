@@ -15,6 +15,7 @@ import { HardwareScanSnapshot } from '../services/hardwareScanner.service';
 import { GPU_SCENE_CATALOG } from '../services/gpuStress.service';
 import { DISPLAY_PATTERNS } from './displayDiagnostics';
 import { PSU_STRESS_PROFILES, psuCalculatorService } from '../services/psuCalculator.service';
+import { renderPcSuitabilityAndGamesReport } from './pcSuitabilityAndGamesReport';
 
 export type ComponentHealthStatus = 'ok' | 'warn' | 'err' | 'untested';
 
@@ -786,6 +787,8 @@ export function renderComponentDiagnosticsReportHtml(
           })
           .join('')}
       </div>
+
+      ${renderPcSuitabilityAndGamesReport(ctx)}
     </div>
   `;
 }

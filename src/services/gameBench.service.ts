@@ -5,12 +5,22 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import {
+  GameAaMode,
   GameAiProfile,
+  GameAoMode,
   GameBenchMetrics,
   GameFpsCap,
+  GameFrameGenMode,
+  GameGiQuality,
   GameQualityPreset,
+  GameRayTracingMode,
+  GameReflectionsMode,
+  GameReflexMode,
   GameSceneId,
+  GameShadowsQuality,
+  GameTextureQuality,
   GameToneMappingMode,
+  GameUpscalingMode,
   GpuFpsMode,
   GpuTelemetryPoint,
 } from '../types';
@@ -1673,7 +1683,9 @@ interface LaserBolt {
   vel: THREE.Vector3;
   life: number;
   damage: number;
-  kind?: 'shell' | 'missile' | 'torpedo' | 'laser';
+  kind?: 'shell' | 'missile' | 'torpedo' | 'laser' | 'homing_rocket';
+  homingTarget?: EnemyTarget;
+  smokeTimer?: number;
 }
 
 interface EnemyTarget {
@@ -1792,6 +1804,36 @@ export class GameBenchService {
   private telemetry: GpuTelemetryPoint[] = [];
   private shotsFired = 0;
   private targetsHit = 0;
+  private rocketsFired = 0;
+  private nitroBurstsUsed = 0;
+  private rocketCooldown = 0;
+  private nitroBurstUntilTs = 0;
+
+  // 5-Category Contemporary PC Graphics Pipeline Settings (DLSS/FSR/XeSS, FG, AA, RT/Lumen, Geometry, Post-Process, Driver)
+  private upscalingMode: GameUpscalingMode = 'dlss_quality';
+  private upscalingPct = 67;
+  private frameGenMode: GameFrameGenMode = 'fg_2x';
+  private smoothMotionEnabled = true;
+  private aaMode: GameAaMode = 'dlaa';
+  private hdrEnabled = true;
+  private reflexMode: GameReflexMode = 'boost';
+  private vramBudgetGb = 12;
+  private textureQuality: GameTextureQuality = 'ultra';
+  private giQuality: GameGiQuality = 'high';
+  private shadowsQuality: GameShadowsQuality = 'high';
+  private aoMode: GameAoMode = 'hbao_plus';
+  private reflectionsMode: GameReflectionsMode = 'ssr';
+  private volumetricFogQuality: 'low' | 'medium' | 'high' | 'ultra' = 'medium';
+  private rayTracingMode: GameRayTracingMode = 'rt_medium';
+  private lodQuality: 'medium' | 'high' | 'ultra' = 'high';
+  private foliageQuality: 'low' | 'medium' | 'high' | 'ultra' = 'high';
+  private sssEnabled = true;
+  private driverSharpeningPct = 35;
+  private chromaticAberration = false;
+  private motionBlur = false;
+  private depthOfField = false;
+  private filmGrain = false;
+  private lensFlare = true;
 
   // Interactive camera, 3D Racing, 3D Flight & 3D Soccer controls
   private keysDown = new Set<string>();
@@ -2083,6 +2125,34 @@ export class GameBenchService {
       overallScore: 0,
       shotsFired: 0,
       targetsHit: 0,
+      rocketsFired: 0,
+      nitroBurstsUsed: 0,
+      upscalingMode: this.upscalingMode,
+      upscalingPct: this.upscalingPct,
+      frameGenMode: this.frameGenMode,
+      smoothMotionEnabled: this.smoothMotionEnabled,
+      aaMode: this.aaMode,
+      hdrEnabled: this.hdrEnabled,
+      reflexMode: this.reflexMode,
+      vramBudgetGb: this.vramBudgetGb,
+      textureQuality: this.textureQuality,
+      giQuality: this.giQuality,
+      shadowsQuality: this.shadowsQuality,
+      aoMode: this.aoMode,
+      reflectionsMode: this.reflectionsMode,
+      volumetricFogQuality: this.volumetricFogQuality,
+      rayTracingMode: this.rayTracingMode,
+      lodQuality: this.lodQuality,
+      foliageQuality: this.foliageQuality,
+      sssEnabled: this.sssEnabled,
+      driverSharpeningPct: this.driverSharpeningPct,
+      chromaticAberration: this.chromaticAberration,
+      motionBlur: this.motionBlur,
+      depthOfField: this.depthOfField,
+      filmGrain: this.filmGrain,
+      lensFlare: this.lensFlare,
+      estInputLagMs: 7.4,
+      estVramUsageGb: 6.8,
       isRacingMode: this.isRacingScene(gameMeta.layoutMode) || this.isFlightScene(gameMeta.layoutMode),
       isCombatMode: this.isCombatScene(gameMeta.layoutMode) || this.isFlightScene(gameMeta.layoutMode),
       isSoccerMode: this.isSoccerScene(gameMeta.layoutMode),
@@ -2093,7 +2163,7 @@ export class GameBenchService {
       gameStage: 1,
       gameMaxStage: this.gameMaxStage,
       gameHealthPct: 100,
-      gameMissionText: 'Przygotuj się do misji — kliknij START i użyj WASD + Spacja!',
+      gameMissionText: 'Przygotuj się do misji — kliknij START i użyj WASD + Spacja (F = Rakiety, Shift/N = Nitro)!',
       gameBannerText: '',
       gameTargetsDestroyed: 0,
       gameGatesPassed: 0,
@@ -4001,8 +4071,14 @@ export class GameBenchService {
                 ? islandTex
                 : archPbr!.bumpMap,
       bumpScale: isNavalIslands || isCoralReef || isDesertMesa || isVolcanoCrags ? 0.22 : 0.05,
-      roughnessMap: archPbr ? archPbr.roughnessMap : undefined,
-      emissiveMap: basaltPbr ? basaltPbr.emissiveMap : coralPbr ? coralPbr.emissiveMap : archPbr ? archPbr.emissiveMap : undefined,
+      ...(archPbr?.roughnessMap ? { roughnessMap: archPbr.roughnessMap } : {}),
+      ...(basaltPbr?.emissiveMap
+        ? { emissiveMap: basaltPbr.emissiveMap }
+        : coralPbr?.emissiveMap
+          ? { emissiveMap: coralPbr.emissiveMap }
+          : archPbr?.emissiveMap
+            ? { emissiveMap: archPbr.emissiveMap }
+            : {}),
       metalness: isNaturalOrCombat ? 0.05 : 0.72,
       roughness: isNaturalOrCombat ? 0.94 : 0.36,
       flatShading: isNaturalOrCombat || gameMeta.layoutMode === 'asteroid' || gameMeta.layoutMode === 'glacial' || gameMeta.layoutMode === 'volcanic',
@@ -4525,7 +4601,8 @@ export class GameBenchService {
     if (!this.renderer) return;
     const cfg = GAME_PRESETS[this.preset];
     const dynScale = this.dynamicResolution ? this.dynResFactor : 1.0;
-    const effPixelRatio = Math.max(0.65, Math.min(2.5, (window.devicePixelRatio || 1) * cfg.renderScale * dynScale));
+    const upscaleFactor = this.upscalingMode === 'native' ? 1.0 : Math.max(0.5, Math.min(1.0, (this.upscalingPct + 25) / 100));
+    const effPixelRatio = Math.max(0.6, Math.min(2.5, (window.devicePixelRatio || 1) * cfg.renderScale * dynScale * upscaleFactor));
     this.renderer.setPixelRatio(effPixelRatio);
     this.renderer.setSize(w, h, false);
     this.composer?.setPixelRatio(effPixelRatio);
@@ -4536,9 +4613,14 @@ export class GameBenchService {
     }
     const drawW = Math.round(w * effPixelRatio);
     const drawH = Math.round(h * effPixelRatio);
-    this.metrics.renderScale = Number((cfg.renderScale * dynScale).toFixed(2));
+    const upLabel =
+      this.upscalingMode === 'native'
+        ? 'Native 100%'
+        : `${this.upscalingMode.toUpperCase().replace('_', ' ')} (${this.upscalingPct}%)`;
+    const fgLabel = this.frameGenMode === 'off' ? (this.smoothMotionEnabled ? ' + SmoothMotion' : '') : ` + ${this.frameGenMode.toUpperCase()}`;
+    this.metrics.renderScale = Number((cfg.renderScale * dynScale * (this.upscalingPct / 100)).toFixed(2));
     this.metrics.raymarchSteps = cfg.raymarchSteps;
-    this.metrics.resolutionLabel = `${drawW} × ${drawH} (${Math.round(cfg.renderScale * dynScale * 100)}% SSAA · ${cfg.raymarchSteps} RM)`;
+    this.metrics.resolutionLabel = `${drawW} × ${drawH} (${upLabel}${fgLabel} · ${cfg.raymarchSteps} RM)`;
   }
 
   private bindInteractiveEvents(canvas: HTMLCanvasElement): void {
@@ -4547,6 +4629,16 @@ export class GameBenchService {
       if (targetTag === 'INPUT' || targetTag === 'TEXTAREA' || targetTag === 'SELECT') return;
       if (e.code === 'KeyR' && this.running) {
         this.restartGameMission();
+        return;
+      }
+      if ((e.code === 'KeyF' || e.code === 'KeyE') && this.running) {
+        e.preventDefault();
+        this.fireRocketSalvo();
+        return;
+      }
+      if (e.code === 'KeyN' && this.running) {
+        e.preventDefault();
+        this.triggerNitroBurst();
         return;
       }
       if (
@@ -4565,6 +4657,9 @@ export class GameBenchService {
         ].includes(e.code)
       ) {
         this.keysDown.add(e.code);
+        if ((e.code === 'ShiftLeft' || e.code === 'ShiftRight') && this.running) {
+          this.triggerNitroBurst();
+        }
         if (e.code === 'Space' && this.running) {
           e.preventDefault();
           if (this.isSoccerScene()) this.kickSoccerBall();
@@ -4575,9 +4670,17 @@ export class GameBenchService {
     const onKeyUp = (e: KeyboardEvent) => {
       this.keysDown.delete(e.code);
     };
+    const onContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+    };
     const onMouseDown = (e: MouseEvent) => {
       if (this.isSoccerScene()) {
         this.kickSoccerBall();
+        return;
+      }
+      if (e.button === 2) {
+        e.preventDefault();
+        this.fireRocketSalvo();
         return;
       }
       if (e.button === 0) {
@@ -4607,6 +4710,7 @@ export class GameBenchService {
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
     canvas.addEventListener('mousedown', onMouseDown);
+    canvas.addEventListener('contextmenu', onContextMenu);
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
 
@@ -4614,6 +4718,7 @@ export class GameBenchService {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       canvas.removeEventListener('mousedown', onMouseDown);
+      canvas.removeEventListener('contextmenu', onContextMenu);
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
     };
@@ -5357,6 +5462,452 @@ export class GameBenchService {
     this.firePlayerWeapon();
   }
 
+  /**
+   * Fires a 4-missile Homing Tactical Rocket Salvo (for fighters, tanks, mechs, battleships, and armoured racing cars!)
+   * Triggered via Key F / E / Right-Click or the HUD "🚀 Salwa Rakiet" button.
+   */
+  public fireRocketSalvo(): void {
+    if (!this.scene || !this.camera) return;
+    if (this.rocketCooldown > 0) return;
+    this.rocketCooldown = 0.55;
+
+    const hero = this.playerAircraftGroup || this.playerCombatGroup || this.playerCarGroup;
+    gameAudioService.playRocketLaunch();
+
+    const podOffsets: [number, number, number][] = [
+      [-2.4, 0.55, -2.2],
+      [-1.1, 0.75, -2.5],
+      [1.1, 0.75, -2.5],
+      [2.4, 0.55, -2.2],
+    ];
+
+    const sortedEnemies = [...this.combatEnemies].sort((a, b) => {
+      const az = Math.abs(a.group.position.z - (hero?.position.z ?? 15));
+      const bz = Math.abs(b.group.position.z - (hero?.position.z ?? 15));
+      return az - bz;
+    });
+
+    podOffsets.forEach(([ox, oy, oz], idx) => {
+      const rocketGrp = new THREE.Group();
+
+      // Heavy multi-stage AGM / Sidewinder homing rocket body
+      const bodyGeo = new THREE.CylinderGeometry(0.16, 0.16, 2.85, 12);
+      bodyGeo.rotateX(Math.PI / 2);
+      const body = new THREE.Mesh(
+        bodyGeo,
+        new THREE.MeshStandardMaterial({
+          color: 0xf1f5f9,
+          metalness: 0.65,
+          roughness: 0.22,
+        })
+      );
+      const stripeGeo = new THREE.CylinderGeometry(0.166, 0.166, 0.45, 12);
+      stripeGeo.rotateX(Math.PI / 2);
+      const stripe = new THREE.Mesh(stripeGeo, new THREE.MeshBasicMaterial({ color: 0xf97316 }));
+      stripe.position.z = -0.55;
+
+      const noseGeo = new THREE.ConeGeometry(0.16, 0.68, 12);
+      noseGeo.rotateX(-Math.PI / 2);
+      const nose = new THREE.Mesh(
+        noseGeo,
+        new THREE.MeshBasicMaterial({ color: 0xef4444 })
+      );
+      nose.position.z = -1.75;
+
+      const finMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, metalness: 0.8, roughness: 0.25 });
+      const finH = new THREE.Mesh(new THREE.BoxGeometry(0.92, 0.05, 0.52), finMat);
+      finH.position.z = 1.05;
+      const finV = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.92, 0.52), finMat);
+      finV.position.z = 1.05;
+
+      // Twin high-intensity rocket thruster plumes
+      const outerPlumeGeo = new THREE.ConeGeometry(0.36, 4.8, 12, 1, true);
+      outerPlumeGeo.rotateX(Math.PI / 2);
+      const outerPlume = new THREE.Mesh(
+        outerPlumeGeo,
+        new THREE.MeshBasicMaterial({
+          color: 0xff6b00,
+          transparent: true,
+          opacity: 0.88,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      );
+      outerPlume.position.z = 3.65;
+
+      const innerCore = new THREE.Mesh(
+        new THREE.SphereGeometry(0.24, 10, 10),
+        new THREE.MeshBasicMaterial({ color: 0xfffbeb })
+      );
+      innerCore.position.z = 1.55;
+
+      rocketGrp.add(body, stripe, nose, finH, finV, outerPlume, innerCore);
+
+      if (hero && !this.interactiveMode) {
+        rocketGrp.position.set(hero.position.x + ox, Math.max(1.2, hero.position.y + oy), hero.position.z + oz);
+        _dirVec.set((idx - 1.5) * 0.08 - this.playerCarSteer * 0.12, 0.05 + this.playerFlightPitch * 0.1, -1).normalize();
+      } else if (this.camera) {
+        rocketGrp.position.copy(this.camera.position);
+        _dirVec.set((idx - 1.5) * 0.08, 0.04, -1).applyQuaternion(this.camera.quaternion).normalize();
+        rocketGrp.position.addScaledVector(_dirVec, 2.4);
+      }
+
+      const assignedTarget = sortedEnemies.length > 0 ? sortedEnemies[idx % sortedEnemies.length] : undefined;
+      if (assignedTarget) {
+        const toTarget = assignedTarget.group.position.clone().sub(rocketGrp.position).normalize();
+        _dirVec.lerp(toTarget, 0.65).normalize();
+      }
+      rocketGrp.lookAt(rocketGrp.position.clone().add(_dirVec));
+
+      this.spawnMuzzleFlash(rocketGrp.position, _dirVec, 0xff6b00, 1.45);
+      this.scene!.add(rocketGrp);
+      this.lasers.push({
+        mesh: rocketGrp,
+        vel: _dirVec.clone().multiplyScalar(118),
+        life: 2.35,
+        damage: 4,
+        kind: 'homing_rocket',
+        homingTarget: assignedTarget,
+        smokeTimer: 0,
+      });
+    });
+
+    this.rocketsFired += 4;
+    this.shotsFired += 4;
+    this.metrics.rocketsFired = this.rocketsFired;
+    this.metrics.shotsFired = this.shotsFired;
+    this.cameraShake = Math.min(0.75, this.cameraShake + 0.36);
+    this.showBanner('🚀 SALWA 4 RAKIET SAMONAPROWADZAJĄCYCH WYSTRZELONA!', 1650);
+    this.emitMetrics();
+  }
+
+  /**
+   * Triggers a 3.5-second Nitro / Afterburner Overdrive burst for cars, jets, helicopters, tanks & hoverbikes.
+   * Refills Nitro tank to 100%, boosts speed by +45%, and spawns blue-cyan Mach shock-diamond exhaust flames.
+   */
+  public triggerNitroBurst(): void {
+    const now = performance.now();
+    this.raceNitroPct = 100;
+    this.nitroBurstUntilTs = now + 3500;
+    this.nitroBurstsUsed++;
+    this.metrics.nitroBurstsUsed = this.nitroBurstsUsed;
+    this.metrics.raceNitroPct = 100;
+    this.gameScore += 180;
+    this.cameraShake = Math.min(0.55, this.cameraShake + 0.24);
+    gameAudioService.playNitroBoost();
+
+    const hero = this.playerCarGroup || this.playerAircraftGroup || this.playerCombatGroup;
+    if (hero && this.scene) {
+      const exhaustPos = hero.position.clone().add(new THREE.Vector3(0, 0.7, 2.8));
+      this.spawnMuzzleFlash(exhaustPos, new THREE.Vector3(0, 0, 1), 0x22d3ee, 1.85);
+    }
+    this.showBanner('⚡ DOPALACZ NITRO / AFTERBURNER AKTYWNY (+45% PRĘDKOŚCI)!', 1800);
+    this.emitMetrics();
+  }
+
+  public setUpscalingMode(mode: GameUpscalingMode, customPct?: number): void {
+    this.upscalingMode = mode;
+    const pctMap: Record<GameUpscalingMode, number> = {
+      native: 100,
+      dlss_quality: 67,
+      dlss_balanced: 58,
+      dlss_performance: 50,
+      dlss_ultra_perf: 38,
+      fsr_quality: 67,
+      fsr_balanced: 59,
+      xess_quality: 67,
+      custom: customPct ?? this.upscalingPct,
+    };
+    this.upscalingPct = Math.max(33, Math.min(100, Math.round(customPct ?? pctMap[mode])));
+    this.metrics.upscalingMode = this.upscalingMode;
+    this.metrics.upscalingPct = this.upscalingPct;
+    this.recomputeGraphicsPipelineMetrics();
+    if (this.mountEl) {
+      this.applyPresetScale(Math.max(360, this.mountEl.clientWidth), Math.max(280, this.mountEl.clientHeight));
+      if (!this.running) this.renderFrameOnce();
+    }
+    this.emitMetrics();
+  }
+
+  public setFrameGenMode(mode: GameFrameGenMode): void {
+    this.frameGenMode = mode;
+    this.metrics.frameGenMode = mode;
+    if (mode !== 'off' && this.reflexMode === 'off') {
+      this.reflexMode = 'on';
+      this.metrics.reflexMode = 'on';
+    }
+    this.recomputeGraphicsPipelineMetrics();
+    this.emitMetrics();
+  }
+
+  public setSmoothMotionEnabled(enabled: boolean): void {
+    this.smoothMotionEnabled = enabled;
+    this.metrics.smoothMotionEnabled = enabled;
+    this.recomputeGraphicsPipelineMetrics();
+    this.emitMetrics();
+  }
+
+  public setAaMode(mode: GameAaMode): void {
+    this.aaMode = mode;
+    this.metrics.aaMode = mode;
+    this.recomputeGraphicsPipelineMetrics();
+    this.emitMetrics();
+  }
+
+  public setHdrEnabled(enabled: boolean): void {
+    this.hdrEnabled = enabled;
+    this.metrics.hdrEnabled = enabled;
+    if (this.renderer) {
+      this.renderer.toneMappingExposure = enabled ? Math.max(1.08, this.exposure) : this.exposure * 0.92;
+      if (!this.running) this.renderFrameOnce();
+    }
+    this.recomputeGraphicsPipelineMetrics();
+    this.emitMetrics();
+  }
+
+  public setReflexMode(mode: GameReflexMode): void {
+    this.reflexMode = mode;
+    this.metrics.reflexMode = mode;
+    this.recomputeGraphicsPipelineMetrics();
+    this.emitMetrics();
+  }
+
+  public setVramBudgetGb(gb: number): void {
+    this.vramBudgetGb = Math.max(4, Math.min(24, Math.round(gb)));
+    this.metrics.vramBudgetGb = this.vramBudgetGb;
+    if (this.vramBudgetGb >= 12) {
+      this.textureQuality = 'ultra';
+      this.setAnisotropy(16);
+    } else if (this.vramBudgetGb >= 8) {
+      this.textureQuality = 'high';
+      this.setAnisotropy(16);
+    } else {
+      this.textureQuality = 'medium';
+      this.setAnisotropy(8);
+    }
+    this.metrics.textureQuality = this.textureQuality;
+    this.recomputeGraphicsPipelineMetrics();
+    this.emitMetrics();
+  }
+
+  public setTextureQuality(q: GameTextureQuality): void {
+    this.textureQuality = q;
+    this.metrics.textureQuality = q;
+    this.recomputeGraphicsPipelineMetrics();
+    this.emitMetrics();
+  }
+
+  public setGiQuality(q: GameGiQuality): void {
+    this.giQuality = q;
+    this.metrics.giQuality = q;
+    const giEnvMap: Record<GameGiQuality, number> = {
+      medium: 0.72,
+      high: 0.96,
+      ultra: 1.24,
+      ultra_epic: 1.42,
+      epic_lumen: 1.48,
+    };
+    this.setEnvIntensity(giEnvMap[q]);
+    this.recomputeGraphicsPipelineMetrics();
+    this.emitMetrics();
+  }
+
+  public setShadowsQuality(q: GameShadowsQuality): void {
+    this.shadowsQuality = q;
+    this.metrics.shadowsQuality = q;
+    this.setShadowsEnabled(true);
+    this.recomputeGraphicsPipelineMetrics();
+    this.emitMetrics();
+  }
+
+  public setAoMode(mode: GameAoMode): void {
+    this.aoMode = mode;
+    this.metrics.aoMode = mode;
+    this.recomputeGraphicsPipelineMetrics();
+    this.emitMetrics();
+  }
+
+  public setReflectionsMode(mode: GameReflectionsMode): void {
+    this.reflectionsMode = mode;
+    this.metrics.reflectionsMode = mode;
+    this.recomputeGraphicsPipelineMetrics();
+    this.emitMetrics();
+  }
+
+  public setVolumetricFogQuality(q: 'low' | 'medium' | 'high' | 'ultra'): void {
+    this.volumetricFogQuality = q;
+    this.metrics.volumetricFogQuality = q;
+    this.setFogEnabled(true);
+    this.recomputeGraphicsPipelineMetrics();
+    this.emitMetrics();
+  }
+
+  public setRayTracingMode(mode: GameRayTracingMode): void {
+    this.rayTracingMode = mode;
+    this.metrics.rayTracingMode = mode;
+    this.recomputeGraphicsPipelineMetrics();
+    if (this.skyMat && this.plasmaMat) {
+      const baseSteps = GAME_PRESETS[this.preset].raymarchSteps;
+      const rtMult = mode === 'path_tracing' ? 1.35 : mode === 'rt_ultra' ? 1.2 : mode === 'rt_medium' ? 1.05 : 0.85;
+      const steps = Math.round(baseSteps * rtMult);
+      this.skyMat.uniforms.uSteps.value = steps;
+      this.plasmaMat.uniforms.uSteps.value = steps;
+      this.metrics.raymarchSteps = steps;
+      if (!this.running) this.renderFrameOnce();
+    }
+    this.emitMetrics();
+  }
+
+  public setLodQuality(q: 'medium' | 'high' | 'ultra'): void {
+    this.lodQuality = q;
+    this.metrics.lodQuality = q;
+    const densityMap = { medium: 65, high: 85, ultra: 100 };
+    this.setSceneryDensityPct(densityMap[q]);
+    this.recomputeGraphicsPipelineMetrics();
+    this.emitMetrics();
+  }
+
+  public setFoliageQuality(q: 'low' | 'medium' | 'high' | 'ultra'): void {
+    this.foliageQuality = q;
+    this.metrics.foliageQuality = q;
+    this.recomputeGraphicsPipelineMetrics();
+    this.emitMetrics();
+  }
+
+  public setSssEnabled(enabled: boolean): void {
+    this.sssEnabled = enabled;
+    this.metrics.sssEnabled = enabled;
+    this.recomputeGraphicsPipelineMetrics();
+    this.emitMetrics();
+  }
+
+  public setDriverSharpeningPct(pct: number): void {
+    this.driverSharpeningPct = Math.max(0, Math.min(100, Math.round(pct)));
+    this.metrics.driverSharpeningPct = this.driverSharpeningPct;
+    this.emitMetrics();
+  }
+
+  public setPostProcessFilter(
+    filter: 'chromaticAberration' | 'motionBlur' | 'depthOfField' | 'filmGrain' | 'lensFlare',
+    enabled: boolean
+  ): void {
+    this[filter] = enabled;
+    this.metrics[filter] = enabled;
+    if (filter === 'lensFlare') {
+      this.setBloomEnabled(enabled);
+    }
+    this.recomputeGraphicsPipelineMetrics();
+    this.emitMetrics();
+  }
+
+  /**
+   * One-click Unreal Engine 5 Optimal Gaming Preset:
+   * - DLSS/FSR Quality (67%) + Frame Gen 2x + NVIDIA Reflex Boost
+   * - Textures Ultra + Anisotropic Filtering x16 (for 12GB+ VRAM)
+   * - Lumen GI & Shadows on High (instead of Epic/Ultra for +38% FPS boost)
+   * - Volumetric Fog Medium + SSR Reflections + Post-process blur/aberration OFF
+   */
+  public applyUe5OptimizationPreset(monitorHz = 120, isEsports = false): void {
+    this.upscalingMode = isEsports ? 'dlss_balanced' : 'dlss_quality';
+    this.upscalingPct = isEsports ? 58 : 67;
+    this.frameGenMode = isEsports ? 'off' : 'fg_2x';
+    this.smoothMotionEnabled = !isEsports;
+    this.aaMode = isEsports ? 'taa' : 'dlaa';
+    this.hdrEnabled = !isEsports;
+    this.reflexMode = 'boost';
+    this.vramBudgetGb = 12;
+    this.textureQuality = 'ultra';
+    this.setAnisotropy(16);
+    this.giQuality = 'high';
+    this.shadowsQuality = isEsports ? 'medium' : 'high';
+    this.aoMode = 'hbao_plus';
+    this.reflectionsMode = 'ssr';
+    this.volumetricFogQuality = isEsports ? 'low' : 'medium';
+    this.rayTracingMode = isEsports ? 'off' : 'rt_medium';
+    this.lodQuality = 'high';
+    this.foliageQuality = isEsports ? 'medium' : 'high';
+    this.sssEnabled = true;
+    this.driverSharpeningPct = 40;
+    this.chromaticAberration = false;
+    this.motionBlur = false;
+    this.depthOfField = false;
+    this.filmGrain = false;
+    this.lensFlare = !isEsports;
+
+    if (isEsports) {
+      // Limit FPS 3 frames below monitor refresh rate (e.g. 117 FPS for 120Hz or 141 FPS for 144Hz)
+      this.setFpsMode('vsync');
+      this.setFpsCap(monitorHz >= 144 ? 141 : 117);
+      this.setBloomEnabled(false);
+    } else {
+      this.setFpsMode('vsync');
+      this.setFpsCap(0);
+      this.setBloomEnabled(true);
+    }
+
+    this.sync5CategoryMetrics();
+    this.aiRecommendation = isEsports
+      ? `Schemat E-Sport (${monitorHz >= 144 ? 141 : 117} FPS Limit, FG Wył., Reflex Boost, AF x16, Cienie Średnie, Filtry Wył.)`
+      : 'Schemat UE5 Singleplayer (DLSS Quality 67%, FG 2x + Smooth Motion, Reflex Boost, Tekstury Ultra AF x16, Lumen/Cienie High)';
+    this.metrics.aiRecommendation = this.aiRecommendation;
+    if (this.mountEl) {
+      this.applyPresetScale(Math.max(360, this.mountEl.clientWidth), Math.max(280, this.mountEl.clientHeight));
+      if (!this.running) this.renderFrameOnce();
+    }
+    this.emitMetrics();
+  }
+
+  private sync5CategoryMetrics(): void {
+    this.metrics.upscalingMode = this.upscalingMode;
+    this.metrics.upscalingPct = this.upscalingPct;
+    this.metrics.frameGenMode = this.frameGenMode;
+    this.metrics.smoothMotionEnabled = this.smoothMotionEnabled;
+    this.metrics.aaMode = this.aaMode;
+    this.metrics.hdrEnabled = this.hdrEnabled;
+    this.metrics.reflexMode = this.reflexMode;
+    this.metrics.vramBudgetGb = this.vramBudgetGb;
+    this.metrics.textureQuality = this.textureQuality;
+    this.metrics.giQuality = this.giQuality;
+    this.metrics.shadowsQuality = this.shadowsQuality;
+    this.metrics.aoMode = this.aoMode;
+    this.metrics.reflectionsMode = this.reflectionsMode;
+    this.metrics.volumetricFogQuality = this.volumetricFogQuality;
+    this.metrics.rayTracingMode = this.rayTracingMode;
+    this.metrics.lodQuality = this.lodQuality;
+    this.metrics.foliageQuality = this.foliageQuality;
+    this.metrics.sssEnabled = this.sssEnabled;
+    this.metrics.driverSharpeningPct = this.driverSharpeningPct;
+    this.metrics.chromaticAberration = this.chromaticAberration;
+    this.metrics.motionBlur = this.motionBlur;
+    this.metrics.depthOfField = this.depthOfField;
+    this.metrics.filmGrain = this.filmGrain;
+    this.metrics.lensFlare = this.lensFlare;
+    this.recomputeGraphicsPipelineMetrics();
+  }
+
+  private recomputeGraphicsPipelineMetrics(): void {
+    let lag = 12.5;
+    if (this.reflexMode === 'on') lag -= 3.4;
+    if (this.reflexMode === 'boost') lag -= 5.1;
+    if (this.frameGenMode === 'fg_2x') lag += 4.2;
+    if (this.frameGenMode === 'mfg_3x') lag += 6.8;
+    if (this.frameGenMode === 'mfg_4x') lag += 8.9;
+    if (this.smoothMotionEnabled && this.frameGenMode === 'off') lag += 3.1;
+    this.metrics.estInputLagMs = Number(Math.max(3.2, lag).toFixed(1));
+
+    let vram = 4.2;
+    if (this.textureQuality === 'ultra') vram += 3.4;
+    else if (this.textureQuality === 'high') vram += 2.1;
+    else if (this.textureQuality === 'medium') vram += 1.1;
+    if (this.rayTracingMode === 'path_tracing') vram += 3.2;
+    else if (this.rayTracingMode === 'rt_ultra') vram += 2.1;
+    else if (this.rayTracingMode === 'rt_medium') vram += 1.2;
+    if (this.giQuality === 'epic_lumen') vram += 1.3;
+    if (this.frameGenMode !== 'off') vram += 0.9;
+    this.metrics.estVramUsageGb = Number(vram.toFixed(1));
+  }
+
   public setPreset(preset: GameQualityPreset): void {
     this.preset = preset;
     this.metrics.preset = preset;
@@ -5874,6 +6425,7 @@ export class GameBenchService {
     if (this.plasmaMat) this.plasmaMat.uniforms.uTime.value = this.simTime;
 
     this.fireCooldown = Math.max(0, this.fireCooldown - dt);
+    this.rocketCooldown = Math.max(0, this.rocketCooldown - dt);
     this.cameraShake = Math.max(0, this.cameraShake - dt * 1.4);
     if (this.muzzleFlashTimer > 0) {
       this.muzzleFlashTimer -= dt;
@@ -5912,39 +6464,57 @@ export class GameBenchService {
       this.particlePoints.rotation.y = this.simTime * 0.06;
     }
 
-    // Update projectiles & check enemy hit collisions
+    // Update projectiles & check enemy hit collisions (including homing rockets!)
     const activeLayoutMode = this.getGameCatalogItem().layoutMode;
     for (let i = this.lasers.length - 1; i >= 0; i--) {
       const b = this.lasers[i];
+      if (b.kind === 'homing_rocket') {
+        if (!b.homingTarget || !this.combatEnemies.includes(b.homingTarget)) {
+          b.homingTarget = this.combatEnemies[0];
+        }
+        if (b.homingTarget) {
+          const desired = b.homingTarget.group.position.clone().sub(b.mesh.position).normalize().multiplyScalar(128);
+          b.vel.lerp(desired, Math.min(1, dt * 6.5));
+          b.mesh.lookAt(b.mesh.position.clone().add(b.vel));
+        }
+      }
       b.mesh.position.addScaledVector(b.vel, dt);
       b.life -= dt;
       let hit = false;
+      const hitRadiusExtra = b.kind === 'homing_rocket' ? 2.6 : 1.1;
       for (let eIdx = this.combatEnemies.length - 1; eIdx >= 0; eIdx--) {
         const enemy = this.combatEnemies[eIdx];
-        if (b.mesh.position.distanceTo(enemy.group.position) < enemy.radius + 1.1) {
+        if (b.mesh.position.distanceTo(enemy.group.position) < enemy.radius + hitRadiusExtra) {
           enemy.hp -= b.damage;
-          enemy.hitFlash = 0.12;
+          enemy.hitFlash = 0.14;
           this.targetsHit++;
           hit = true;
           if (enemy.hp <= 0) {
-            this.spawnExplosion(enemy.group.position, enemy.isBoss ? 0xff2255 : 0xff5a1f, enemy.isBoss ? 7.2 : 3.8);
+            this.spawnExplosion(
+              enemy.group.position,
+              enemy.isBoss ? 0xff2255 : b.kind === 'homing_rocket' ? 0xff4500 : 0xff5a1f,
+              enemy.isBoss ? 7.6 : b.kind === 'homing_rocket' ? 5.1 : 3.8
+            );
             this.scene.remove(enemy.group);
             this.combatEnemies.splice(eIdx, 1);
             this.gameTargetsDestroyed++;
             this.gameStageKills++;
             this.gameCombo = Math.min(8, this.gameCombo + 1);
             this.gameComboTimer = 4.5;
-            const pts = (enemy.isBoss ? 1500 : 250) * this.gameCombo;
+            const pts = (enemy.isBoss ? 1500 : b.kind === 'homing_rocket' ? 350 : 250) * this.gameCombo;
             this.gameScore += pts;
-            this.cameraShake = Math.min(0.85, this.cameraShake + (enemy.isBoss ? 0.65 : 0.28));
+            this.cameraShake = Math.min(0.85, this.cameraShake + (enemy.isBoss ? 0.65 : 0.32));
             if (enemy.isBoss) {
               this.showBanner(`BOSS ZNISZCZONY! +${pts} PKT`, 2600);
             }
           } else {
-            this.spawnExplosion(b.mesh.position, 0xffaa22, 1.55);
+            this.spawnExplosion(b.mesh.position, b.kind === 'homing_rocket' ? 0xff6b00 : 0xffaa22, b.kind === 'homing_rocket' ? 3.2 : 1.55);
           }
           break;
         }
+      }
+      if (!hit && b.life <= 0 && b.kind === 'homing_rocket') {
+        this.spawnExplosion(b.mesh.position, 0xff6b00, 3.6);
       }
       if (hit || b.life <= 0) {
         this.scene.remove(b.mesh);
@@ -6097,9 +6667,12 @@ export class GameBenchService {
         layoutMode === 'cyber_hoverbike'
       ) {
         // Longer 5-Lap Playable 3D Racing Chase Camera + Boost Gates + Overtake Combo
+        const isNitroOverdrive = now < this.nitroBurstUntilTs;
         const nitroActive =
+          isNitroOverdrive ||
           this.keysDown.has('ShiftLeft') ||
           this.keysDown.has('ShiftRight') ||
+          this.keysDown.has('KeyN') ||
           this.keysDown.has('KeyW') ||
           this.keysDown.has('ArrowUp') ||
           this.keysDown.has('Space');
@@ -6119,13 +6692,17 @@ export class GameBenchService {
                   : layoutMode === 'motogp_superbike'
                     ? 352
                     : 318;
-        const targetSpeed = nitroActive && this.raceNitroPct > 2
-          ? baseSpeed * 1.44
-          : brakeActive
-            ? baseSpeed * 0.56
-            : baseSpeed + Math.sin(this.simTime * 1.4) * 26;
+        const targetSpeed = isNitroOverdrive
+          ? baseSpeed * 1.56
+          : nitroActive && this.raceNitroPct > 2
+            ? baseSpeed * 1.44
+            : brakeActive
+              ? baseSpeed * 0.56
+              : baseSpeed + Math.sin(this.simTime * 1.4) * 26;
         this.raceSpeedKmh = Math.round(this.raceSpeedKmh + (targetSpeed - this.raceSpeedKmh) * Math.min(1, dt * 6));
-        if (nitroActive && this.raceNitroPct > 0) {
+        if (isNitroOverdrive) {
+          this.raceNitroPct = Math.max(25, Number((this.raceNitroPct - dt * 10).toFixed(0)));
+        } else if (nitroActive && this.raceNitroPct > 0) {
           this.raceNitroPct = Math.max(0, Number((this.raceNitroPct - dt * 20).toFixed(0)));
         } else {
           this.raceNitroPct = Math.min(100, Number((this.raceNitroPct + dt * 15).toFixed(0)));
@@ -6266,8 +6843,12 @@ export class GameBenchService {
         layoutMode === 'starfighter_trench' ||
         layoutMode === 'battleship_yamato'
       ) {
-        // Unified Playable 5-Stage Flight & Combat Simulation (WASD/Arrows + Shift Boost + Space/Click Weapons)
-        const boostActive = this.keysDown.has('ShiftLeft') || this.keysDown.has('ShiftRight');
+        // Unified Playable 5-Stage Flight & Combat Simulation (WASD/Arrows + Shift/N Boost + Space/Click Weapons + F Rockets)
+        const boostActive =
+          now < this.nitroBurstUntilTs ||
+          this.keysDown.has('ShiftLeft') ||
+          this.keysDown.has('ShiftRight') ||
+          this.keysDown.has('KeyN');
         const rollLeft = this.keysDown.has('KeyA') || this.keysDown.has('ArrowLeft');
         const rollRight = this.keysDown.has('KeyD') || this.keysDown.has('ArrowRight');
         const climbUp = this.keysDown.has('KeyW') || this.keysDown.has('ArrowUp');
@@ -6795,6 +7376,8 @@ export class GameBenchService {
         overallScore: score,
         shotsFired: this.shotsFired,
         targetsHit: this.targetsHit,
+        rocketsFired: this.rocketsFired,
+        nitroBurstsUsed: this.nitroBurstsUsed,
         isRacingMode: this.isRacingScene(gameMeta.layoutMode) || this.isFlightScene(gameMeta.layoutMode),
         isCombatMode: this.isCombatScene(gameMeta.layoutMode) || this.isFlightScene(gameMeta.layoutMode),
         isSoccerMode: this.isSoccerScene(gameMeta.layoutMode),

@@ -184,42 +184,42 @@ export function renderFanPwmMonitorInnerHtml(pwm: FanPwmMonitorState): string {
     <div class="fan-pwm-summary-strip">
       <div class="fan-pwm-summary-pill ${pwm.active ? 'is-live' : ''}">
         <span class="fan-pwm-dot ${pwm.active ? 'is-live' : ''}"></span>
-        <span>${pwm.active ? 'MONITORING ACTIVE (2 Hz)' : 'STANDBY — Click Monitor PWM Frequency'}</span>
+        <span>${pwm.active ? 'MONITORING AKTYWNY (2 Hz)' : 'GOTOWY — Kliknij Monitoruj sygnał PWM'}</span>
       </div>
       <div class="fan-pwm-summary-item">
-        <span>Programmed Motherboard Target:</span>
+        <span>Zegar PWM płyty głównej:</span>
         <strong class="font-mono">${pwm.programmedHz.toLocaleString('pl-PL')} Hz</strong>
       </div>
       <div class="fan-pwm-summary-item">
-        <span>Allowed Window (±${pwm.tolerancePct}%):</span>
+        <span>Pasmo tolerancji (±${pwm.tolerancePct}%):</span>
         <strong class="font-mono">${minAllowedHz.toLocaleString('pl-PL')} – ${maxAllowedHz.toLocaleString('pl-PL')} Hz</strong>
       </div>
       <div class="fan-pwm-summary-item">
-        <span>Freq Deviations:</span>
+        <span>Odchyłki częstotliwości:</span>
         <strong class="font-mono ${hasDeviations ? 'status-err' : 'status-ok'}">
-          ${hasDeviations ? `⚠ ${pwm.deviationCount} / ${pwm.channels.length} fans` : `✓ 0 / ${pwm.channels.length} Synced`}
+          ${hasDeviations ? `⚠ ${pwm.deviationCount} / ${pwm.channels.length} went.` : `✓ 0 / ${pwm.channels.length} Zgodne`}
         </strong>
       </div>
       <div class="fan-pwm-summary-item ${hasRpmPulseAlerts ? 'is-pulse-summary' : ''}">
-        <span>RPM/Duty Faults (&gt;${pwm.rpmDeviationThresholdPct}% / &gt;${pwm.rpmDeviationHoldSec}s):</span>
+        <span>Błędy RPM/Duty (&gt;${pwm.rpmDeviationThresholdPct}% / &gt;${pwm.rpmDeviationHoldSec}s):</span>
         <strong class="font-mono ${hasRpmPulseAlerts ? 'status-err' : 'status-ok'}">
-          ${hasRpmPulseAlerts ? `<span class="fan-pwm-pulse-beacon" aria-hidden="true"></span> ${pwm.rpmDutyWarningCount} ACTIVE PULSE` : '✓ Nominal'}
+          ${hasRpmPulseAlerts ? `<span class="fan-pwm-pulse-beacon" aria-hidden="true"></span> ${pwm.rpmDutyWarningCount} ALARM RPM` : '✓ W normie'}
         </strong>
       </div>
       <div class="fan-pwm-summary-item fan-pwm-bearing-summary ${lowestTierCls}">
-        <span>Bearing Health Index:</span>
+        <span>Kondycja łożysk (Bearing Health Index):</span>
         <strong class="font-mono fan-pwm-bearing-val ${lowestTierCls}">
-          ${pwm.lowestBearingHealthIndex}/100 (${lowestTier} · Avg ${pwm.avgBearingHealthIndex})
+          ${pwm.lowestBearingHealthIndex}/100 (${lowestTier === 'HEALTHY' ? 'SPRAWNY' : lowestTier} · Śr. ${pwm.avgBearingHealthIndex})
         </strong>
       </div>
       <div class="fan-pwm-summary-item fan-pwm-bearing-maint-summary ${hasMaintAlerts ? 'is-maint-alert' : ''}" data-maint-summary>
-        <span>Maint. Alerts (&lt;<span class="fan-bearing-threshold-num">${maintThreshold}</span>%):</span>
+        <span>Alerty łożysk (&lt;<span class="fan-bearing-threshold-num">${maintThreshold}</span>%):</span>
         <strong class="font-mono ${hasMaintAlerts ? 'status-err' : 'status-ok'}" data-maint-summary-count>
-          ${hasMaintAlerts ? `⚠ ${pwm.maintenanceAlertCount} Alert${pwm.maintenanceAlertCount > 1 ? 's' : ''}` : '✓ OK'}
+          ${hasMaintAlerts ? `⚠ ${pwm.maintenanceAlertCount} Alert` : '✓ Brak alertów (OK)'}
         </strong>
         ${
           hasMaintAlerts
-            ? `<button type="button" class="btn btn-danger btn-xs fan-open-bearing-alert-trigger" data-open-bearing-alert="all" style="margin-left:6px;padding:2px 8px;font-size:10.5px;">View Alert &amp; Instructions</button>`
+            ? `<button type="button" class="btn btn-danger btn-xs fan-open-bearing-alert-trigger" data-open-bearing-alert="all" style="margin-left:6px;padding:2px 8px;font-size:10.5px;">Pokaż szczegóły i instrukcje</button>`
             : ''
         }
       </div>
@@ -236,12 +236,12 @@ export function renderFanPwmMonitorInnerHtml(pwm: FanPwmMonitorState): string {
                 : 'is-ok';
           const pulseCardCls = ch.rpmDutyWarningPulse ? 'is-rpm-warning-pulse' : '';
           const badgeText = ch.rpmDutyWarningPulse
-            ? '🚨 RPM/DUTY PULSE'
+            ? '🚨 ALARM RPM/DUTY'
             : ch.status === 'CRITICAL'
-              ? '🚨 CRITICAL DRIFT'
+              ? '🚨 KRYTYCZNY DRYFT'
               : ch.status === 'DEVIATION'
-                ? '⚠ FREQ DEVIATION'
-                : '✓ SYNCED OK';
+                ? '⚠ ODCHYŁKA HZ'
+                : '✓ SPRAWNY (SYNC OK)';
           const badgeCls = ch.rpmDutyWarningPulse ? 'is-pulse' : cardCls;
           const devSign = ch.deviationHz >= 0 ? '+' : '';
           const devText = `${devSign}${ch.deviationHz.toLocaleString('pl-PL')} Hz (${devSign}${ch.deviationPct.toFixed(2)}%)`;
@@ -254,17 +254,17 @@ export function renderFanPwmMonitorInnerHtml(pwm: FanPwmMonitorState): string {
               <div class="fan-pwm-rpm-pulse-alert" role="alert">
                 <div class="fan-pwm-rpm-pulse-head font-mono">
                   <span class="fan-pwm-pulse-beacon" aria-hidden="true"></span>
-                  <strong>WARNING PULSE · RPM/DUTY Δ ${rpmDevSign}${ch.rpmDutyDeviationPct.toFixed(1)}%</strong>
+                  <strong>ALARM OBROTÓW · RPM/DUTY Δ ${rpmDevSign}${ch.rpmDutyDeviationPct.toFixed(1)}%</strong>
                   <span>${(ch.rpmDeviationDurationMs / 1000).toFixed(1)}s</span>
                 </div>
-                <div class="fan-pwm-rpm-pulse-text">${escHtml(ch.rpmDutyFaultHint || 'Potential bearing failure or PWM controller instability.')}</div>
+                <div class="fan-pwm-rpm-pulse-text">${escHtml(ch.rpmDutyFaultHint || 'Możliwe zużycie łożyska lub niestabilność kontrolera PWM.')}</div>
               </div>
             `
             : rpmDevExceeds
               ? `
                 <div class="fan-pwm-rpm-hold-banner">
                   <div class="fan-pwm-rpm-hold-row font-mono">
-                    <span>⚠ RPM/Duty Δ ${rpmDevSign}${ch.rpmDutyDeviationPct.toFixed(1)}% (&gt;${pwm.rpmDeviationThresholdPct}%)</span>
+                    <span>⚠ Odchyłka RPM/Duty Δ ${rpmDevSign}${ch.rpmDutyDeviationPct.toFixed(1)}% (&gt;${pwm.rpmDeviationThresholdPct}%)</span>
                     <span>${(ch.rpmDeviationDurationMs / 1000).toFixed(1)}s / ${pwm.rpmDeviationHoldSec.toFixed(1)}s</span>
                   </div>
                   <div class="fan-pwm-rpm-hold-track">
@@ -277,6 +277,14 @@ export function renderFanPwmMonitorInnerHtml(pwm: FanPwmMonitorState): string {
           const healthCls = bearingTierClass(ch.bearingHealthTier);
           const healthClamped = Math.max(0, Math.min(100, Math.round(ch.bearingHealthIndex)));
           const maintAlertCls = ch.maintenanceAlertTriggered ? 'is-maint-alert' : '';
+          const tierPl =
+            ch.bearingHealthTier === 'HEALTHY'
+              ? 'SPRAWNY'
+              : ch.bearingHealthTier === 'FAIR'
+                ? 'DOBRY'
+                : ch.bearingHealthTier === 'DEGRADED'
+                  ? 'ZUŻYCIE'
+                  : 'KRYTYCZNY';
 
           return `
             <div class="fan-pwm-channel-card ${cardCls} ${pulseCardCls}" data-pwm-channel="${escHtml(ch.id)}" data-rpm-warning-pulse="${ch.rpmDutyWarningPulse ? 'true' : 'false'}" data-bearing-tier="${escHtml(ch.bearingHealthTier)}">
@@ -294,7 +302,7 @@ export function renderFanPwmMonitorInnerHtml(pwm: FanPwmMonitorState): string {
                   <span class="fan-pwm-measured-unit">Hz</span>
                 </div>
                 <div class="fan-pwm-target-col font-mono">
-                  <span>Target: ${ch.programmedHz.toLocaleString('pl-PL')} Hz</span>
+                  <span>Cel: ${ch.programmedHz.toLocaleString('pl-PL')} Hz</span>
                   <span class="fan-pwm-dev-val ${cardCls}">Δ ${devText}</span>
                 </div>
               </div>
@@ -302,48 +310,48 @@ export function renderFanPwmMonitorInnerHtml(pwm: FanPwmMonitorState): string {
               ${renderPwmChannelSparklineSvg(ch, pwm.tolerancePct)}
 
               <div class="fan-pwm-meta-row font-mono">
-                <span>Duty: <strong>${ch.dutyPct}%</strong></span>
-                <span>RPM: <strong class="${rpmDevExceeds ? 'status-err' : ''}">${ch.rpm.toLocaleString('pl-PL')}</strong></span>
+                <span>Wypełnienie: <strong>${ch.dutyPct}%</strong></span>
+                <span>Obroty RPM: <strong class="${rpmDevExceeds ? 'status-err' : ''}">${ch.rpm.toLocaleString('pl-PL')}</strong></span>
                 <span>Jitter: <strong>±${ch.jitterHz} Hz</strong></span>
               </div>
 
               <div class="fan-pwm-duty-match-row font-mono">
-                <span>Duty Expected: <strong>${ch.expectedRpm.toLocaleString('pl-PL')} RPM</strong></span>
+                <span>Oczekiwane obroty: <strong>${ch.expectedRpm.toLocaleString('pl-PL')} RPM</strong></span>
                 <span class="${rpmDevExceeds ? 'status-err' : 'status-ok'}">Δ ${rpmDevSign}${ch.rpmDutyDeviationPct.toFixed(1)}%</span>
               </div>
 
               <div class="fan-pwm-bearing-box ${healthCls} ${maintAlertCls}" data-bearing-channel="${escHtml(ch.id)}" data-maint-alert="${ch.maintenanceAlertTriggered ? 'true' : 'false'}">
                 <div class="fan-pwm-bearing-head font-mono">
                   <span class="fan-pwm-bearing-label-wrap">
-                    <span class="fan-pwm-bearing-label">Bearing Health Index</span>
+                    <span class="fan-pwm-bearing-label">Kondycja łożyska (Bearing Health Index)</span>
                     <button
                       type="button"
                       class="fan-bearing-info-btn"
                       data-bearing-info="${escHtml(ch.id)}"
-                      aria-label="Configure predictive maintenance alert threshold for ${escHtml(ch.label)}"
+                      aria-label="Ustaw próg alertu konserwacji dla ${escHtml(ch.label)}"
                       aria-expanded="false"
-                      title="Configure predictive maintenance alert threshold (${maintThreshold}%)"
+                      title="Ustaw próg alertu konserwacji łożyska (${maintThreshold}%)"
                     >i</button>
                   </span>
                   <span class="fan-pwm-bearing-score-wrap">
                     <strong class="fan-pwm-bearing-val ${healthCls}">${healthClamped}/100</strong>
-                    <span class="fan-pwm-bearing-tier-badge ${healthCls}">${escHtml(ch.bearingHealthTier)}</span>
+                    <span class="fan-pwm-bearing-tier-badge ${healthCls}" title="${escHtml(ch.bearingHealthTier)}">${tierPl}</span>
                   </span>
                 </div>
                 <div class="fan-pwm-bearing-track" role="progressbar" aria-valuenow="${healthClamped}" aria-valuemin="0" aria-valuemax="100" aria-label="Bearing Health Index ${escHtml(ch.label)}">
                   <span class="fan-pwm-bearing-bar ${healthCls}" style="width:${healthClamped}%;"></span>
                 </div>
                 <div class="fan-pwm-bearing-meta font-mono">
-                  <span>LT Drift: <strong>${ch.longTermDriftPct.toFixed(2)}%</strong></span>
-                  <span>Life: <strong class="${ch.predictedLifeExpectancyPct < maintThreshold ? 'status-err' : ''}">${ch.predictedLifeExpectancyPct}%</strong> (~${ch.estimatedRemainingHours.toLocaleString('en-US')}h)</span>
-                  <span class="fan-pwm-bearing-trend ${healthCls}">${escHtml(ch.driftTrend)}</span>
+                  <span>Dryft: <strong>${ch.longTermDriftPct.toFixed(2)}%</strong></span>
+                  <span>Żywotność: <strong class="${ch.predictedLifeExpectancyPct < maintThreshold ? 'status-err' : ''}">${ch.predictedLifeExpectancyPct}%</strong> (~${ch.estimatedRemainingHours.toLocaleString('pl-PL')}h)</span>
+                  <span class="fan-pwm-bearing-trend ${healthCls}">${ch.driftTrend === 'STABLE' ? 'STABILNY' : ch.driftTrend === 'DRIFTING' ? 'DRYFT' : 'SPADEK'}</span>
                 </div>
                 ${renderBearingHealth7DaySparklineSvg(ch, maintThreshold)}
                 ${
                   ch.maintenanceAlertTriggered
                     ? `<div class="fan-pwm-bearing-maint-pill font-mono" role="alert">
-                         <span>⚠ Predictive Maintenance (&lt;${maintThreshold}%): Life ${ch.predictedLifeExpectancyPct}%</span>
-                         <button type="button" class="fan-bearing-alert-inline-btn" data-open-bearing-alert="${escHtml(ch.id)}">Details</button>
+                         <span>⚠ Alert konserwacji (&lt;${maintThreshold}%): Żywotność ${ch.predictedLifeExpectancyPct}%</span>
+                         <button type="button" class="fan-bearing-alert-inline-btn" data-open-bearing-alert="${escHtml(ch.id)}">Szczegóły</button>
                        </div>`
                     : ''
                 }
@@ -351,19 +359,19 @@ export function renderFanPwmMonitorInnerHtml(pwm: FanPwmMonitorState): string {
 
                 <div class="fan-bearing-tooltip" role="tooltip" data-bearing-tooltip="${escHtml(ch.id)}">
                   <div class="fan-bearing-tooltip-head font-mono">
-                    <span>Bearing Health · ${escHtml(ch.label)}</span>
+                    <span>Kondycja łożyska · ${escHtml(ch.label)}</span>
                     <strong class="fan-bearing-tooltip-score ${healthCls}">${healthClamped}%</strong>
                   </div>
                   <div class="fan-bearing-tooltip-status ${ch.maintenanceAlertTriggered ? 'is-alert' : 'is-ok'} font-mono">
                     ${
                       ch.maintenanceAlertTriggered
-                        ? `⚠ Predictive Maintenance Alert (${healthClamped}% &lt; ${maintThreshold}%)`
-                        : `✓ Within Tolerance (${healthClamped}% ≥ ${maintThreshold}%)`
+                        ? `⚠ Alert konserwacji — Predictive Maintenance Alert (${healthClamped}% &lt; ${maintThreshold}%)`
+                        : `✓ W normie (${healthClamped}% ≥ ${maintThreshold}%)`
                     }
                   </div>
                   <div class="fan-bearing-tooltip-slider-box">
                     <div class="fan-bearing-tooltip-slider-head font-mono">
-                      <label for="fan-bearing-thresh-${escHtml(ch.id)}">Predictive Maintenance Threshold</label>
+                      <label for="fan-bearing-thresh-${escHtml(ch.id)}">Próg alertu konserwacji łożyska</label>
                       <strong class="fan-bearing-threshold-val">${maintThreshold}%</strong>
                     </div>
                     <input
@@ -375,11 +383,11 @@ export function renderFanPwmMonitorInnerHtml(pwm: FanPwmMonitorState): string {
                       max="95"
                       step="1"
                       value="${maintThreshold}"
-                      aria-label="Predictive maintenance alert threshold percentage for ${escHtml(ch.label)}"
+                      aria-label="Próg alertu konserwacji dla ${escHtml(ch.label)}"
                     />
                     <div class="fan-bearing-threshold-scale font-mono">
                       <span>30%</span>
-                      <span>70% (Default)</span>
+                      <span>70% (Domyślny)</span>
                       <span>95%</span>
                     </div>
                   </div>
@@ -402,11 +410,11 @@ export function renderFanPwmMonitorInnerHtml(pwm: FanPwmMonitorState): string {
 
 export function renderFanPwmMonitorPanelHtml(pwm: FanPwmMonitorState): string {
   const freqOptions = [
-    { hz: 25000, label: '25,000 Hz (Intel 4-Pin Spec)' },
-    { hz: 21000, label: '21,000 Hz (Low-Bound Spec)' },
-    { hz: 28000, label: '28,000 Hz (High-Bound Spec)' },
-    { hz: 1000, label: '1,000 Hz (Controller PWM)' },
-    { hz: 100, label: '100 Hz (Legacy / DC-PWM)' },
+    { hz: 25000, label: '25 000 Hz (Standard Intel 4-Pin PWM)' },
+    { hz: 21000, label: '21 000 Hz (Dolna granica specyfikacji)' },
+    { hz: 28000, label: '28 000 Hz (Górna granica specyfikacji)' },
+    { hz: 1000, label: '1 000 Hz (Kontroler niskiej częstotliwości)' },
+    { hz: 100, label: '100 Hz (Tryb starszy / DC-PWM)' },
   ];
 
   const tolOptions = [2, 4, 6, 10];
@@ -417,13 +425,13 @@ export function renderFanPwmMonitorPanelHtml(pwm: FanPwmMonitorState): string {
         <div class="row-wrap" style="gap:8px;align-items:center;">
           <span style="color:var(--accent-cyan);">${iconSvg('pulse', 18)}</span>
           <div>
-            <h2 class="panel-title">1A. Monitor PWM Frequency (Częstotliwość sygnału PWM i kontrola RPM/Duty)</h2>
-            <span class="panel-caption">Pomiar częstotliwości PWM (Hz) z detekcją odchyleń oraz pulsującym alarmem awarii łożyska / kontrolera PWM, gdy RPM odbiega od wypełnienia (duty) o &gt;15% przez ponad 3 s</span>
+            <h2 class="panel-title">1A. Monitor częstotliwości PWM i stanu łożysk wentylatorów</h2>
+            <span class="panel-caption">Pomiar częstotliwości PWM (Hz) z detekcją odchyleń oraz kontrolą stanu łożysk i rozjazdu RPM względem wypełnienia (&gt;15% przez ponad 3 s)</span>
           </div>
         </div>
         <div class="row-wrap" style="gap:8px;align-items:center;">
           <label class="fan-pwm-select-wrap" for="fan-pwm-target-hz-select">
-            <span>BIOS Target:</span>
+            <span>Zegar BIOS:</span>
             <select id="fan-pwm-target-hz-select" class="field-input font-mono" style="width:auto;padding:4px 8px;font-size:11.5px;">
               ${freqOptions
                 .map(
@@ -434,7 +442,7 @@ export function renderFanPwmMonitorPanelHtml(pwm: FanPwmMonitorState): string {
             </select>
           </label>
           <label class="fan-pwm-select-wrap" for="fan-pwm-tolerance-select">
-            <span>Tol:</span>
+            <span>Tolerancja:</span>
             <select id="fan-pwm-tolerance-select" class="field-input font-mono" style="width:auto;padding:4px 8px;font-size:11.5px;">
               ${tolOptions
                 .map(
@@ -448,9 +456,9 @@ export function renderFanPwmMonitorPanelHtml(pwm: FanPwmMonitorState): string {
             id="fan-pwm-drift-test-btn"
             type="button"
             class="btn ${pwm.driftTestEnabled ? 'btn-amber' : 'btn-secondary'} btn-sm"
-            title="Zasymuluj dryft PWM i rozjazd RPM/Duty (&gt;15%), aby sprawdzić pulsujący alarm po 3 sekundach"
+            title="Zasymuluj testowy dryft PWM i rozjazd RPM/Duty (&gt;15%), aby przetestować alarm łożyska"
           >
-            ${pwm.driftTestEnabled ? '⚡ Fault Sim: ON' : '⚡ Simulate Drift / Fault'}
+            ${pwm.driftTestEnabled ? '⚡ Symulacja usterki: WŁ.' : '⚡ Symuluj usterkę / dryft (Test)'}
           </button>
           <button
             id="fan-pwm-monitor-toggle-btn"
@@ -459,7 +467,7 @@ export function renderFanPwmMonitorPanelHtml(pwm: FanPwmMonitorState): string {
             aria-pressed="${pwm.active ? 'true' : 'false'}"
           >
             ${iconSvg(pwm.active ? 'stop' : 'pulse', 14)}
-            <span>${pwm.active ? 'Stop PWM Monitor' : 'Monitor PWM Frequency'}</span>
+            <span>${pwm.active ? 'Zatrzymaj monitor PWM' : 'Monitoruj sygnał PWM'}</span>
           </button>
         </div>
       </div>
@@ -473,10 +481,10 @@ export function renderFanPwmMonitorPanelHtml(pwm: FanPwmMonitorState): string {
 
 export function renderFanAcousticHeatmapMetaHtml(hm: FanAcousticHeatmapState): string {
   const modeLabel = hm.micActive
-    ? `LIVE MIC FFT (${hm.fftSize}-pt)`
+    ? `MIKROFON NA ŻYWO FFT (${hm.fftSize} pkt)`
     : hm.capturing || hm.sweeping
-      ? `FFT HARMONIC SWEEP (${hm.fftSize}-pt)`
-      : `FFT SPECTRUM READY (${hm.fftSize}-pt)`;
+      ? `SKAN HARMONICZNY FFT (${hm.fftSize} pkt)`
+      : `WIDMO FFT GOTOWE (${hm.fftSize} pkt)`;
   const topPeak = hm.currentHarmonics[0] || null;
 
   return `
@@ -486,39 +494,39 @@ export function renderFanAcousticHeatmapMetaHtml(hm: FanAcousticHeatmapState): s
         <span>${modeLabel}</span>
       </div>
       <div class="fan-pwm-summary-item">
-        <span>RPM:</span>
+        <span>Obroty RPM:</span>
         <strong class="font-mono status-cyan">${hm.currentRpm.toLocaleString('pl-PL')}</strong>
       </div>
       <div class="fan-pwm-summary-item">
-        <span>1x Shaft (f₀):</span>
+        <span>1x Wał (f₀):</span>
         <strong class="font-mono">${hm.fundamentalHz.toFixed(1)} Hz</strong>
       </div>
       <div class="fan-pwm-summary-item">
-        <span>BPF (${hm.bladeCount}x):</span>
+        <span>Łopatki BPF (${hm.bladeCount}x):</span>
         <strong class="font-mono">${hm.bladePassHz.toFixed(0)} Hz</strong>
       </div>
       <div class="fan-pwm-summary-item">
-        <span>Mic Noise:</span>
+        <span>Hałas mikrofonu:</span>
         <strong class="font-mono">${hm.currentNoiseDb !== null ? `${hm.currentNoiseDb.toFixed(1)} dB` : '—'}</strong>
       </div>
       <div class="fan-pwm-summary-item">
-        <span>Excited Harmonic:</span>
+        <span>Wzbudzona harmoniczna:</span>
         <strong class="font-mono ${topPeak?.isExcited ? 'status-err' : 'status-cyan'}">
           ${topPeak ? `${topPeak.hz} Hz (+${topPeak.prominenceDb.toFixed(1)} dB)` : hm.currentDominantHz !== null ? `${hm.currentDominantHz} Hz` : '—'}
         </strong>
       </div>
       <div class="fan-pwm-summary-item">
-        <span>Vibration:</span>
+        <span>Wibracje:</span>
         <strong class="font-mono ${hm.currentVibrationScore >= 60 ? 'status-err' : hm.currentVibrationScore >= 40 ? 'status-warn' : 'status-ok'}">${hm.currentVibrationScore}/100</strong>
       </div>
       <div class="fan-pwm-summary-item">
-        <span>Major Harmonics:</span>
+        <span>Główne harmoniczne:</span>
         <strong class="font-mono ${hm.majorHarmonics.length > 0 ? 'status-err' : 'status-ok'}">
-          ${hm.majorHarmonics.length > 0 ? `★ ${hm.majorHarmonics.length} Persistent` : '✓ None'}
+          ${hm.majorHarmonics.length > 0 ? `★ ${hm.majorHarmonics.length} Stałe` : '✓ Brak'}
         </strong>
       </div>
       <div class="fan-pwm-summary-item">
-        <span>Samples:</span>
+        <span>Próbki:</span>
         <strong class="font-mono">${hm.sampleCount}</strong>
       </div>
     </div>
@@ -562,7 +570,7 @@ export function renderFanFftHarmonicsStripHtml(hm: FanAcousticHeatmapState): str
   if (combined.length === 0) {
     return `
       <div class="fan-fft-harmonics-empty font-mono">
-        Brak wyraźnych pików harmonicznych w bieżącym oknie FFT (${hm.fftSize} pkt, ${(hm.sampleRateHz / hm.fftSize).toFixed(1)} Hz/bin). Uruchom Live Mic Capture lub Resonance Sweep.
+        Brak wyraźnych pików harmonicznych w bieżącym oknie FFT (${hm.fftSize} pkt, ${(hm.sampleRateHz / hm.fftSize).toFixed(1)} Hz/bin). Uruchom Nasłuch mikrofonu lub Skan rezonansu.
       </div>
     `;
   }
@@ -577,19 +585,19 @@ export function renderFanFftHarmonicsStripHtml(hm: FanAcousticHeatmapState): str
           const bIdx = hm.bearingHealthContext.lowestBearingHealthIndex;
           const persLabel =
             h.persistencePct !== undefined && h.persistenceCount !== undefined
-              ? `${h.persistenceCount}f · ${h.persistencePct}%`
+              ? `${h.persistenceCount}kl. · ${h.persistencePct}%`
               : `${h.magnitudeDb.toFixed(1)} dBFS`;
-          const majorTitle = `Major Harmonic — Predictive Bearing Failure Probability: ${failPct.toFixed(1)}% (derived from Bearing Health Index: ${bIdx}/100)`;
+          const majorTitle = `Główna harmoniczna (Major Harmonic — Predictive Bearing Failure Probability: ${failPct.toFixed(1)}% · Bearing Health Index: ${bIdx}/100)`;
           return `
           <div class="fan-fft-harmonic-chip ${h.isExcited ? 'is-excited' : ''} ${isMajor ? 'is-major' : ''}" data-major-harmonic="${isMajor ? 'true' : 'false'}">
             <div class="fan-fft-chip-top font-mono">
               <strong>${h.hz} Hz</strong>
               <span class="fan-fft-chip-prom ${h.isExcited ? 'is-excited' : ''}">+${h.prominenceDb.toFixed(1)} dB</span>
             </div>
-            ${isMajor ? `<div class="fan-fft-major-badge font-mono" title="${escHtml(majorTitle)}">★ Major Harmonic · ${failPct.toFixed(1)}% Fail Prob</div>` : ''}
+            ${isMajor ? `<div class="fan-fft-major-badge font-mono" title="${escHtml(majorTitle)}">★ Główna harmoniczna · Ryzyko ${failPct.toFixed(1)}%</div>` : ''}
             <div class="fan-fft-chip-class">${escHtml(h.classification)}</div>
             <div class="fan-fft-chip-meta font-mono">
-              <span>${h.harmonicOrder !== null ? `${h.harmonicOrder}× f₀` : 'Tonal'}</span>
+              <span>${h.harmonicOrder !== null ? `${h.harmonicOrder}× f₀` : 'Tonalna'}</span>
               <span>${persLabel}</span>
             </div>
           </div>
@@ -604,7 +612,7 @@ export function renderFanResonanceZonesHtml(hm: FanAcousticHeatmapState): string
   if (hm.sampleCount === 0) {
     return `
       <div class="fan-resonance-empty">
-        Brak próbek w mapie cieplnej. Kliknij <strong>Start Live Mic Capture</strong> lub <strong>Resonance Sweep</strong>, albo uruchom 24s test wentylatorów z włączonym mikrofonem.
+        Brak próbek w mapie cieplnej. Kliknij <strong>Uruchom nasłuch mikrofonu</strong> lub <strong>Skan rezonansu (500–5500 RPM)</strong>, albo uruchom 24s test wentylatorów.
       </div>
     `;
   }
@@ -627,12 +635,12 @@ export function renderFanResonanceZonesHtml(hm: FanAcousticHeatmapState): string
             <div class="fan-resonance-zone-head">
               <strong class="font-mono">⚠ ${z.rpmMin.toLocaleString('pl-PL')}–${z.rpmMax.toLocaleString('pl-PL')} RPM</strong>
               <span class="fan-resonance-badge ${z.severity === 'HIGH' ? 'is-high' : 'is-moderate'}">
-                ${z.severity === 'HIGH' ? 'HIGH RESONANCE' : 'VIBRATION SPIKE'} · +${z.excessDb.toFixed(1)} dB
+                ${z.severity === 'HIGH' ? 'WYSOKI REZONANS' : 'PIK WIBRACJI'} · +${z.excessDb.toFixed(1)} dB
               </span>
             </div>
             <div class="fan-resonance-zone-metrics font-mono">
-              <span>Measured: <strong>${z.avgDb.toFixed(1)} dB</strong> (Baseline: ${z.expectedDb.toFixed(1)} dB)</span>
-              <span>Vibration: <strong>${z.vibrationScore}/100</strong>${z.dominantHz ? ` · Dominant: <strong>${z.dominantHz} Hz</strong>` : ''}</span>
+              <span>Zmierzono: <strong>${z.avgDb.toFixed(1)} dB</strong> (Tło bazowe: ${z.expectedDb.toFixed(1)} dB)</span>
+              <span>Wibracje: <strong>${z.vibrationScore}/100</strong>${z.dominantHz ? ` · Dominująca: <strong>${z.dominantHz} Hz</strong>` : ''}</span>
             </div>
             ${
               z.excitedHarmonics.length > 0
@@ -644,7 +652,7 @@ export function renderFanResonanceZonesHtml(hm: FanAcousticHeatmapState): string
                         const majorTitle = `Major Harmonic — Predictive Bearing Failure Probability: ${failPct.toFixed(1)}% (derived from Bearing Health Index: ${bIdx}/100)`;
                         return `<span class="fan-resonance-harm-tag ${eh.isMajorHarmonic ? 'is-major' : ''}">${
                           eh.isMajorHarmonic
-                            ? `<span class="fan-fft-major-badge is-compact" title="${escHtml(majorTitle)}">Major Harmonic · ${failPct.toFixed(1)}% Fail Prob</span> `
+                            ? `<span class="fan-fft-major-badge is-compact" title="${escHtml(majorTitle)}">Główna harmoniczna · Ryzyko ${failPct.toFixed(1)}%</span> `
                             : ''
                         }${eh.hz} Hz · ${escHtml(eh.classification)} (+${eh.prominenceDb.toFixed(1)} dB${
                           eh.persistencePct ? ` · ${eh.persistencePct}%` : ''
@@ -679,21 +687,29 @@ export function renderFanBearingHistorySummaryHtml(pwm: FanPwmMonitorState): str
           const firstDay = ch.bearingHealth7DayHistory[0]?.score ?? ch.bearingHealthIndex;
           const delta7d = ch.bearingHealthIndex - firstDay;
           const deltaSign = delta7d >= 0 ? '+' : '';
+          const tierPl =
+            ch.bearingHealthTier === 'HEALTHY'
+              ? 'SPRAWNY'
+              : ch.bearingHealthTier === 'FAIR'
+                ? 'DOBRY'
+                : ch.bearingHealthTier === 'DEGRADED'
+                  ? 'ZUŻYCIE'
+                  : 'KRYTYCZNY';
           return `
             <div class="fan-bearing-history-card ${isLow ? 'is-alert' : ''}">
               <div class="row-between" style="gap:6px;align-items:center;">
                 <strong class="font-mono">${escHtml(ch.label)} <span style="opacity:0.65;font-weight:400;">(${escHtml(ch.header)})</span></strong>
-                <span class="fan-pwm-bearing-tier-badge ${tierCls}">${escHtml(ch.bearingHealthTier)}</span>
+                <span class="fan-pwm-bearing-tier-badge ${tierCls}" title="${escHtml(ch.bearingHealthTier)}">${tierPl}</span>
               </div>
               <div class="fan-bearing-history-metrics font-mono">
-                <span>Index: <strong>${ch.bearingHealthIndex}/100</strong></span>
-                <span>Life: <strong class="${isLow ? 'status-err' : 'status-ok'}">${ch.predictedLifeExpectancyPct}%</strong></span>
-                <span>7d Δ: <strong class="${delta7d < -5 ? 'status-err' : delta7d < 0 ? 'status-warn' : 'status-ok'}">${deltaSign}${delta7d} pts</strong></span>
-                <span>L10: <strong>~${ch.estimatedRemainingHours.toLocaleString('en-US')}h</strong></span>
+                <span>Indeks: <strong>${ch.bearingHealthIndex}/100</strong></span>
+                <span>Żywotność: <strong class="${isLow ? 'status-err' : 'status-ok'}">${ch.predictedLifeExpectancyPct}%</strong></span>
+                <span>7 dni Δ: <strong class="${delta7d < -5 ? 'status-err' : delta7d < 0 ? 'status-warn' : 'status-ok'}">${deltaSign}${delta7d} pkt</strong></span>
+                <span>L10: <strong>~${ch.estimatedRemainingHours.toLocaleString('pl-PL')}h</strong></span>
               </div>
               ${
                 isLow
-                  ? `<button type="button" class="btn btn-danger btn-xs" data-open-bearing-alert="${escHtml(ch.id)}" style="margin-top:6px;width:100%;">⚠ Maintenance Instructions</button>`
+                  ? `<button type="button" class="btn btn-danger btn-xs" data-open-bearing-alert="${escHtml(ch.id)}" style="margin-top:6px;width:100%;">⚠ Instrukcje konserwacji (Maintenance Instructions)</button>`
                   : ''
               }
             </div>
@@ -704,8 +720,8 @@ export function renderFanBearingHistorySummaryHtml(pwm: FanPwmMonitorState): str
     ${
       worstCh && worstCh.maintenanceAlertTriggered
         ? `<div class="fan-bearing-history-alert-strip" role="alert">
-             <span>🚨 <strong>Predictive Bearing Health Alert:</strong> ${escHtml(worstCh.label)} predicted life (${worstCh.predictedLifeExpectancyPct}%) is below your ${thresh}% threshold.</span>
-             <button type="button" class="btn btn-danger btn-xs" data-open-bearing-alert="${escHtml(worstCh.id)}">Open Maintenance Guide</button>
+             <span>🚨 <strong>Alert stanu łożyska (Predictive Bearing Health Alert):</strong> Szacowana żywotność ${escHtml(worstCh.label)} (${worstCh.predictedLifeExpectancyPct}%) spadła poniżej progu ${thresh}%.</span>
+             <button type="button" class="btn btn-danger btn-xs" data-open-bearing-alert="${escHtml(worstCh.id)}">Otwórz instrukcję konserwacji</button>
            </div>`
         : ''
     }
@@ -727,8 +743,8 @@ export function renderFanAcousticHeatmapPanelHtml(
         <div class="row-wrap" style="gap:8px;align-items:center;">
           <span style="color:var(--accent-amber);">${iconSvg('volume-on', 18)}</span>
           <div>
-            <h2 class="panel-title">1C. Mapa cieplna rezonansu akustycznego, widmo FFT i Bearing Health History</h2>
-            <span class="panel-caption">Korelacja prędkości obrotowej (RPM) z hałasem mikrofonu, analiza harmonicznych FFT oraz wielodniowy trend Bearing Health Index dla wszystkich wykrytych wentylatorów</span>
+            <h2 class="panel-title">1C. Mapa cieplna rezonansu akustycznego, widmo FFT i historia łożysk (Bearing Health History)</h2>
+            <span class="panel-caption">Korelacja prędkości obrotowej (RPM) z hałasem mikrofonu, analiza harmonicznych FFT oraz 7-dniowy trend kondycji łożysk dla wszystkich wentylatorów</span>
           </div>
         </div>
         <div class="row-wrap" style="gap:8px;align-items:center;">
@@ -740,7 +756,7 @@ export function renderFanAcousticHeatmapPanelHtml(
               aria-selected="${activeTab === 'resonance' ? 'true' : 'false'}"
               class="segmented-btn ${activeTab === 'resonance' ? 'active' : ''}"
               data-fan-heatmap-tab="resonance"
-            >Resonance Heatmap &amp; FFT</button>
+            >Mapa rezonansu i FFT</button>
             <button
               type="button"
               role="tab"
@@ -748,17 +764,18 @@ export function renderFanAcousticHeatmapPanelHtml(
               aria-selected="${activeTab === 'bearing_history' ? 'true' : 'false'}"
               class="segmented-btn ${activeTab === 'bearing_history' ? 'active' : ''}"
               data-fan-heatmap-tab="bearing_history"
+              title="Bearing Health History"
             >
-              Bearing Health History
+              Historia łożysk (Bearing Health History)
               ${alertCount > 0 ? `<span class="fan-tab-alert-pill font-mono">${alertCount}</span>` : ''}
             </button>
           </div>
           <label class="fan-pwm-select-wrap" for="fan-heatmap-blades-select">
-            <span>Blades:</span>
+            <span>Łopatki:</span>
             <select id="fan-heatmap-blades-select" class="field-input font-mono" style="width:auto;padding:4px 8px;font-size:11.5px;">
               ${bladeOptions
                 .map(
-                  (b) => `<option value="${b}" ${hm.bladeCount === b ? 'selected' : ''}>${b} blades</option>`
+                  (b) => `<option value="${b}" ${hm.bladeCount === b ? 'selected' : ''}>${b} łopatek</option>`
                 )
                 .join('')}
             </select>
@@ -769,7 +786,7 @@ export function renderFanAcousticHeatmapPanelHtml(
             class="btn ${hm.capturing ? 'btn-danger' : 'btn-primary'} btn-sm"
           >
             ${iconSvg(hm.capturing ? 'stop' : 'volume-on', 14)}
-            <span>${hm.capturing ? 'Stop Live Mic Capture' : 'Start Live Mic Capture'}</span>
+            <span>${hm.capturing ? 'Zatrzymaj nasłuch mikrofonu' : 'Uruchom nasłuch mikrofonu'}</span>
           </button>
           <button
             id="fan-heatmap-sweep-btn"
@@ -778,14 +795,14 @@ export function renderFanAcousticHeatmapPanelHtml(
             ${hm.sweeping ? 'disabled' : ''}
             title="Przeprowadź szybki skan po całym zakresie 500–5500 RPM, aby zmapować strefy rezonansu i harmoniczne FFT"
           >
-            <span>${hm.sweeping ? 'Sweeping RPM…' : 'Resonance Sweep (500–5500 RPM)'}</span>
+            <span>${hm.sweeping ? 'Skanowanie RPM…' : 'Skan rezonansu (500–5500 RPM)'}</span>
           </button>
           <button
             id="fan-heatmap-clear-btn"
             type="button"
             class="btn btn-secondary btn-sm"
           >
-            <span>Clear Heatmap</span>
+            <span>Wyczyść mapę</span>
           </button>
         </div>
       </div>
@@ -799,14 +816,14 @@ export function renderFanAcousticHeatmapPanelHtml(
           <div id="fan-acoustic-heatmap-d3" class="fan-heatmap-d3-host"></div>
           <div class="fan-heatmap-legend-row">
             <div class="fan-heatmap-legend-scale">
-              <span>Quiet / Low Density</span>
+              <span>Cicho / Niska gęstość</span>
               <span class="fan-heatmap-gradient-bar"></span>
-              <span>Loud / Resonance Peak</span>
+              <span>Głośno / Pik rezonansu</span>
             </div>
             <div class="fan-heatmap-legend-lines font-mono">
-              <span><i class="fan-leg-dot is-baseline"></i> Expected Airflow Baseline (dB)</span>
-              <span><i class="fan-leg-dot is-measured"></i> Measured Mic Mean (dB)</span>
-              <span><i class="fan-leg-dot is-res"></i> Mechanical Resonance / Vibration Zone</span>
+              <span><i class="fan-leg-dot is-baseline"></i> Oczekiwane tło przepływu (dB)</span>
+              <span><i class="fan-leg-dot is-measured"></i> Zmierzona średnia mikrofonu (dB)</span>
+              <span><i class="fan-leg-dot is-res"></i> Strefa rezonansu mechanicznego / wibracji</span>
             </div>
           </div>
         </div>
@@ -814,7 +831,7 @@ export function renderFanAcousticHeatmapPanelHtml(
         <div class="fan-fft-stage" id="fan-acoustic-fft-stage">
           <div class="fan-fft-stage-head">
             <div>
-              <strong class="fan-fft-stage-title">Real-Time FFT Harmonic Spectrum (20 Hz – 2,400 Hz)</strong>
+              <strong class="fan-fft-stage-title">Widmo harmoniczne FFT na żywo (20 Hz – 2 400 Hz)</strong>
               <span class="fan-fft-stage-sub">Identyfikacja częstotliwości podstawowej wału (1× f₀), przejścia łopatek (BPF) i harmonicznych rezonansu mechanicznego z wejścia mikrofonu</span>
             </div>
             <div class="row-wrap" style="gap:8px;align-items:center;">
@@ -823,10 +840,10 @@ export function renderFanAcousticHeatmapPanelHtml(
                 id="fan-heatmap-export-fft-btn"
                 type="button"
                 class="btn btn-secondary btn-sm"
-                title="Pobierz plik JSON z pełnymi danymi koszyków częstotliwości (FFT frequency buckets) bieżącej analizy do zaawansowanej diagnostyki drgań"
+                title="Pobierz plik JSON z pełnymi danymi koszyków częstotliwości (Export FFT Spectrum)"
               >
                 ${iconSvg('download', 14)}
-                <span>Export FFT Spectrum</span>
+                <span>Eksportuj widmo FFT (Export FFT Spectrum)</span>
               </button>
             </div>
           </div>
@@ -844,8 +861,8 @@ export function renderFanAcousticHeatmapPanelHtml(
       <div id="fan-heatmap-tab-bearing-history" class="fan-bearing-history-panel stack-md" ${activeTab === 'bearing_history' ? '' : 'hidden'}>
         <div class="fan-fft-stage-head">
           <div>
-            <strong class="fan-fft-stage-title">Bearing Health History — 7-Day Multi-Channel Progression</strong>
-            <span class="fan-fft-stage-sub">Wielodniowa progresja indeksu zdrowia łożysk (Bearing Health Index 0–100) dla wszystkich wykrytych kanałów wentylatorów względem progu konserwacji zapobiegawczej (${thresholdPct}%)</span>
+            <strong class="fan-fft-stage-title">Historia stanu łożysk (Bearing Health History — 7 dni)</strong>
+            <span class="fan-fft-stage-sub">Wielodniowa progresja indeksu kondycji łożysk (0–100) dla wszystkich kanałów wentylatorów względem progu konserwacji zapobiegawczej (${thresholdPct}%)</span>
           </div>
           <div class="row-wrap" style="gap:8px;align-items:center;">
             <button
@@ -854,7 +871,7 @@ export function renderFanAcousticHeatmapPanelHtml(
               class="btn ${alertCount > 0 ? 'btn-danger' : 'btn-secondary'} btn-sm"
               data-open-bearing-alert="all"
             >
-              <span>${alertCount > 0 ? `⚠ Predictive Bearing Alert (${alertCount})` : 'Predictive Maintenance Guide'}</span>
+              <span>${alertCount > 0 ? `⚠ Alert stanu łożysk (${alertCount})` : 'Poradnik konserwacji łożysk'}</span>
             </button>
           </div>
         </div>
@@ -1619,20 +1636,26 @@ export function renderPredictiveBearingAlertModalHtml(
   const selected =
     (focusedChannelId ? displayList.find((c) => c.id === focusedChannelId) : undefined) || displayList[0];
 
+  const isHealthy = alerted.length === 0;
+
   return `
     <div class="psu-full-history-modal fan-bearing-alert-modal" role="document">
       <div class="psu-full-history-modal-head">
         <div>
-          <h3 id="predictive-bearing-alert-title" class="psu-full-history-modal-title" style="color:#fda4af;">
-            ⚠ Predictive Bearing Health Alert
+          <h3 id="predictive-bearing-alert-title" class="psu-full-history-modal-title" style="color:${isHealthy ? '#34d399' : '#fda4af'};">
+            ${isHealthy ? '✓ Raport stanu łożysk wentylatorów (Predictive Bearing Health Alert)' : '⚠ Alert stanu łożyska wentylatora (Predictive Bearing Health Alert)'}
           </h3>
           <p class="psu-full-history-modal-sub">
-            Fan predicted life expectancy dropped below your ${thresh}% predictive maintenance threshold. Review diagnostics and execute the recommended maintenance steps below.
+            ${
+              isHealthy
+                ? `Wszystkie wykryte wentylatory pracują prawidłowo powyżej progu konserwacji zapobiegawczej (${thresh}%). Poniżej znajduje się szczegółowa diagnostyka wybranego kanału.`
+                : `Szacowana żywotność łożyska spadła poniżej ustawionego progu konserwacji zapobiegawczej (${thresh}%). Sprawdź poniższą diagnostykę i zalecenia serwisowe.`
+            }
           </p>
         </div>
         <div class="psu-full-history-controls">
-          <span class="fan-bearing-alert-thresh-badge font-mono">Threshold: &lt;${thresh}%</span>
-          <button type="button" class="psu-full-history-close-btn" id="predictive-bearing-alert-close-btn" aria-label="Close Predictive Bearing Health Alert">✕ Close</button>
+          <span class="fan-bearing-alert-thresh-badge font-mono">Próg: &lt;${thresh}%</span>
+          <button type="button" class="psu-full-history-close-btn" id="predictive-bearing-alert-close-btn" aria-label="Zamknij okno diagnostyki łożysk">✕ Zamknij</button>
         </div>
       </div>
 
@@ -1660,30 +1683,30 @@ export function renderPredictiveBearingAlertModalHtml(
         selected
           ? `
             <div class="fan-bearing-alert-kpi-grid font-mono">
-              <div class="fan-bearing-alert-kpi is-danger">
-                <span>Fan Channel</span>
+              <div class="fan-bearing-alert-kpi ${isHealthy ? '' : 'is-danger'}">
+                <span>Kanał wentylatora (Fan Channel)</span>
                 <strong>${escHtml(selected.label)} (${escHtml(selected.header)})</strong>
               </div>
-              <div class="fan-bearing-alert-kpi is-danger">
-                <span>Predicted Life Expectancy</span>
-                <strong>${selected.predictedLifeExpectancyPct}% (Threshold ${thresh}%)</strong>
+              <div class="fan-bearing-alert-kpi ${isHealthy ? '' : 'is-danger'}">
+                <span>Szacowana żywotność (Predicted Life Expectancy)</span>
+                <strong>${selected.predictedLifeExpectancyPct}% (Próg ${thresh}%)</strong>
               </div>
               <div class="fan-bearing-alert-kpi">
-                <span>Est. Remaining L10 Life</span>
-                <strong>~${selected.estimatedRemainingHours.toLocaleString('en-US')} hrs</strong>
+                <span>Pozostały czas pracy L10 (Est. Remaining L10 Life)</span>
+                <strong>~${selected.estimatedRemainingHours.toLocaleString('pl-PL')} godz.</strong>
               </div>
               <div class="fan-bearing-alert-kpi">
-                <span>Bearing Health / LT Drift</span>
-                <strong>${selected.bearingHealthIndex}/100 · ${selected.longTermDriftPct.toFixed(2)}% (${escHtml(selected.driftTrend)})</strong>
+                <span>Indeks łożyska / Dryft (Bearing Health / LT Drift)</span>
+                <strong>${selected.bearingHealthIndex}/100 · ${selected.longTermDriftPct.toFixed(2)}% (${selected.driftTrend === 'STABLE' ? 'STABILNY' : selected.driftTrend === 'DRIFTING' ? 'DRYFT' : 'SPADEK'})</strong>
               </div>
             </div>
 
             <div class="fan-bearing-alert-diagnosis">
-              <strong>Diagnostic Summary:</strong> ${escHtml(selected.bearingPrediction)}
+              <strong>Podsumowanie diagnostyczne (Diagnostic Summary:):</strong> ${escHtml(selected.bearingPrediction)}
             </div>
 
             <div class="fan-bearing-alert-instructions">
-              <h4>Actionable Maintenance Instructions</h4>
+              <h4>Zalecane kroki konserwacyjne (Actionable Maintenance Instructions)</h4>
               <ol>
                 ${selected.maintenanceInstructions
                   .map((step) => `<li>${escHtml(step)}</li>`)
@@ -1691,15 +1714,15 @@ export function renderPredictiveBearingAlertModalHtml(
               </ol>
             </div>
           `
-          : '<div class="fan-resonance-ok">All detected fans are operating above the predictive maintenance threshold.</div>'
+          : '<div class="fan-resonance-ok">Wszystkie wykryte wentylatory pracują prawidłowo powyżej progu konserwacji zapobiegawczej.</div>'
       }
 
       <div class="fan-bearing-alert-footer">
         <button type="button" class="btn btn-secondary btn-sm" id="predictive-bearing-alert-history-btn">
-          View Bearing Health History
+          Pokaż historię łożysk (View Bearing Health History)
         </button>
         <button type="button" class="btn btn-primary btn-sm" id="predictive-bearing-alert-ack-btn">
-          Acknowledge Alert
+          Potwierdź i zamknij
         </button>
       </div>
     </div>

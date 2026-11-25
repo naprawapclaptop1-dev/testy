@@ -167,6 +167,53 @@ class GameAudioService {
     });
   }
 
+  public playRocketLaunch(): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const t = ctx.currentTime;
+
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(140, t);
+    osc.frequency.exponentialRampToValueAtTime(520, t + 0.18);
+    osc.frequency.exponentialRampToValueAtTime(95, t + 0.42);
+    gain.gain.setValueAtTime(0.13, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.44);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.45);
+
+    this.triggerFilteredNoise(ctx, 0.38, 1850, 0.11);
+  }
+
+  public playNitroBoost(): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const t = ctx.currentTime;
+
+    const osc1 = ctx.createOscillator();
+    const osc2 = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc1.type = 'sawtooth';
+    osc2.type = 'triangle';
+    osc1.frequency.setValueAtTime(110, t);
+    osc1.frequency.exponentialRampToValueAtTime(380, t + 0.35);
+    osc2.frequency.setValueAtTime(220, t);
+    osc2.frequency.exponentialRampToValueAtTime(760, t + 0.35);
+    gain.gain.setValueAtTime(0.11, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.48);
+    osc1.connect(gain);
+    osc2.connect(gain);
+    gain.connect(ctx.destination);
+    osc1.start(t);
+    osc2.start(t);
+    osc1.stop(t + 0.5);
+    osc2.stop(t + 0.5);
+
+    this.triggerFilteredNoise(ctx, 0.42, 2400, 0.09);
+  }
+
   private triggerFilteredNoise(ctx: AudioContext, durationSec: number, cutoffHz: number, volume: number): void {
     if (!this.noiseBuffer) return;
     const t = ctx.currentTime;

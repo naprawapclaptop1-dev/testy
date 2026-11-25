@@ -71,12 +71,12 @@ export function computePredictiveBearingFailureProbability(
 
   const impactSummary =
     riskLevel === 'CRITICAL'
-      ? 'Severe cumulative bearing wear — high likelihood of premature rotor seizure or severe L10 life loss.'
+      ? 'Krytyczne zużycie łożyska — wysokie ryzyko zatarcia wirnika lub spadku żywotności L10.'
       : riskLevel === 'ELEVATED'
-        ? 'Sustained radial harmonic load accelerating grease film breakdown and long-term bearing degradation.'
+        ? 'Podwyższone drgania harmoniczne przyspieszające zużycie filmu smarnego łożyska.'
         : riskLevel === 'MODERATE'
-          ? 'Moderate tonal vibration stress — monitor Bearing Health Index for progressive L10 life impact.'
-          : 'Low long-term bearing wear risk while PWM clock and frequency stability remain nominal.';
+          ? 'Umiarkowane drgania tonalne — monitoruj indeks kondycji łożyska (Bearing Health Index).'
+          : 'Niskie ryzyko zużycia łożyska — zegar PWM i stabilność obrotów w normie.';
 
   return { probabilityPct, riskLevel, impactSummary };
 }
@@ -197,35 +197,35 @@ export function classifyFanHarmonic(
     Math.abs(hz - target) <= Math.max(absTol, target * relTol);
 
   if (near(f0, 0.14, 6)) {
-    return { harmonicOrder: 1, classification: '1x Shaft (Imbalance)' };
+    return { harmonicOrder: 1, classification: '1x Wał (Niewyważenie)' };
   }
   if (near(f0 * 2, 0.12, 8)) {
-    return { harmonicOrder: 2, classification: '2x Shaft (Misalignment)' };
+    return { harmonicOrder: 2, classification: '2x Wał (Osiowość)' };
   }
   if (near(f0 * 3, 0.1, 9)) {
-    return { harmonicOrder: 3, classification: '3x Shaft (Bearing)' };
+    return { harmonicOrder: 3, classification: '3x Wał (Łożysko / Bearing)' };
   }
   if (near(bpf, 0.08, 12)) {
-    return { harmonicOrder: bladeCount, classification: `Blade Pass (${bladeCount}x BPF)` };
+    return { harmonicOrder: bladeCount, classification: `Łopatki (${bladeCount}x BPF)` };
   }
   if (near(bpf * 2, 0.07, 16)) {
-    return { harmonicOrder: bladeCount * 2, classification: '2x BPF (Aerodynamic)' };
+    return { harmonicOrder: bladeCount * 2, classification: '2x BPF (Aerodynamika)' };
   }
   if (near(bpf * 3, 0.07, 20)) {
-    return { harmonicOrder: bladeCount * 3, classification: '3x BPF (Turbulence)' };
+    return { harmonicOrder: bladeCount * 3, classification: '3x BPF (Turbulencja)' };
   }
 
   const nearestInt = Math.round(order);
   if (nearestInt >= 4 && nearestInt <= 12 && Math.abs(order - nearestInt) <= 0.16) {
-    return { harmonicOrder: nearestInt, classification: `${nearestInt}x Shaft Harmonic` };
+    return { harmonicOrder: nearestInt, classification: `${nearestInt}x Harmoniczna wału` };
   }
   if (hz >= 135 && hz <= 520) {
-    return { harmonicOrder: order, classification: 'Chassis / Structural Resonance' };
+    return { harmonicOrder: order, classification: 'Rezonans obudowy / konstrukcji' };
   }
   if (hz > 950) {
-    return { harmonicOrder: order, classification: 'High-Freq Bearing / Coil Whine' };
+    return { harmonicOrder: order, classification: 'Wysokie pasmo łożyska / cewki' };
   }
-  return { harmonicOrder: order, classification: 'Mechanical Vibration Mode' };
+  return { harmonicOrder: order, classification: 'Drgania mechaniczne' };
 }
 
 export function computePredictiveBearingLifeDetails(
@@ -261,28 +261,28 @@ export function computePredictiveBearingLifeDetails(
   const instructions: string[] = [];
   if (predictedLifeExpectancyPct < 55 || driftTrend === 'WORSENING') {
     instructions.push(
-      `Inspect ${label} (${header}) rotor hub and bearing sleeve for dry lubricant, axial play, or dust buildup.`
+      `Sprawdź piastę wirnika i tuleję łożyska wentylatora ${label} (${header}) pod kątem kurzu, luzu osiowego lub wyschniętego smaru.`
     );
   } else {
     instructions.push(
-      `Schedule preventive cleaning on ${label} (${header}) blades and intake mesh to reduce shaft imbalance.`
+      `Przeprowadź profilaktyczne czyszczenie łopatek i filtra przeciwkurzowego wentylatora ${label} (${header}), aby ograniczyć niewyważenie wirnika.`
     );
   }
 
   if (Math.abs(rpmDutyDeviationPct) >= 10) {
     instructions.push(
-      `Verify 4-pin PWM connector seating on ${header} and confirm BIOS Q-Fan is locked to PWM mode (not DC Voltage).`
+      `Sprawdź osadzenie wtyczki 4-pin PWM na złączu ${header} i upewnij się, że w BIOS (Q-Fan / Smart Fan) wybrano tryb PWM (a nie napięciowy DC).`
     );
   } else {
     instructions.push(
-      `Check ${header} Y-splitter / hub load and verify stable 25 kHz motherboard Super I/O PWM clock.`
+      `Sprawdź obciążenie rozdzielacza Y / koncentratora na złączu ${header} oraz stabilność zegara 25 kHz Super I/O płyty głównej.`
     );
   }
 
   instructions.push(
     predictedLifeExpectancyPct < 50
-      ? `Prepare replacement 4-pin FDB/fluid-dynamic fan (< ${estimatedRemainingHours.toLocaleString('en-US')}h estimated L10 remaining).`
-      : `Adjust low-RPM threshold in the Fan Curve Editor above any resonance band and re-sample PWM stability for 60s.`
+      ? `Przygotuj wymianę wentylatora 4-pin FDB (szacowany pozostały czas pracy L10 poniżej ${estimatedRemainingHours.toLocaleString('pl-PL')} godz.).`
+      : `Dostosuj minimalny próg obrotów w Edytorze Krzywej Wentylatorów powyżej pasma rezonansu i zweryfikuj stabilność PWM przez 60 s.`
   );
 
   return {
@@ -485,7 +485,7 @@ interface PwmChannelSpec {
 const DEFAULT_PWM_CHANNELS: PwmChannelSpec[] = [
   {
     id: 'cpu_fan1',
-    label: 'CPU Cooler Fan',
+    label: 'Wentylator CPU (Chłodzenie procesora)',
     header: 'CPU_FAN1 (4-Pin)',
     rpmRatio: 1.0,
     dutyOffset: 0,
@@ -495,7 +495,7 @@ const DEFAULT_PWM_CHANNELS: PwmChannelSpec[] = [
   },
   {
     id: 'cpu_opt',
-    label: 'CPU OPT / AIO Pump',
+    label: 'Wentylator CPU OPT / Pompa AIO',
     header: 'CPU_OPT (4-Pin)',
     rpmRatio: 0.88,
     dutyOffset: 8,
@@ -505,33 +505,33 @@ const DEFAULT_PWM_CHANNELS: PwmChannelSpec[] = [
   },
   {
     id: 'cha_fan1',
-    label: 'Chassis Intake Front',
+    label: 'Wentylator obudowy — Przód (Wlot)',
     header: 'CHA_FAN1 (4-Pin)',
     rpmRatio: 0.62,
     dutyOffset: -6,
-    baseOffsetRatio: 0.006,
-    jitterRatio: 0.0065,
+    baseOffsetRatio: 0.005,
+    jitterRatio: 0.0055,
     driftMultiplier: 0.9,
   },
   {
     id: 'cha_fan2',
-    label: 'Chassis Exhaust Rear',
+    label: 'Wentylator obudowy — Tył (Wylot)',
     header: 'CHA_FAN2 (Splitter)',
     rpmRatio: 0.58,
     dutyOffset: -4,
-    baseOffsetRatio: -0.036,
-    jitterRatio: 0.015,
-    driftMultiplier: 2.35,
+    baseOffsetRatio: -0.0065,
+    jitterRatio: 0.006,
+    driftMultiplier: 1.25,
   },
   {
     id: 'gpu_fan',
-    label: 'GPU Shroud Fan',
+    label: 'Wentylatory karty graficznej GPU',
     header: 'GPU_PWM (PCIe)',
     rpmRatio: 0.78,
     dutyOffset: 4,
     baseOffsetRatio: 0.0045,
-    jitterRatio: 0.006,
-    driftMultiplier: 1.45,
+    jitterRatio: 0.0055,
+    driftMultiplier: 1.05,
   },
 ];
 
@@ -1130,7 +1130,7 @@ export class FanTestService {
         bearingHealthTier: 'HEALTHY',
         longTermDriftPct: initialDrift,
         driftTrend: 'STABLE',
-        bearingPrediction: 'Healthy bearing & PWM clock stability (low long-term drift).',
+        bearingPrediction: 'Prawidłowa stabilność łożyska i zegara PWM (niski dryft długoterminowy — wentylator sprawny).',
         bearingHealth7DayHistory: this.createInitial7DayBearingHistory(spec, initialScore),
         predictedLifeExpectancyPct: lifeDetails.predictedLifeExpectancyPct,
         estimatedRemainingHours: lifeDetails.estimatedRemainingHours,
@@ -1231,12 +1231,12 @@ export class FanTestService {
 
     const bearingPrediction =
       bearingHealthTier === 'CRITICAL'
-        ? `Critical bearing / PWM degradation (${longTermDriftPct}% LT drift) — inspect rotor friction or replace fan.`
+        ? `Krytyczna degradacja łożyska / sygnału PWM (dryft ${longTermDriftPct}%) — sprawdź opór wirnika lub wymień wentylator.`
         : bearingHealthTier === 'DEGRADED'
-          ? `Elevated long-term drift (${longTermDriftPct}%) — early bearing wear or unstable PWM controller.`
+          ? `Podwyższony długoterminowy dryft (${longTermDriftPct}%) — wczesne zużycie łożyska lub niestabilny kontroler PWM.`
           : bearingHealthTier === 'FAIR'
-            ? `Mild frequency drift (${longTermDriftPct}%) — monitor under sustained thermal load.`
-            : `Healthy long-term PWM stability (${longTermDriftPct}% LT drift).`;
+            ? `Lekki dryft częstotliwości (${longTermDriftPct}%) — monitoruj pod długotrwałym obciążeniem.`
+            : `Prawidłowa stabilność łożyska i sygnału PWM (dryft ${longTermDriftPct}% — wentylator sprawny).`;
 
     return {
       bearingHealthIndex,
@@ -1304,6 +1304,7 @@ export class FanTestService {
     this.pwmState.driftTestEnabled = Boolean(enabled);
     if (!this.pwmState.driftTestEnabled) {
       this.pwmRpmDeviationSince.clear();
+      this.pwmDriftHistory.clear();
     }
     this.samplePwmChannelsOnce();
     return this.getPwmMonitorState();
@@ -1466,20 +1467,16 @@ export class FanTestService {
         const durSec = (rpmDeviationDurationMs / 1000).toFixed(1);
         rpmDutyFaultHint =
           rpmDutyDeviationPct < 0
-            ? `RPM lags duty cycle by ${Math.abs(rpmDutyDeviationPct).toFixed(1)}% for ${durSec}s — potential bearing failure, mechanical drag, or rotor obstruction.`
-            : `RPM overshoots duty cycle by +${rpmDutyDeviationPct.toFixed(1)}% for ${durSec}s — potential PWM controller instability or tachometer noise.`;
+            ? `Obroty RPM są niższe od wypełnienia PWM o ${Math.abs(rpmDutyDeviationPct).toFixed(1)}% przez ${durSec}s — możliwy opór łożyska (bearing), zabrudzenie lub blokada wirnika.`
+            : `Obroty RPM przekraczają wypełnienie PWM o +${rpmDutyDeviationPct.toFixed(1)}% przez ${durSec}s — możliwa niestabilność kontrolera PWM lub zakłócenia tachometru.`;
       } else if (exceedsRpmDutyThreshold) {
         const durSec = (rpmDeviationDurationMs / 1000).toFixed(1);
         const sign = rpmDutyDeviationPct >= 0 ? '+' : '';
-        rpmDutyFaultHint = `RPM/Duty deviation ${sign}${rpmDutyDeviationPct.toFixed(1)}% (>15%) — holding ${durSec}s / 3.0s before warning pulse.`;
+        rpmDutyFaultHint = `Odchyłka RPM/Duty ${sign}${rpmDutyDeviationPct.toFixed(1)}% (>15%) — oczekiwanie ${durSec}s / 3.0s przed wyzwoleniem alarmu.`;
       }
 
-      // Realistic clock offset + load-induced jitter + optional drift injection
-      let relOffset = spec.baseOffsetRatio + wave * spec.jitterRatio * (0.7 + loadFactor * 0.7);
-      if (spec.id === 'cha_fan2' && (loadFactor > 0.5 || t % 5 === 0)) {
-        // Splitter header occasionally drifts just past tolerance under transient load
-        relOffset -= 0.014 + Math.abs(Math.sin(t * 0.5)) * 0.015;
-      }
+      // Realistic clock offset + load-induced jitter + optional drift injection (ONLY when driftBoost > 0!)
+      let relOffset = spec.baseOffsetRatio + wave * spec.jitterRatio * (0.65 + loadFactor * 0.45);
       if (driftBoost > 0) {
         if (spec.id === 'cha_fan2') {
           relOffset -= 0.068 + Math.abs(wave) * 0.02;

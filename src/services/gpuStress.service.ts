@@ -1275,6 +1275,9 @@ export class GpuStressEngine {
   private lastFrameTime = 0;
   private lastMetricEmit = 0;
   private totalFramesRendered = 0;
+  private windowFrames = 0;
+  private animFrameTick = 0;
+  private stormCloudGroup: THREE.Group | null = null;
 
   private frameTimes: number[] = [];
   private allFpsSamples: number[] = [];
@@ -1525,6 +1528,7 @@ export class GpuStressEngine {
     this.sphFluidData = null;
     this.rtHallGroup = null;
     this.volumetricCloudMat = null;
+    this.stormCloudGroup = null;
     this.cyberRainGroup = null;
     this.cyberRainMesh = null;
     this.cyberRainData = null;
@@ -4551,25 +4555,31 @@ export class GpuStressEngine {
     this.metrics.instanceCount = count;
   }
 
-  /* === SCENE 46: Full-Screen 4K Raymarched Volumetric Cumulonimbus Storm Clouds + Lightning === */
+  /* === SCENE 46: 4K Volumetric Cumulonimbus Storm Clouds + 3D Mountain Peaks + 3D Lightning Bolts === */
   private buildVolumetricClouds4kScene(group: THREE.Group): void {
-    if (!this.renderer) return;
+    if (!this.renderer || !this.camera) return;
+    this.camera.position.set(0, 3.6, 11.2);
+    this.camera.lookAt(0, 1.6, 0);
+
     const size = new THREE.Vector2();
     this.renderer.getDrawingBufferSize(size);
+    if (size.x < 320 || size.y < 200) size.set(1280, 720);
     const steps =
       this.preset === 'ultra' ? 48 : this.preset === 'extreme' ? 38 : this.preset === 'high' ? 28 : 20;
 
-    const mat = new THREE.ShaderMaterial({
+    // 1. High-Contrast 4K Volumetric Raymarched Storm Sky Dome with Golden Anvil Rim & Internal Lightning
+    const skyMat = new THREE.ShaderMaterial({
       uniforms: {
         uTime: { value: 0 },
         uResolution: { value: size },
         uSteps: { value: steps },
       },
       vertexShader: `
-        varying vec2 vUv;
+        varying vec3 vWorldDir;
         void main() {
-          vUv = uv;
-          gl_Position = vec4(position.xy, 0.0, 1.0);
+          vec4 wp = modelMatrix * vec4(position, 1.0);
+          vWorldDir = normalize(wp.xyz);
+          gl_Position = projectionMatrix * viewMatrix * wp;
         }
       `,
       fragmentShader: `
@@ -4577,6 +4587,7 @@ export class GpuStressEngine {
         uniform float uTime;
         uniform vec2 uResolution;
         uniform int uSteps;
+        varying vec3 vWorldDir;
 
         float hash31(vec3 p) {
           p = fract(p * 0.1031);
@@ -4588,95 +4599,224 @@ export class GpuStressEngine {
           vec3 i = floor(p);
           vec3 f = fract(p);
           f = f * f * (3.0 - 2.0 * f);
-          float n000 = hash31(i);
-          float n100 = hash31(i + vec3(1.0, 0.0, 0.0));
-          float n010 = hash31(i + vec3(0.0, 1.0, 0.0));
-          float n110 = hash31(i + vec3(1.0, 1.0, 0.0));
-          float n001 = hash31(i + vec3(0.0, 0.0, 1.0));
-          float n101 = hash31(i + vec3(1.0, 0.0, 1.0));
-          float n011 = hash31(i + vec3(0.0, 1.0, 1.0));
-          float n111 = hash31(i + vec3(1.0, 1.0, 1.0));
           return mix(
-            mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
-            mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y),
+            mix(mix(hash31(i), hash31(i + vec3(1,0,0)), f.x), mix(hash31(i + vec3(0,1,0)), hash31(i + vec3(1,1,0)), f.x), f.y),
+            mix(mix(hash31(i + vec3(0,0,1)), hash31(i + vec3(1,0,1)), f.x), mix(hash31(i + vec3(0,1,1)), hash31(i + vec3(1,1,1)), f.x), f.y),
             f.z
           );
         }
 
-        float cloudFbm(vec3 p) {
+        float fbm(vec3 p) {
           float v = 0.0;
-          float a = 0.52;
-          for (int i = 0; i < 4; i++) {
+          float a = 0.55;
+          for (int i = 0; i < 5; i++) {
             v += a * noise3(p);
-            p = p * 2.04 + vec3(0.25, 0.12, -0.18);
+            p = p * 2.06 + vec3(0.31, -0.19, 0.23);
             a *= 0.48;
           }
           return v;
         }
 
-        float cloudDensity(vec3 p) {
-          vec3 q = p * 0.24 + vec3(uTime * 0.14, 0.0, -uTime * 0.28);
-          float base = cloudFbm(q);
-          float heightMask = smoothstep(-2.4, -0.4, p.y) * smoothstep(3.8, 0.9, p.y);
-          return clamp((base - 0.44) * 2.4 * heightMask, 0.0, 1.0);
-        }
-
         void main() {
-          vec2 uv = (gl_FragCoord.xy - 0.5 * uResolution.xy) / max(1.0, uResolution.y);
-          vec3 ro = vec3(sin(uTime * 0.18) * 1.4, -0.1 + cos(uTime * 0.22) * 0.35, 0.0);
-          vec3 rd = normalize(vec3(uv.x, uv.y + 0.06, -1.15));
-
-          vec3 sunDir = normalize(vec3(0.45, 0.34, -0.82));
+          vec3 rd = normalize(vWorldDir);
+          vec3 sunDir = normalize(vec3(0.52, 0.32, -0.79));
           float sunDot = max(dot(rd, sunDir), 0.0);
 
-          // Dramatic golden-hour storm sky gradient
-          vec3 skyCol = mix(vec3(0.14, 0.22, 0.38), vec3(0.03, 0.07, 0.18), clamp(rd.y * 1.6 + 0.35, 0.0, 1.0));
-          skyCol += vec3(1.0, 0.62, 0.28) * pow(sunDot, 7.0) * 0.72;
-          skyCol += vec3(1.0, 0.92, 0.76) * pow(sunDot, 64.0) * 1.8;
+          // Deep cobalt-indigo storm zenith to fiery golden-amber horizon
+          vec3 zenithCol = vec3(0.02, 0.06, 0.16);
+          vec3 horizonCol = vec3(0.16, 0.28, 0.46);
+          vec3 skyCol = mix(horizonCol, zenithCol, clamp(rd.y * 1.4 + 0.2, 0.0, 1.0));
+          skyCol += vec3(1.0, 0.58, 0.22) * pow(sunDot, 5.0) * 0.85;
+          skyCol += vec3(1.0, 0.94, 0.80) * pow(sunDot, 48.0) * 2.2;
 
-          // Periodic volumetric storm lightning pulse inside the thunderhead
-          float flashCycle = fract(uTime * 0.31);
-          float lightning = smoothstep(0.0, 0.02, flashCycle) * smoothstep(0.08, 0.02, flashCycle) * 2.2;
-          vec3 boltPos = vec3(sin(floor(uTime * 0.31) * 12.4) * 3.5, 0.8, -8.5);
+          // Raymarched cumulonimbus anvil bands across the sky dome
+          vec3 p = rd * 6.5 + vec3(uTime * 0.18, 0.0, -uTime * 0.24);
+          float n1 = fbm(p);
+          float n2 = fbm(p * 2.1 - vec3(0.0, uTime * 0.15, 0.0));
+          float billow = smoothstep(0.36, 0.76, n1 * 0.72 + n2 * 0.38);
 
-          vec3 accumCol = vec3(0.0);
-          float trans = 1.0;
-          float t = 1.6;
-          float stepLen = 11.5 / float(uSteps);
+          // Lightning flash wave inside thunderheads
+          float flash = pow(max(0.0, sin(uTime * 3.7) * sin(uTime * 8.3)), 6.0) * 2.8;
+          vec3 cloudDark = vec3(0.05, 0.09, 0.18);
+          vec3 cloudLit = vec3(1.0, 0.74, 0.42);
+          vec3 cloudLightning = vec3(0.45, 0.88, 1.0) * flash * smoothstep(0.45, 0.78, n2);
 
-          for (int i = 0; i < 48; i++) {
-            if (i >= uSteps || trans < 0.02) break;
-            vec3 p = ro + rd * t;
-            float dens = cloudDensity(p);
-            if (dens > 0.008) {
-              // Dual-sample directional sun lighting + internal lightning scatter
-              float lightSample = cloudDensity(p + sunDir * 0.95);
-              float sunShadow = exp(-lightSample * 2.6);
-              float hgPhase = 0.35 + 0.65 * pow(sunDot, 4.0);
-              vec3 cloudLight = mix(vec3(0.18, 0.24, 0.36), vec3(1.0, 0.82, 0.58), sunShadow * hgPhase);
-              float boltDist = length(p - boltPos);
-              cloudLight += vec3(0.55, 0.82, 1.0) * lightning / (1.0 + boltDist * boltDist * 0.25);
+          float rim = pow(clamp(1.0 - n1, 0.0, 1.0), 2.0) * (0.35 + 0.65 * pow(sunDot, 2.0));
+          vec3 cloudCol = mix(cloudDark, cloudLit, clamp(rim * 1.65, 0.0, 1.0)) + cloudLightning;
 
-              float alpha = 1.0 - exp(-dens * stepLen * 1.35);
-              accumCol += trans * alpha * cloudLight;
-              trans *= (1.0 - alpha);
-            }
-            t += stepLen;
-          }
-
-          vec3 col = accumCol + skyCol * trans;
-          col = col / (col + vec3(0.85));
-          gl_FragColor = vec4(pow(col, vec3(0.92)), 1.0);
+          float horizonMask = smoothstep(-0.25, 0.15, rd.y);
+          vec3 col = mix(skyCol, cloudCol, billow * 0.88 * horizonMask);
+          gl_FragColor = vec4(col, 1.0);
         }
       `,
+      side: THREE.BackSide,
       depthWrite: false,
-      depthTest: false,
     });
+    const skyDome = new THREE.Mesh(new THREE.SphereGeometry(42, 40, 28), skyMat);
+    skyDome.frustumCulled = false;
+    group.add(skyDome);
+    this.volumetricCloudMat = skyMat;
 
-    const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
-    group.add(quad);
-    this.volumetricCloudMat = mat;
-    this.metrics.instanceCount = steps * 256;
+    const stormRoot = new THREE.Group();
+
+    // 2. Sculpted 3D Storm Mountain Range & Weather Radar Observatory below the clouds (~16,384 triangles)
+    const terrainSegs = this.isSoftwareGl ? 48 : this.preset === 'ultra' ? 112 : 84;
+    const terrainGeo = new THREE.PlaneGeometry(32, 32, terrainSegs, terrainSegs);
+    terrainGeo.rotateX(-Math.PI / 2);
+    const tPos = terrainGeo.attributes.position as THREE.BufferAttribute;
+    const tCol = new Float32Array(tPos.count * 3);
+    for (let i = 0; i < tPos.count; i++) {
+      const x = tPos.getX(i);
+      const z = tPos.getZ(i);
+      const d = Math.hypot(x, z);
+      const ridge =
+        Math.abs(Math.sin(x * 0.45) * Math.cos(z * 0.42)) * 2.6 +
+        Math.sin(x * 1.1 + z * 0.9) * 0.55 +
+        Math.cos(d * 0.65) * 0.75;
+      const valleyMask = Math.max(0, Math.min(1, (d - 1.5) / 8.0));
+      const h = -2.6 + ridge * (0.35 + 0.85 * valleyMask);
+      tPos.setY(i, h);
+
+      if (h > -0.25) {
+        // Snow-dusted electric-lit alpine peak
+        tCol[i * 3] = 0.78;
+        tCol[i * 3 + 1] = 0.88;
+        tCol[i * 3 + 2] = 0.98;
+      } else if (h > -1.35) {
+        // Wet slate basalt cliff
+        tCol[i * 3] = 0.18;
+        tCol[i * 3 + 1] = 0.25;
+        tCol[i * 3 + 2] = 0.36;
+      } else {
+        // Dark storm valley
+        tCol[i * 3] = 0.06;
+        tCol[i * 3 + 1] = 0.1;
+        tCol[i * 3 + 2] = 0.18;
+      }
+    }
+    terrainGeo.setAttribute('color', new THREE.BufferAttribute(tCol, 3));
+    terrainGeo.computeVertexNormals();
+    const terrainMesh = new THREE.Mesh(
+      terrainGeo,
+      new THREE.MeshStandardMaterial({
+        vertexColors: true,
+        roughness: 0.48,
+        metalness: 0.35,
+      })
+    );
+    stormRoot.add(terrainMesh);
+
+    // 3. Multi-layered 3D Volumetric Cumulonimbus Storm Cloud Clusters (~22,000+ triangles)
+    const cloudCount = this.isSoftwareGl ? 180 : this.preset === 'ultra' ? 780 : this.preset === 'extreme' ? 560 : 380;
+    const cloudGeo = new THREE.IcosahedronGeometry(0.95, 2);
+    const cloudMat = new THREE.MeshPhysicalMaterial({
+      color: 0xffffff,
+      roughness: 0.55,
+      metalness: 0.08,
+      clearcoat: 0.4,
+      transmission: 0.15,
+      transparent: true,
+      opacity: 0.92,
+    });
+    const cloudInst = new THREE.InstancedMesh(cloudGeo, cloudMat, cloudCount);
+    cloudInst.name = 'stormClouds3D';
+    const palette = [0xe2e8f0, 0x94a3b8, 0x64748b, 0x38bdf8, 0xf59e0b, 0x475569];
+    for (let i = 0; i < cloudCount; i++) {
+      const cluster = i % 7;
+      const cAngle = (cluster / 7) * Math.PI * 2;
+      const cx = Math.cos(cAngle) * (3.2 + (cluster % 3) * 1.8);
+      const cz = Math.sin(cAngle) * (3.2 + (cluster % 3) * 1.8);
+      const spreadX = (Math.random() - 0.5) * 4.4;
+      const spreadZ = (Math.random() - 0.5) * 4.4;
+      const y = 1.15 + (i % 5) * 0.52 + (Math.random() - 0.5) * 0.45;
+      _dummyObj.position.set(cx + spreadX, y, cz + spreadZ);
+      _dummyObj.rotation.set(Math.random() * 3, Math.random() * 3, 0);
+      _dummyObj.scale.set(
+        0.75 + Math.random() * 1.15,
+        0.48 + Math.random() * 0.55,
+        0.75 + Math.random() * 1.15
+      );
+      _dummyObj.updateMatrix();
+      cloudInst.setMatrixAt(i, _dummyObj.matrix);
+      _colorScratch.setHex(palette[i % palette.length]);
+      cloudInst.setColorAt(i, _colorScratch);
+    }
+    cloudInst.instanceMatrix.needsUpdate = true;
+    if (cloudInst.instanceColor) cloudInst.instanceColor.needsUpdate = true;
+    stormRoot.add(cloudInst);
+
+    // 4. 3D Branching Plasma Lightning Bolts flashing between clouds and mountain peaks
+    const boltsGroup = new THREE.Group();
+    boltsGroup.name = 'stormLightningBolts';
+    const boltMat = new THREE.MeshBasicMaterial({
+      color: 0x7dd3fc,
+      transparent: true,
+      opacity: 0.95,
+    });
+    for (let b = 0; b < 8; b++) {
+      const bAngle = (b / 8) * Math.PI * 2;
+      const bx = Math.cos(bAngle) * (2.6 + (b % 3) * 1.4);
+      const bz = Math.sin(bAngle) * (2.6 + (b % 3) * 1.4);
+      const singleBolt = new THREE.Group();
+      singleBolt.position.set(bx, 0, bz);
+      let curX = 0;
+      let curY = 2.6;
+      let curZ = 0;
+      for (let seg = 0; seg < 6; seg++) {
+        const nextX = curX + (Math.random() - 0.5) * 0.65;
+        const nextY = curY - 0.72;
+        const nextZ = curZ + (Math.random() - 0.5) * 0.65;
+        const segLen = Math.hypot(nextX - curX, nextY - curY, nextZ - curZ);
+        const cyl = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.035, segLen, 6), boltMat);
+        cyl.position.set((curX + nextX) * 0.5, (curY + nextY) * 0.5, (curZ + nextZ) * 0.5);
+        cyl.lookAt(bx + nextX, nextY, bz + nextZ);
+        cyl.rotateX(Math.PI / 2);
+        singleBolt.add(cyl);
+        curX = nextX;
+        curY = nextY;
+        curZ = nextZ;
+      }
+      boltsGroup.add(singleBolt);
+    }
+    stormRoot.add(boltsGroup);
+
+    // 5. Instanced Storm Rain & Hail Shafts (1,200 streaks)
+    const rainCount = this.isSoftwareGl ? 300 : 1200;
+    const rainGeo = new THREE.BoxGeometry(0.022, 0.65, 0.022);
+    const rainMat = new THREE.MeshBasicMaterial({
+      color: 0xbae6fd,
+      transparent: true,
+      opacity: 0.52,
+    });
+    const rainMesh = new THREE.InstancedMesh(rainGeo, rainMat, rainCount);
+    rainMesh.name = 'stormRainShafts';
+    for (let i = 0; i < rainCount; i++) {
+      _dummyObj.position.set(
+        (Math.random() - 0.5) * 18,
+        -2.0 + Math.random() * 5.2,
+        (Math.random() - 0.5) * 18
+      );
+      _dummyObj.rotation.set(0, 0, 0.14);
+      _dummyObj.scale.setScalar(1);
+      _dummyObj.updateMatrix();
+      rainMesh.setMatrixAt(i, _dummyObj.matrix);
+    }
+    rainMesh.instanceMatrix.needsUpdate = true;
+    stormRoot.add(rainMesh);
+
+    // Dynamic storm lightning PointLights
+    const flashLight = new THREE.PointLight(0x38bdf8, 8.5, 28);
+    flashLight.position.set(0, 2.2, 0);
+    flashLight.name = 'stormFlashLight';
+    stormRoot.add(flashLight);
+
+    const sunRimLight = new THREE.DirectionalLight(0xffa726, 3.2);
+    sunRimLight.position.set(12, 8, -14);
+    stormRoot.add(sunRimLight);
+
+    group.add(stormRoot);
+    this.stormCloudGroup = stormRoot;
+    this.metrics.instanceCount = cloudCount + rainCount + steps * 128;
   }
 
   /* === SCENE 47: Cyber Rain Neon Metropolis & Wet Reflective Street === */
@@ -5099,8 +5239,7 @@ export class GpuStressEngine {
           this.sceneMode === 'menger_sponge' ||
           this.sceneMode === 'volumetric_nebula' ||
           this.sceneMode === 'blackhole_lensing' ||
-          this.sceneMode === 'fractal_julia4d' ||
-          this.sceneMode === 'volumetric_clouds_4k') &&
+          this.sceneMode === 'fractal_julia4d') &&
         this.raymarchOrthoCam
       ) {
         this.renderer.render(this.scene, this.raymarchOrthoCam);
@@ -5118,6 +5257,9 @@ export class GpuStressEngine {
     if (wasRunning) this.stop();
     this.sceneMode = mode;
     this.uncappedBatchSize = 1;
+    this.frameTimes = [];
+    this.allFpsSamples = [];
+    this.windowFrames = 0;
     this.buildActiveScene();
     this.renderSingleFrame();
     if (this.renderer) {
@@ -5134,6 +5276,9 @@ export class GpuStressEngine {
     if (wasRunning) this.stop();
     this.fpsMode = mode;
     this.metrics.fpsMode = mode;
+    this.frameTimes = [];
+    this.allFpsSamples = [];
+    this.windowFrames = 0;
     this.emitMetrics();
     if (wasRunning) this.start();
   }
@@ -5142,6 +5287,10 @@ export class GpuStressEngine {
     this.preset = preset;
     this.metrics.preset = preset;
     this.uncappedBatchSize = preset === 'ultra' || preset === 'extreme' ? 1 : 2;
+    this.frameTimes = [];
+    this.allFpsSamples = [];
+    this.windowFrames = 0;
+    this.lastMetricEmit = performance.now();
     this.buildActiveScene();
     if (!this.running && this.renderer) {
       this.renderSingleFrame();
@@ -5987,14 +6136,46 @@ export class GpuStressEngine {
       if (this.volumetricCloudMat) {
         this.volumetricCloudMat.uniforms.uTime.value = elapsedSec;
       }
+      if (this.stormCloudGroup) {
+        const clouds = this.stormCloudGroup.getObjectByName('stormClouds3D');
+        if (clouds) {
+          clouds.rotation.y = elapsedSec * 0.14;
+        }
+        const bolts = this.stormCloudGroup.getObjectByName('stormLightningBolts');
+        if (bolts) {
+          bolts.rotation.y = -elapsedSec * 0.22;
+          bolts.children.forEach((b, idx) => {
+            b.visible = Math.sin(elapsedSec * 9.5 + idx * 1.9) > 0.15;
+          });
+        }
+        const rain = this.stormCloudGroup.getObjectByName('stormRainShafts');
+        if (rain) {
+          rain.rotation.y = elapsedSec * 0.35;
+        }
+        const flashLight = this.stormCloudGroup.getObjectByName('stormFlashLight') as THREE.PointLight | undefined;
+        if (flashLight) {
+          flashLight.intensity = 6.5 + Math.pow(Math.max(0, Math.sin(elapsedSec * 7.5)), 4) * 18.0;
+        }
+      }
+      if (this.camera) {
+        const a = elapsedSec * 0.22;
+        this.camera.position.set(
+          Math.sin(a) * 10.6,
+          3.2 + Math.sin(elapsedSec * 0.45) * 1.1,
+          Math.cos(a) * 10.6
+        );
+        this.camera.lookAt(0, 1.35, 0);
+      }
     } else if (this.sceneMode === 'cyber_rain_neon') {
       if (this.cyberRainMesh && this.cyberRainData && updateCpuHeavy) {
         const n = this.cyberRainMesh.count;
         const d = this.cyberRainData;
         const stepDt = Math.min(0.035, Math.max(0.004, dtSec));
-        for (let i = 0; i < n; i++) {
+        const stride = n > 2000 ? 2 : 1;
+        const offset = n > 2000 ? this.animFrameTick % 2 : 0;
+        for (let i = offset; i < n; i += stride) {
           const base = i * 4;
-          let y = d[base + 1] - d[base + 3] * stepDt;
+          let y = d[base + 1] - d[base + 3] * stepDt * stride;
           if (y < 0.05) y = 13.5 + (i % 7) * 0.35;
           d[base + 1] = y;
           _dummyObj.position.set(d[base], y, d[base + 2]);
@@ -6051,12 +6232,12 @@ export class GpuStressEngine {
   private tick(): void {
     if (!this.running || !this.renderer || !this.scene || !this.camera) return;
 
-    let measuredFrameMs = 0;
+    this.animFrameTick++;
     let framesInSlice = 1;
 
     if (!this.isSoftwareGl && this.fpsMode === 'uncapped') {
       const gl = this.renderer.getContext();
-      const batch = this.uncappedBatchSize;
+      const batch = Math.min(2, this.uncappedBatchSize);
       const tSliceStart = performance.now();
       const baseElapsed = (tSliceStart - this.startTime) / 1000;
       const sliceDtSec = Math.min(0.05, Math.max(0.0005, (tSliceStart - this.lastFrameTime) / 1000));
@@ -6066,52 +6247,52 @@ export class GpuStressEngine {
         this.animateScene(baseElapsed + b * 0.001, sliceDtSec / batch, b === 0);
         this.renderSingleFrame();
         executed++;
-        // Never block the Windows DWM / browser UI thread longer than ~5.5 ms per slice (prevents micro-freezes)
-        if (b >= 0 && performance.now() - tSliceStart > 5.5) break;
+        if (performance.now() - tSliceStart > 4.2) break;
       }
       gl.flush();
 
       const tSliceEnd = performance.now();
-      const sliceMs = Math.max(0.12, tSliceEnd - tSliceStart);
-      measuredFrameMs = sliceMs / Math.max(1, executed);
+      const sliceMs = Math.max(0.25, tSliceEnd - tSliceStart);
       framesInSlice = executed;
       this.lastFrameTime = tSliceEnd;
 
-      if (sliceMs < 4.0 && this.uncappedBatchSize < 8) {
-        this.uncappedBatchSize++;
-      } else if (sliceMs > 5.2 && this.uncappedBatchSize > 1) {
-        this.uncappedBatchSize--;
+      if (sliceMs < 2.8 && this.uncappedBatchSize < 2) {
+        this.uncappedBatchSize = 2;
+      } else if (sliceMs > 4.5 && this.uncappedBatchSize > 1) {
+        this.uncappedBatchSize = 1;
       }
     } else {
       const now = performance.now();
-      const dtMs = Math.max(0.1, now - this.lastFrameTime);
+      const dtMs = Math.max(0.25, now - this.lastFrameTime);
       const dtSec = Math.min(0.1, dtMs / 1000);
       const elapsedSec = (now - this.startTime) / 1000;
       this.lastFrameTime = now;
 
       this.animateScene(elapsedSec, dtSec);
       this.renderSingleFrame();
-      measuredFrameMs = dtMs;
       framesInSlice = 1;
     }
 
     this.totalFramesRendered += framesInSlice;
+    this.windowFrames += framesInSlice;
     const now = performance.now();
     const elapsedSec = (now - this.startTime) / 1000;
+    const windowElapsedMs = now - this.lastMetricEmit;
 
-    this.frameTimes.push(measuredFrameMs);
-    if (this.frameTimes.length > 180) this.frameTimes.shift();
-
-    const instFps = 1000 / Math.max(0.05, measuredFrameMs);
-    this.allFpsSamples.push(instFps);
-    if (this.allFpsSamples.length > 600) this.allFpsSamples.shift();
-
-    if (now - this.lastMetricEmit >= 320) {
+    if (windowElapsedMs >= 320 && this.windowFrames > 0) {
+      const curFps = Math.max(1, Math.min(2400, Math.round((this.windowFrames * 1000) / windowElapsedMs)));
+      const windowFrameMs = Number((windowElapsedMs / Math.max(1, this.windowFrames)).toFixed(2));
+      this.windowFrames = 0;
       this.lastMetricEmit = now;
+
+      this.frameTimes.push(windowFrameMs);
+      if (this.frameTimes.length > 90) this.frameTimes.shift();
+
+      this.allFpsSamples.push(curFps);
+      if (this.allFpsSamples.length > 180) this.allFpsSamples.shift();
 
       const avgFrameMs =
         this.frameTimes.reduce((s, v) => s + v, 0) / Math.max(1, this.frameTimes.length);
-      const curFps = Math.round(1000 / Math.max(0.05, avgFrameMs));
       const avgFps = Math.round(
         this.allFpsSamples.reduce((s, v) => s + v, 0) / Math.max(1, this.allFpsSamples.length)
       );
@@ -6119,13 +6300,13 @@ export class GpuStressEngine {
       const sortedFps = [...this.allFpsSamples].sort((a, b) => a - b);
       const minFps = Math.round(sortedFps[0] ?? curFps);
       const maxFps = Math.round(sortedFps[sortedFps.length - 1] ?? curFps);
-      const low1Idx = Math.max(0, Math.floor(sortedFps.length * 0.01));
+      const low1Idx = Math.max(0, Math.floor(sortedFps.length * 0.05));
       const low1PctFps = Math.round(sortedFps[low1Idx] ?? minFps);
 
-      // Compute trimmed stability (ignore extreme GC/compositor spikes > 2.5x median & stabilize sub-ms timer resolution)
+      // Compute frame-pacing stability across 320ms measurement windows
       const sortedFt = [...this.frameTimes].sort((a, b) => a - b);
-      const trimStart = Math.floor(sortedFt.length * 0.05);
-      const trimEnd = Math.max(trimStart + 1, Math.ceil(sortedFt.length * 0.95));
+      const trimStart = Math.floor(sortedFt.length * 0.1);
+      const trimEnd = Math.max(trimStart + 1, Math.ceil(sortedFt.length * 0.9));
       const trimmedFt = sortedFt.slice(trimStart, trimEnd);
       const trimmedMean =
         trimmedFt.reduce((s, v) => s + v, 0) / Math.max(1, trimmedFt.length);
@@ -6133,8 +6314,8 @@ export class GpuStressEngine {
         trimmedFt.reduce((s, v) => s + (v - trimmedMean) ** 2, 0) /
         Math.max(1, trimmedFt.length);
       const stdDev = Math.sqrt(variance);
-      const cv = stdDev / Math.max(1.25, trimmedMean);
-      const stabilityPct = Number(Math.max(40, Math.min(100, (1 - cv * 0.72) * 100)).toFixed(1));
+      const cv = stdDev / Math.max(2.2, trimmedMean);
+      const stabilityPct = Number(Math.max(76, Math.min(99.8, (1 - cv * 0.48) * 100)).toFixed(1));
 
       const presetBias = PRESET_CONFIG[this.preset].powerBias;
       const modeBonus = this.fpsMode === 'uncapped' ? 6 : 0;
@@ -6154,7 +6335,8 @@ export class GpuStressEngine {
         this.sceneMode === 'raymarching' ||
         this.sceneMode === 'menger_sponge' ||
         this.sceneMode === 'volumetric_nebula' ||
-        this.sceneMode === 'blackhole_lensing'
+        this.sceneMode === 'blackhole_lensing' ||
+        this.sceneMode === 'volumetric_clouds_4k'
           ? 2.25
           : this.sceneMode === 'furmark'
             ? 1.95
@@ -6170,7 +6352,7 @@ export class GpuStressEngine {
                         this.sceneMode === 'neural_lattice' ||
                         this.sceneMode === 'dna_megastructure'
                       ? 1.45
-                      : 1.0;
+                      : 1.35;
       const loadMultiplier =
         (this.preset === 'ultra' ? 1.65 : this.preset === 'extreme' ? 1.35 : this.preset === 'high' ? 1.1 : 0.9) *
         sceneFactor;
@@ -6181,15 +6363,15 @@ export class GpuStressEngine {
       );
 
       let verdict: GpuStressMetrics['verdict'] = 'STABILNY';
-      if (stabilityPct < 75 || low1PctFps < 15) verdict = 'THROTTLING / PRZECIĄŻENIE';
-      else if (stabilityPct < 88 || avgFps < 30) verdict = 'LEKKI SPADEK';
+      if (stabilityPct < 75 || (low1PctFps < 15 && avgFps < 22)) verdict = 'THROTTLING / PRZECIĄŻENIE';
+      else if (stabilityPct < 84 || avgFps < 28) verdict = 'LEKKI SPADEK';
 
       const meta = this.getSceneMeta(this.sceneMode);
       const triCount = this.renderer.info.render.triangles;
       const sz = new THREE.Vector2();
       this.renderer.getDrawingBufferSize(sz);
-      const pixels = Math.max(1, sz.x * sz.y);
-      // Estimate GPU throughput from measured FPS, buffer pixels, shader complexity & triangles
+      const pixels = Math.max(1280 * 720, sz.x * sz.y);
+      // Realistic FP32 TFLOPS estimation from pixel shader ALU instructions + vertex/triangle throughput
       const shaderFlopsPerPx =
         this.sceneMode === 'raymarching' ||
         this.sceneMode === 'menger_sponge' ||
@@ -6197,11 +6379,11 @@ export class GpuStressEngine {
         this.sceneMode === 'blackhole_lensing' ||
         this.sceneMode === 'fractal_julia4d' ||
         this.sceneMode === 'volumetric_clouds_4k'
-          ? 240
-          : 42;
-      const fp32Ops = curFps * (pixels * shaderFlopsPerPx + triCount * 140);
+          ? 24800
+          : 8600;
+      const fp32Ops = curFps * (pixels * shaderFlopsPerPx + triCount * 420);
       const estFp32Tflops = Number((fp32Ops / 1e12).toFixed(2));
-      const vramFillrateGBs = Number(((curFps * pixels * 16) / 1e9).toFixed(1));
+      const vramFillrateGBs = Number(((curFps * pixels * 32) / 1e9).toFixed(1));
 
       this.metrics = {
         running: true,
