@@ -6,6 +6,23 @@ export interface AppFeedbackEntry {
   author: string;
   rating?: number;
   createdAt: number;
+  pcFingerprint?: string;
+}
+
+export interface PcFeedbackSubmissionRecord {
+  pcFingerprint: string;
+  entryId: string;
+  category: AppFeedbackEntry['category'];
+  author: string;
+  message: string;
+  rating?: number;
+  submittedAt: number;
+}
+
+export interface PcRatingSubmissionRecord {
+  pcFingerprint: string;
+  rating: number;
+  submittedAt: number;
 }
 
 interface AppRatingState {
@@ -13,13 +30,35 @@ interface AppRatingState {
   totalVotes: number;
   ratingSum: number;
   lastUpdated: number;
+  ratedByPcFingerprints?: string[];
+}
+
+export interface AddFeedbackResult {
+  ok: boolean;
+  alreadySubmitted: boolean;
+  pcFingerprint: string;
+  entries: AppFeedbackEntry[];
+  existingRecord?: PcFeedbackSubmissionRecord | null;
+}
+
+export interface SaveRatingResult {
+  ok: boolean;
+  alreadySubmitted: boolean;
+  pcFingerprint: string;
+  state: AppRatingState;
 }
 
 const FEEDBACK_STORAGE_KEY = 'systempulse_user_feedback_v1';
 const RATING_STORAGE_KEY = 'systempulse_app_rating_v1';
+const PC_FINGERPRINT_KEY = 'systempulse_pc_fingerprint_v1';
+const PC_FEEDBACK_LOCK_KEY = 'systempulse_pc_feedback_lock_v1';
+const PC_RATING_LOCK_KEY = 'systempulse_pc_rating_lock_v1';
 
 let feedbackNotice: string | null = null;
 let selectedStars = 5;
+let cachedHardwareFingerprint: string | null = null;
+let serverSyncInFlight = false;
+let serverSyncDone = false;
 
 function escHtml(text: string): string {
   return text
@@ -27,6 +66,236 @@ function escHtml(text: string): string {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+function fnv1aHex(input: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).toUpperCase().padStart(8, '0');
+}
+
+/**
+ * Generates a stable deterministic PC fingerprint derived from hardware/browser
+ * properties (CPU cores, deviceMemory, platform, screen geometry, timezone,
+ * optional GPU renderer) so each PC is restricted to submitting feedback once.
+ */
+export function computePcHardwareFingerprint(extraSeed?: {
+  gpuRenderer?: string;
+  os?: string;
+  cpuCores?: number;
+}): string {
+  const nav = typeof navigator !== 'undefined' ? (navigator as any) : null;
+  const scr = typeof screen !== 'undefined' ? screen : null;
+  let tz = 'UTC';
+  try {
+    tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  } catch {
+    tz = 'UTC';
+  }
+
+  let glRenderer = extraSeed?.gpuRenderer || '';
+  if (!glRenderer && typeof document !== 'undefined') {
+    try {
+      const canvas = document.createElement('canvas');
+      const gl =
+        canvas.getContext('webgl2') ||
+        canvas.getContext('webgl') ||
+        (canvas.getContext('experimental-webgl') as WebGLRenderingContext | null);
+      if (gl) {
+        const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+        glRenderer = dbg
+          ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) || '')
+          : String(gl.getParameter(gl.RENDERER) || '');
+      }
+    } catch {
+      // ignore in headless/Node environments
+    }
+  }
+
+  const rawParts = [
+    extraSeed?.os || nav?.platform || 'unknown-platform',
+    String(extraSeed?.cpuCores ?? nav?.hardwareConcurrency ?? 0),
+    String(nav?.deviceMemory ?? 0),
+    scr ? `${scr.width}x${scr.height}x${scr.colorDepth}` : '0x0x0',
+    tz,
+    glRenderer || 'default-gpu',
+  ].join('|');
+
+  return `PC-${fnv1aHex(rawParts)}`;
+}
+
+export function getCurrentPcFingerprint(extraSeed?: {
+  gpuRenderer?: string;
+  os?: string;
+  cpuCores?: number;
+}): string {
+  if (extraSeed && (extraSeed.gpuRenderer || extraSeed.os || extraSeed.cpuCores)) {
+    cachedHardwareFingerprint = computePcHardwareFingerprint(extraSeed);
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(PC_FINGERPRINT_KEY, cachedHardwareFingerprint);
+      }
+    } catch {
+      // ignore
+    }
+    return cachedHardwareFingerprint;
+  }
+
+  if (cachedHardwareFingerprint) return cachedHardwareFingerprint;
+
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const stored = localStorage.getItem(PC_FINGERPRINT_KEY);
+      if (stored && /^PC-[0-9A-F]{8}$/.test(stored)) {
+        cachedHardwareFingerprint = stored;
+        return stored;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  const computed = computePcHardwareFingerprint();
+  cachedHardwareFingerprint = computed;
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(PC_FINGERPRINT_KEY, computed);
+    }
+  } catch {
+    // ignore
+  }
+  return computed;
+}
+
+export function getPcFeedbackSubmissionRecord(
+  pcFingerprint = getCurrentPcFingerprint()
+): PcFeedbackSubmissionRecord | null {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const raw = localStorage.getItem(PC_FEEDBACK_LOCK_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        // Support map of pcFingerprint -> record or single record object
+        if (parsed && typeof parsed === 'object') {
+          if (typeof parsed.pcFingerprint === 'string' && parsed.pcFingerprint === pcFingerprint) {
+            return parsed as PcFeedbackSubmissionRecord;
+          }
+          if (parsed[pcFingerprint] && typeof parsed[pcFingerprint] === 'object') {
+            return parsed[pcFingerprint] as PcFeedbackSubmissionRecord;
+          }
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  // Fallback check against stored feedback entries
+  const existing = loadFeedbackEntries().find((e) => e.pcFingerprint === pcFingerprint);
+  if (existing) {
+    return {
+      pcFingerprint,
+      entryId: existing.id,
+      category: existing.category,
+      author: existing.author,
+      message: existing.message,
+      rating: existing.rating,
+      submittedAt: existing.createdAt,
+    };
+  }
+  return null;
+}
+
+function savePcFeedbackSubmissionRecord(record: PcFeedbackSubmissionRecord): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    let map: Record<string, PcFeedbackSubmissionRecord> = {};
+    const raw = localStorage.getItem(PC_FEEDBACK_LOCK_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        if (typeof parsed.pcFingerprint === 'string') {
+          map[parsed.pcFingerprint] = parsed;
+        } else {
+          map = parsed;
+        }
+      }
+    }
+    map[record.pcFingerprint] = record;
+    localStorage.setItem(PC_FEEDBACK_LOCK_KEY, JSON.stringify(map));
+  } catch {
+    // ignore
+  }
+}
+
+export function hasCurrentPcSubmittedFeedback(
+  pcFingerprint = getCurrentPcFingerprint()
+): boolean {
+  return getPcFeedbackSubmissionRecord(pcFingerprint) !== null;
+}
+
+export function getPcRatingSubmissionRecord(
+  pcFingerprint = getCurrentPcFingerprint()
+): PcRatingSubmissionRecord | null {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const raw = localStorage.getItem(PC_RATING_LOCK_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          if (typeof parsed.pcFingerprint === 'string' && parsed.pcFingerprint === pcFingerprint) {
+            return parsed as PcRatingSubmissionRecord;
+          }
+          if (parsed[pcFingerprint] && typeof parsed[pcFingerprint] === 'object') {
+            return parsed[pcFingerprint] as PcRatingSubmissionRecord;
+          }
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  const ratingState = loadAppRatingState();
+  if (ratingState.ratedByPcFingerprints?.includes(pcFingerprint)) {
+    return {
+      pcFingerprint,
+      rating: ratingState.userRating,
+      submittedAt: ratingState.lastUpdated,
+    };
+  }
+  return null;
+}
+
+function savePcRatingSubmissionRecord(record: PcRatingSubmissionRecord): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    let map: Record<string, PcRatingSubmissionRecord> = {};
+    const raw = localStorage.getItem(PC_RATING_LOCK_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        if (typeof parsed.pcFingerprint === 'string') {
+          map[parsed.pcFingerprint] = parsed;
+        } else {
+          map = parsed;
+        }
+      }
+    }
+    map[record.pcFingerprint] = record;
+    localStorage.setItem(PC_RATING_LOCK_KEY, JSON.stringify(map));
+  } catch {
+    // ignore
+  }
+}
+
+export function hasCurrentPcSubmittedRating(
+  pcFingerprint = getCurrentPcFingerprint()
+): boolean {
+  return getPcRatingSubmissionRecord(pcFingerprint) !== null;
 }
 
 export function loadAppRatingState(): AppRatingState {
@@ -54,17 +323,34 @@ export function loadAppRatingState(): AppRatingState {
     totalVotes: 18,
     ratingSum: 89, // 4.94 avg
     lastUpdated: Date.now(),
+    ratedByPcFingerprints: [],
   };
 }
 
-export function saveUserAppRating(stars: number): AppRatingState {
+export function saveUserAppRating(
+  stars: number,
+  pcFingerprint = getCurrentPcFingerprint()
+): SaveRatingResult {
   const clamped = Math.max(1, Math.min(5, Math.round(stars)));
   const current = loadAppRatingState();
+  if (hasCurrentPcSubmittedRating(pcFingerprint)) {
+    return {
+      ok: false,
+      alreadySubmitted: true,
+      pcFingerprint,
+      state: current,
+    };
+  }
+
+  const prevList = Array.isArray(current.ratedByPcFingerprints)
+    ? current.ratedByPcFingerprints
+    : [];
   const next: AppRatingState = {
     userRating: clamped,
     totalVotes: current.totalVotes + 1,
     ratingSum: current.ratingSum + clamped,
     lastUpdated: Date.now(),
+    ratedByPcFingerprints: Array.from(new Set([...prevList, pcFingerprint])),
   };
   selectedStars = clamped;
   try {
@@ -74,7 +360,17 @@ export function saveUserAppRating(stars: number): AppRatingState {
   } catch {
     // ignore
   }
-  return next;
+  savePcRatingSubmissionRecord({
+    pcFingerprint,
+    rating: clamped,
+    submittedAt: next.lastUpdated,
+  });
+  return {
+    ok: true,
+    alreadySubmitted: false,
+    pcFingerprint,
+    state: next,
+  };
 }
 
 export function loadFeedbackEntries(): AppFeedbackEntry[] {
@@ -94,28 +390,46 @@ export function loadFeedbackEntries(): AppFeedbackEntry[] {
   return [];
 }
 
+/**
+ * Adds a feedback / opinion entry strictly ONCE per PC (enforced via PC fingerprint lock).
+ */
 export function addFeedbackEntry(
   category: AppFeedbackEntry['category'],
   message: string,
   author: string,
-  rating?: number
-): AppFeedbackEntry[] {
+  rating?: number,
+  pcFingerprint = getCurrentPcFingerprint()
+): AddFeedbackResult {
+  const existing = loadFeedbackEntries();
+  const existingRecord = getPcFeedbackSubmissionRecord(pcFingerprint);
+  if (existingRecord) {
+    return {
+      ok: false,
+      alreadySubmitted: true,
+      pcFingerprint,
+      entries: existing,
+      existingRecord,
+    };
+  }
+
   const categoryMap: Record<AppFeedbackEntry['category'], string> = {
     bug: '🐛 Błąd / Poprawka pomiaru',
     feature: '💡 Co dodać / Nowa funkcja',
     game: '🎮 Nowa gra 3D / Test GPU',
     measurement: '📊 Raport PDF / Inwentarz sprzętu',
   };
+  const now = Date.now();
   const entry: AppFeedbackEntry = {
-    id: `fb_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    id: `fb_${now}_${Math.random().toString(36).slice(2, 6)}`,
     category,
     categoryLabel: categoryMap[category] || '💡 Co dodać / Uwaga',
     message: message.trim(),
     author: author.trim() || 'Użytkownik SystemPulse Pro',
     rating,
-    createdAt: Date.now(),
+    createdAt: now,
+    pcFingerprint,
   };
-  const existing = loadFeedbackEntries();
+
   const next = [entry, ...existing].slice(0, 50);
   try {
     if (typeof localStorage !== 'undefined') {
@@ -124,7 +438,24 @@ export function addFeedbackEntry(
   } catch {
     // ignore
   }
-  return next;
+
+  savePcFeedbackSubmissionRecord({
+    pcFingerprint,
+    entryId: entry.id,
+    category: entry.category,
+    author: entry.author,
+    message: entry.message,
+    rating: entry.rating,
+    submittedAt: now,
+  });
+
+  return {
+    ok: true,
+    alreadySubmitted: false,
+    pcFingerprint,
+    entries: next,
+    existingRecord: null,
+  };
 }
 
 export function deleteFeedbackEntry(id: string): AppFeedbackEntry[] {
@@ -137,6 +468,96 @@ export function deleteFeedbackEntry(id: string): AppFeedbackEntry[] {
     // ignore
   }
   return next;
+}
+
+/**
+ * Optionally syncs feedback lock and entries with the local Vite dev/preview
+ * server (`/api/global/feedback`) so 1-opinion-per-PC holds across browsers on the same machine.
+ */
+export async function syncFeedbackWithServer(
+  pcFingerprint = getCurrentPcFingerprint()
+): Promise<boolean> {
+  if (typeof fetch !== 'function' || typeof window === 'undefined') return false;
+  if (serverSyncInFlight) return false;
+  serverSyncInFlight = true;
+  try {
+    const resp = await fetch(
+      `/api/global/feedback?pcFingerprint=${encodeURIComponent(pcFingerprint)}`,
+      { cache: 'no-store' }
+    );
+    if (!resp.ok) return false;
+    const data = await resp.json();
+    if (!data || !data.ok) return false;
+    let changed = false;
+
+    if (Array.isArray(data.entries) && data.entries.length > 0) {
+      const local = loadFeedbackEntries();
+      const byId = new Map<string, AppFeedbackEntry>();
+      for (const e of [...data.entries, ...local]) {
+        if (e && typeof e.id === 'string' && !byId.has(e.id)) {
+          byId.set(e.id, e);
+        }
+      }
+      const merged = Array.from(byId.values())
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .slice(0, 50);
+      if (merged.length !== local.length) changed = true;
+      try {
+        localStorage.setItem(FEEDBACK_STORAGE_KEY, JSON.stringify(merged));
+      } catch {
+        // ignore
+      }
+    }
+
+    if (data.alreadySubmitted && data.existingEntry && !hasCurrentPcSubmittedFeedback(pcFingerprint)) {
+      const e = data.existingEntry as AppFeedbackEntry;
+      savePcFeedbackSubmissionRecord({
+        pcFingerprint,
+        entryId: e.id,
+        category: e.category || 'feature',
+        author: e.author || 'Użytkownik',
+        message: e.message || '',
+        rating: e.rating,
+        submittedAt: e.createdAt || Date.now(),
+      });
+      changed = true;
+    }
+    serverSyncDone = true;
+    return changed;
+  } catch {
+    return false;
+  } finally {
+    serverSyncInFlight = false;
+  }
+}
+
+async function publishFeedbackToServer(entry: AppFeedbackEntry): Promise<{
+  ok: boolean;
+  alreadySubmitted?: boolean;
+  existingEntry?: AppFeedbackEntry;
+}> {
+  if (typeof fetch !== 'function' || typeof window === 'undefined') {
+    return { ok: true };
+  }
+  try {
+    const resp = await fetch('/api/global/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entry }),
+    });
+    if (resp.status === 409) {
+      const data = await resp.json().catch(() => ({}));
+      return {
+        ok: false,
+        alreadySubmitted: true,
+        existingEntry: data.existingEntry,
+      };
+    }
+    return { ok: resp.ok };
+  } catch {
+    // Offline / static portable build fallback
+    return { ok: true };
+  }
 }
 
 /**
@@ -193,19 +614,15 @@ export function renderRafalJaroszLogoBannerSvg(): string {
       <!-- Glowing Cyan Monitor + 4 Left Circuit Traces & Nodes (exact match to g.png) -->
       <g filter="url(#rjCyanGlow)">
         <!-- 4 circuit lines extending from left side of monitor -->
-        <!-- Trace 1 (top-left angled up) -->
         <polyline points="295,63 266,63 252,48" fill="none" stroke="#00d8ff" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" />
         <circle cx="249" cy="45" r="6.5" fill="#00d8ff" />
 
-        <!-- Trace 2 (upper-middle angled up) -->
         <polyline points="295,82 254,82 243,72" fill="none" stroke="#00d8ff" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" />
         <circle cx="240" cy="69" r="6.5" fill="#00d8ff" />
 
-        <!-- Trace 3 (lower-middle angled down) -->
         <polyline points="295,98 258,98 247,109" fill="none" stroke="#00d8ff" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" />
         <circle cx="244" cy="112" r="6.5" fill="#00d8ff" />
 
-        <!-- Trace 4 (bottom-left straight) -->
         <polyline points="295,114 270,114" fill="none" stroke="#00d8ff" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" />
         <circle cx="266" cy="114" r="6.5" fill="#00d8ff" />
 
@@ -242,24 +659,32 @@ export function renderRafalJaroszLogoBannerSvg(): string {
   `;
 }
 
-export function renderCopyrightAndFeedbackSectionHtml(): string {
+export function renderCopyrightAndFeedbackSectionHtml(
+  pcFingerprint = getCurrentPcFingerprint()
+): string {
   const ratingState = loadAppRatingState();
   const avgRating =
     ratingState.totalVotes > 0
       ? (ratingState.ratingSum / ratingState.totalVotes).toFixed(2)
       : '5.00';
   const entries = loadFeedbackEntries();
+  const feedbackLock = getPcFeedbackSubmissionRecord(pcFingerprint);
+  const ratingLock = getPcRatingSubmissionRecord(pcFingerprint);
+  const hasSubmittedFeedback = feedbackLock !== null;
+  const hasSubmittedRating = ratingLock !== null;
+  const displayStars = ratingLock ? ratingLock.rating : selectedStars;
 
   const starsHtml = [1, 2, 3, 4, 5]
     .map((star) => {
-      const active = star <= selectedStars;
+      const active = star <= displayStars;
       return `
         <button
           type="button"
           class="btn ${active ? 'btn-primary' : 'btn-secondary'} btn-sm"
           data-rate-star="${star}"
+          ${hasSubmittedRating ? 'disabled' : ''}
           style="min-width:44px;font-size:14px;padding:6px 10px;border-color:${active ? '#22d3ee' : '#334155'};"
-          title="Oceń aplikację na ${star}/5 gwiazdek"
+          title="${hasSubmittedRating ? 'Ten komputer (PC) oddał już swoją ocenę' : `Oceń aplikację na ${star}/5 gwiazdek`}"
         >
           ${active ? '★' : '☆'} ${star}
         </button>
@@ -268,7 +693,7 @@ export function renderCopyrightAndFeedbackSectionHtml(): string {
     .join('');
 
   return `
-    <section class="sp-panel" id="sp-copyright-contact-feedback-section" style="margin-top:18px;border:1px solid rgba(34,211,238,0.28);background:linear-gradient(180deg,rgba(15,23,42,0.95) 0%,rgba(7,11,20,0.98) 100%);">
+    <section class="sp-panel" id="sp-copyright-contact-feedback-section" data-pc-fingerprint="${escHtml(pcFingerprint)}" style="margin-top:18px;border:1px solid rgba(34,211,238,0.28);background:linear-gradient(180deg,rgba(15,23,42,0.95) 0%,rgba(7,11,20,0.98) 100%);">
       <div class="sp-panel-head">
         <div>
           <span class="sp-eyebrow">PRAWA AUTORSKIE (COPYRIGHT) · OFICJALNE LOGO SERWISU · KONTAKT · OCENA APLIKACJI · ZGŁOŚ BŁĘDY / CO DODAĆ</span>
@@ -315,32 +740,60 @@ export function renderCopyrightAndFeedbackSectionHtml(): string {
           <div style="background:rgba(15,23,42,0.85);border:1px solid rgba(51,65,85,0.8);border-radius:14px;padding:16px;">
             <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px;">
               <div>
-                <span style="font-size:11px;font-weight:700;color:#fbbf24;text-transform:uppercase;letter-spacing:0.06em;">OCENA APLIKACJI SYSTEMPULSE PRO</span>
+                <span style="font-size:11px;font-weight:700;color:#fbbf24;text-transform:uppercase;letter-spacing:0.06em;">OCENA APLIKACJI SYSTEMPULSE PRO · LIMIT 1 OCENA / PC</span>
                 <h4 style="margin:2px 0 0;font-size:16px;color:#f8fafc;">⭐ Oceń dokładność testów i raportów</h4>
               </div>
               <div style="text-align:right;">
                 <strong style="font-size:20px;color:#fbbf24;">★ ${avgRating} / 5.00</strong>
-                <div style="font-size:11px;color:#94a3b8;">Oddanych ocen: ${ratingState.totalVotes} · Twoja ocena: ${ratingState.userRating}/5</div>
+                <div style="font-size:11px;color:#94a3b8;">Oddanych ocen: ${ratingState.totalVotes} · Twoja ocena: ${displayStars}/5</div>
               </div>
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;">
               ${starsHtml}
-              <button type="button" class="btn btn-primary btn-sm" id="sp-submit-rating-btn" style="margin-left:auto;">
-                ✅ Zapisz ocenę (${selectedStars}/5 ★)
+              <button
+                type="button"
+                class="btn ${hasSubmittedRating ? 'btn-secondary' : 'btn-primary'} btn-sm"
+                id="sp-submit-rating-btn"
+                ${hasSubmittedRating ? 'disabled' : ''}
+                style="margin-left:auto;"
+              >
+                ${hasSubmittedRating ? `🔒 Ocena z tego PC zapisana (${displayStars}/5 ★)` : `✅ Zapisz ocenę (${selectedStars}/5 ★)`}
               </button>
             </div>
           </div>
 
-          <!-- Karta Zgłaszania Błędów i Pomysłów ("Co dodać / Jakie błędy") -->
-          <div style="background:rgba(15,23,42,0.85);border:1px solid rgba(51,65,85,0.8);border-radius:14px;padding:16px;">
-            <span style="font-size:11px;font-weight:700;color:#22d3ee;text-transform:uppercase;letter-spacing:0.06em;">ZGŁOŚ BŁĘDY / CO DODAĆ DO APLIKACJI</span>
-            <h4 style="margin:2px 0 6px;font-size:16px;color:#f8fafc;">🛠️ Napisz co dodać, ulepszyć lub jakie błędy zauważyłeś</h4>
+          <!-- Karta Zgłaszania Błędów i Opinii ("1 PC = max 1 opinia") -->
+          <div style="background:rgba(15,23,42,0.85);border:1px solid rgba(51,65,85,0.8);border-radius:14px;padding:16px;" data-feedback-pc-locked="${hasSubmittedFeedback ? 'true' : 'false'}">
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:4px;">
+              <span style="font-size:11px;font-weight:700;color:#22d3ee;text-transform:uppercase;letter-spacing:0.06em;">OPINIE / ZGŁOŚ BŁĘDY / CO DODAĆ</span>
+              <span class="font-mono" style="font-size:10.5px;padding:2px 8px;border-radius:999px;background:rgba(34,211,238,0.12);border:1px solid rgba(34,211,238,0.35);color:#67e8f9;">
+                🔒 Limit: 1 opinia / 1 PC (${escHtml(pcFingerprint)})
+              </span>
+            </div>
+            <h4 style="margin:2px 0 6px;font-size:16px;color:#f8fafc;">🛠️ Dodaj opinię, opisz błędy lub zaproponuj nową funkcję</h4>
             <p style="margin:0 0 10px;font-size:12.5px;color:#94a3b8;">
-              Masz pomysł na nową funkcję, kolejną grę 3D, poprawkę w raporcie PDF lub zauważyłeś błąd pomiaru? Zapisz zgłoszenie poniżej:
+              Każdy komputer (PC) może dodać opinię / zgłoszenie <strong>tylko jeden raz</strong> (weryfikacja po identyfikatorze sprzętowym PC).
             </p>
 
+            ${
+              hasSubmittedFeedback && feedbackLock
+                ? `
+                  <div id="sp-feedback-pc-lock-banner" style="padding:12px 14px;border-radius:10px;background:rgba(16,185,129,0.11);border:1px solid rgba(16,185,129,0.4);margin-bottom:10px;font-size:12.5px;line-height:1.5;color:#d1fae5;">
+                    <div style="font-weight:700;color:#34d399;margin-bottom:4px;">
+                      🔒 Opinia z tego komputera (${escHtml(pcFingerprint)}) została już dodana
+                    </div>
+                    <div>
+                      Każdy komputer może przesłać opinię tylko raz. Twoja zapisana opinia z dnia
+                      <strong class="font-mono">${escHtml(new Date(feedbackLock.submittedAt).toLocaleString('pl-PL'))}</strong>:
+                      „<em>${escHtml(feedbackLock.message)}</em>”
+                    </div>
+                  </div>
+                `
+                : ''
+            }
+
             <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;margin-bottom:8px;">
-              <select id="sp-feedback-category" class="input-select" aria-label="Kategoria zgłoszenia">
+              <select id="sp-feedback-category" class="input-select" aria-label="Kategoria zgłoszenia" ${hasSubmittedFeedback ? 'disabled' : ''}>
                 <option value="bug">🐛 Błąd / Co poprawić w pomiarach</option>
                 <option value="feature">💡 Co dodać / Nowa funkcja</option>
                 <option value="game">🎮 Nowa gra 3D / Scena benchmarkowa</option>
@@ -352,6 +805,7 @@ export function renderCopyrightAndFeedbackSectionHtml(): string {
                 class="input-text"
                 placeholder="Twój podpis / kontakt (np. Rafał, Klient...)"
                 value="Rafał Jarosz"
+                ${hasSubmittedFeedback ? 'disabled' : ''}
               />
             </div>
 
@@ -359,13 +813,19 @@ export function renderCopyrightAndFeedbackSectionHtml(): string {
               id="sp-feedback-message"
               class="input-text"
               rows="3"
-              placeholder="Opisz dokładnie jakie błędy zauważyłeś lub co dodać do aplikacji (np. nowy test, korekta raportu PDF, nowa gra 3D)..."
+              placeholder="${hasSubmittedFeedback ? 'Ten komputer dodał już swoją opinię (limit 1 opinia na PC).' : 'Opisz dokładnie jakie błędy zauważyłeś lub co dodać do aplikacji (np. nowy test, korekta raportu PDF, nowa gra 3D)...'}"
               style="width:100%;resize:vertical;min-height:74px;margin-bottom:10px;font-family:inherit;"
+              ${hasSubmittedFeedback ? 'disabled' : ''}
             ></textarea>
 
             <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-              <button type="button" class="btn btn-primary btn-sm" id="sp-feedback-submit-btn">
-                📨 Wyślij i zapisz zgłoszenie / pomysł
+              <button
+                type="button"
+                class="btn ${hasSubmittedFeedback ? 'btn-secondary' : 'btn-primary'} btn-sm"
+                id="sp-feedback-submit-btn"
+                ${hasSubmittedFeedback ? 'disabled' : ''}
+              >
+                ${hasSubmittedFeedback ? '🔒 Opinia z tego PC już dodana (limit 1/PC)' : '📨 Wyślij i zapisz opinię / zgłoszenie'}
               </button>
               ${
                 entries.length > 0
@@ -380,12 +840,12 @@ export function renderCopyrightAndFeedbackSectionHtml(): string {
                 : ''
             }
 
-            <!-- Lista zapisanych zgłoszeń i propozycji -->
+            <!-- Lista zapisanych zgłoszeń i opinii -->
             <div style="margin-top:12px;max-height:210px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;">
               ${
                 entries.length === 0
                   ? `<div style="padding:10px;border-radius:8px;background:rgba(2,6,23,0.55);color:#64748b;font-size:12px;text-align:center;">
-                      Brak zapisanych zgłoszeń w tej sesji. Dodaj powyżej informację o błędzie lub propozycję nowej funkcji.
+                      Brak zapisanych opinii w tej sesji. Dodaj powyżej opinię o aplikacji lub propozycję nowej funkcji (1 opinia na PC).
                     </div>`
                   : entries
                       .map((item) => {
@@ -397,16 +857,10 @@ export function renderCopyrightAndFeedbackSectionHtml(): string {
                                 <strong style="color:#22d3ee;">${escHtml(item.categoryLabel)}</strong>
                                 <span style="color:#94a3b8;font-size:11px;">• ${escHtml(item.author)} • ${escHtml(dateStr)}</span>
                                 ${item.rating ? `<span style="color:#fbbf24;font-size:11px;font-weight:700;">★ ${item.rating}/5</span>` : ''}
+                                ${item.pcFingerprint ? `<span class="font-mono" style="color:#64748b;font-size:10px;">[${escHtml(item.pcFingerprint)}]</span>` : ''}
                               </div>
                               <div style="color:#f1f5f9;">${escHtml(item.message)}</div>
                             </div>
-                            <button
-                              type="button"
-                              class="btn btn-secondary btn-sm"
-                              data-delete-feedback="${escHtml(item.id)}"
-                              title="Usuń wpis"
-                              style="padding:2px 7px;font-size:11px;"
-                            >✕</button>
                           </div>
                         `;
                       })
@@ -420,7 +874,17 @@ export function renderCopyrightAndFeedbackSectionHtml(): string {
   `;
 }
 
-export function bindCopyrightAndFeedbackEvents(root: HTMLElement, rerender: () => void): void {
+export function bindCopyrightAndFeedbackEvents(
+  root: HTMLElement,
+  rerender: () => void,
+  pcFingerprint = getCurrentPcFingerprint()
+): void {
+  if (!serverSyncDone) {
+    void syncFeedbackWithServer(pcFingerprint).then((changed) => {
+      if (changed) rerender();
+    });
+  }
+
   const copyContactBtn = root.querySelector<HTMLButtonElement>('#sp-copy-service-contact-btn');
   copyContactBtn?.addEventListener('click', () => {
     const contactText =
@@ -428,12 +892,14 @@ export function bindCopyrightAndFeedbackEvents(root: HTMLElement, rerender: () =
     if (navigator.clipboard?.writeText) {
       void navigator.clipboard.writeText(contactText);
     }
-    feedbackNotice = '✓ Skopiowano pełne dane kontaktowe serwisu (Rafał Jarosz · 786 409 187 · WARSZAWA, UL. MARYMONCKA 125 M.109 P.6) do schowka.';
+    feedbackNotice =
+      '✓ Skopiowano pełne dane kontaktowe serwisu (Rafał Jarosz · 786 409 187 · WARSZAWA, UL. MARYMONCKA 125 M.109 P.6) do schowka.';
     rerender();
   });
 
   root.querySelectorAll<HTMLButtonElement>('[data-rate-star]').forEach((btn) => {
     btn.addEventListener('click', () => {
+      if (hasCurrentPcSubmittedRating(pcFingerprint)) return;
       const star = Number(btn.dataset.rateStar || 5);
       selectedStars = Math.max(1, Math.min(5, star));
       rerender();
@@ -442,28 +908,57 @@ export function bindCopyrightAndFeedbackEvents(root: HTMLElement, rerender: () =
 
   const submitRatingBtn = root.querySelector<HTMLButtonElement>('#sp-submit-rating-btn');
   submitRatingBtn?.addEventListener('click', () => {
-    const state = saveUserAppRating(selectedStars);
-    const avg = (state.ratingSum / Math.max(1, state.totalVotes)).toFixed(2);
-    feedbackNotice = `⭐ Dziękujemy! Zapisano Twoją ocenę aplikacji: ${selectedStars}/5 gwiazdek (aktualna średnia: ${avg}/5.00).`;
+    const res = saveUserAppRating(selectedStars, pcFingerprint);
+    if (!res.ok && res.alreadySubmitted) {
+      feedbackNotice = `🔒 Ten komputer (${pcFingerprint}) oddał już ocenę aplikacji — każdy PC może ocenić aplikację tylko raz.`;
+      rerender();
+      return;
+    }
+    const avg = (res.state.ratingSum / Math.max(1, res.state.totalVotes)).toFixed(2);
+    feedbackNotice = `⭐ Dziękujemy! Zapisano Twoją jednorazową ocenę z tego PC (${pcFingerprint}): ${selectedStars}/5 gwiazdek (średnia: ${avg}/5.00).`;
     rerender();
   });
 
   const submitFeedbackBtn = root.querySelector<HTMLButtonElement>('#sp-feedback-submit-btn');
-  submitFeedbackBtn?.addEventListener('click', () => {
+  submitFeedbackBtn?.addEventListener('click', async () => {
+    if (hasCurrentPcSubmittedFeedback(pcFingerprint)) {
+      feedbackNotice = `🔒 Ten komputer (${pcFingerprint}) dodał już opinię — obowiązuje limit 1 opinii na 1 PC.`;
+      rerender();
+      return;
+    }
+
     const catEl = root.querySelector<HTMLSelectElement>('#sp-feedback-category');
     const authorEl = root.querySelector<HTMLInputElement>('#sp-feedback-author');
     const msgEl = root.querySelector<HTMLTextAreaElement>('#sp-feedback-message');
     const message = msgEl?.value.trim() || '';
     if (!message) {
-      feedbackNotice = '⚠️ Wpisz treść zgłoszenia (jaki błąd zauważyłeś lub co dodać do aplikacji).';
+      feedbackNotice =
+        '⚠️ Wpisz treść opinii / zgłoszenia (jaki błąd zauważyłeś lub co dodać do aplikacji).';
       rerender();
       return;
     }
+
     const category = (catEl?.value as AppFeedbackEntry['category']) || 'bug';
     const author = authorEl?.value.trim() || 'Rafał Jarosz';
-    addFeedbackEntry(category, message, author, selectedStars);
+    const result = addFeedbackEntry(category, message, author, selectedStars, pcFingerprint);
+    if (!result.ok && result.alreadySubmitted) {
+      feedbackNotice = `🔒 Ten komputer (${pcFingerprint}) dodał już opinię — każdy PC może dodać opinię tylko raz.`;
+      rerender();
+      return;
+    }
+
+    const latestEntry = result.entries[0];
+    if (latestEntry) {
+      const serverResp = await publishFeedbackToServer(latestEntry);
+      if (!serverResp.ok && serverResp.alreadySubmitted) {
+        feedbackNotice = `🔒 Serwer potwierdził, że ten komputer (${pcFingerprint}) dodał już wcześniej opinię (limit 1 opinia / PC).`;
+        rerender();
+        return;
+      }
+    }
+
     if (msgEl) msgEl.value = '';
-    feedbackNotice = '✓ Zapisano Twoje zgłoszenie / propozycję zmian w bazie serwisowej aplikacji.';
+    feedbackNotice = `✓ Zapisano Twoją opinię z tego komputera (${pcFingerprint}). Limit 1 opinii na PC został aktywowany.`;
     rerender();
   });
 
@@ -479,16 +974,5 @@ export function bindCopyrightAndFeedbackEvents(root: HTMLElement, rerender: () =
     URL.revokeObjectURL(url);
     feedbackNotice = '✓ Wyeksportowano listę zgłoszeń i opinii do pliku .JSON.';
     rerender();
-  });
-
-  root.querySelectorAll<HTMLButtonElement>('[data-delete-feedback]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const id = btn.dataset.deleteFeedback;
-      if (id) {
-        deleteFeedbackEntry(id);
-        feedbackNotice = 'Usunięto wpis z listy zgłoszeń.';
-        rerender();
-      }
-    });
   });
 }

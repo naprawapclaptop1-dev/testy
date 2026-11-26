@@ -29,6 +29,44 @@ interface StoredGlobalRankingEntry {
 function createSystemPulseGlobalServerPlugin(): Plugin {
   const dataDir = path.resolve(process.cwd(), 'data');
   const rankingsFile = path.join(dataDir, 'global-rankings.json');
+  const feedbackFile = path.join(dataDir, 'global-feedback.json');
+
+  interface StoredFeedbackItem {
+    id: string;
+    category: string;
+    categoryLabel: string;
+    message: string;
+    author: string;
+    rating?: number;
+    createdAt: number;
+    pcFingerprint: string;
+  }
+
+  const readFeedback = (): StoredFeedbackItem[] => {
+    try {
+      if (!fs.existsSync(feedbackFile)) return [];
+      const raw = fs.readFileSync(feedbackFile, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter(
+        (item: StoredFeedbackItem) =>
+          item && typeof item.id === 'string' && typeof item.pcFingerprint === 'string'
+      );
+    } catch {
+      return [];
+    }
+  };
+
+  const writeFeedback = (list: StoredFeedbackItem[]): void => {
+    try {
+      if (!fs.existsSync(dataDir)) {
+        fs.mkdirSync(dataDir, { recursive: true });
+      }
+      fs.writeFileSync(feedbackFile, JSON.stringify(list.slice(0, 200), null, 2), 'utf-8');
+    } catch {
+      // Ignore write error on read-only fs
+    }
+  };
 
   const readRankings = (): StoredGlobalRankingEntry[] => {
     try {
@@ -85,6 +123,94 @@ function createSystemPulseGlobalServerPlugin(): Plugin {
           })
         );
         return;
+      }
+
+      if (pathname === '/api/global/feedback') {
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+        if (req.method === 'OPTIONS') {
+          res.statusCode = 204;
+          res.end();
+          return;
+        }
+
+        if (req.method === 'GET') {
+          const pcFp = urlObj.searchParams.get('pcFingerprint') || '';
+          const entries = readFeedback().sort((a, b) => b.createdAt - a.createdAt);
+          const existingEntry = pcFp
+            ? entries.find((e) => e.pcFingerprint === pcFp) || null
+            : null;
+          res.end(
+            JSON.stringify({
+              ok: true,
+              alreadySubmitted: Boolean(existingEntry),
+              existingEntry,
+              entries,
+            })
+          );
+          return;
+        }
+
+        if (req.method === 'POST') {
+          let body = '';
+          req.on('data', (chunk: any) => {
+            body += String(chunk);
+            if (body.length > 64 * 1024) req.destroy();
+          });
+          req.on('end', () => {
+            try {
+              const payload = JSON.parse(body || '{}');
+              const item = payload.entry || payload;
+              const pcFingerprint = String(item?.pcFingerprint || '').trim().slice(0, 48);
+              const message = String(item?.message || '').trim().slice(0, 1500);
+              if (!pcFingerprint || !message) {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ ok: false, error: 'Missing pcFingerprint or message' }));
+                return;
+              }
+
+              const current = readFeedback();
+              const existingEntry = current.find((e) => e.pcFingerprint === pcFingerprint);
+              if (existingEntry) {
+                res.statusCode = 409;
+                res.end(
+                  JSON.stringify({
+                    ok: false,
+                    alreadySubmitted: true,
+                    existingEntry,
+                    error: 'Ten komputer (PC) dodał już opinię — limit to 1 opinia na PC.',
+                  })
+                );
+                return;
+              }
+
+              const cleanItem: StoredFeedbackItem = {
+                id: String(item.id || `fb_${Date.now()}`).slice(0, 80),
+                category: String(item.category || 'feature').slice(0, 30),
+                categoryLabel: String(item.categoryLabel || '💡 Opinia').slice(0, 80),
+                message,
+                author: String(item.author || 'Użytkownik SystemPulse Pro').slice(0, 80),
+                rating:
+                  typeof item.rating === 'number'
+                    ? Math.max(1, Math.min(5, Math.round(item.rating)))
+                    : undefined,
+                createdAt: Number(item.createdAt) || Date.now(),
+                pcFingerprint,
+              };
+              const next = [cleanItem, ...current].slice(0, 200);
+              writeFeedback(next);
+              res.end(JSON.stringify({ ok: true, entry: cleanItem, entries: next }));
+            } catch (err) {
+              res.statusCode = 400;
+              res.end(JSON.stringify({ ok: false, error: String(err) }));
+            }
+          });
+          return;
+        }
       }
 
       if (pathname === '/api/global/rankings') {

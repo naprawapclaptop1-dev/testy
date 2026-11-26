@@ -54,6 +54,7 @@ import {
 } from './ui/pcRankingReport';
 import {
   bindCopyrightAndFeedbackEvents,
+  getCurrentPcFingerprint,
   renderCopyrightAndFeedbackSectionHtml,
 } from './ui/copyrightAndFeedbackPanel';
 import { getSystemSpecs } from './services/systemInfo.service';
@@ -93,7 +94,7 @@ import {
   bindBatteryHistoryChartTooltip,
   renderBatteryDegradationTrendChart,
   renderBatteryHistoryChart,
-  renderBatteryWearLevel30DaysChartD3,
+  renderBatteryWearLevelTrendChartD3,
   renderDualLineChart,
   renderGpuThermalLoadChartD3,
   renderGpuVramUsageChartD3,
@@ -179,6 +180,31 @@ import {
   TemperatureThresholdSettings,
 } from './ui/temperatureThresholds';
 import { isLowBatteryHealth, renderLowBatteryHealthAlertHtml } from './ui/batteryLowHealthAlert';
+import {
+  clampCriticalHealthThresholdPct,
+  DEFAULT_CRITICAL_HEALTH_THRESHOLD_PCT,
+  estimateBatteryEndurance,
+  renderBatteryEnduranceDegradationD3Chart,
+  renderBatteryEnduranceEstimatorPanelHtml,
+} from './ui/batteryEnduranceEstimator';
+import {
+  buildGpuStabilityPhaseLog,
+  clampGpuFrameTimeThresholdMs,
+  exportGpuStabilityLogToJson,
+  GPU_FRAMETIME_THRESHOLD_PRESETS_MS,
+  GpuStabilityPhaseLog,
+  GpuTestPhaseRunType,
+  loadGpuFrameTimeThresholdMs,
+  saveGpuFrameTimeThresholdMs,
+} from './services/gpuStabilityLogExport.service';
+import {
+  evaluateGpuFrameTimeThreshold,
+  flattenStabilityPhasesToTelemetry,
+  GpuStabilityPhaseBoundary,
+  renderGpuFrameTimeColorAlertBarHtml,
+  renderGpuFrameTimeThresholdBadgeHtml,
+  renderGpuStabilityLogD3Chart,
+} from './ui/gpuStabilityLogChart';
 import { isPsuCapacityOver95, renderPsuCapacityAlertBannerHtml } from './ui/psuCapacityAlert';
 import { PsuRail5sCoord, renderRail5sSparklinePreviewHtml } from './ui/psuRailSparklinePreview';
 import { computePowerDrawTrend1m, renderPsuPowerDrawTrendHtml } from './ui/psuPowerDrawTrend';
@@ -548,6 +574,11 @@ export class SystemPulseApp {
   private customAudioRecordCleanup: ((save: boolean) => void) | null = null;
   private tempThresholds: TemperatureThresholdSettings = loadTemperatureThresholds();
   private tempAlertRuntime: TemperatureAlertRuntimeState = createTemperatureAlertRuntimeState();
+  private batteryEnduranceThresholdPct = DEFAULT_CRITICAL_HEALTH_THRESHOLD_PCT;
+  private gpuFrameTimeThresholdMs = loadGpuFrameTimeThresholdMs();
+  private gpuStabilityPhaseLogs: GpuStabilityPhaseLog[] = [];
+  private gpuStabilityChartSource: 'live' | 'all_phases' = 'live';
+  private gpuSingleRunStartedAt = 0;
   private gpuSuiteResults: Array<{
     sceneId: GpuSceneMode;
     name: string;
@@ -2150,7 +2181,13 @@ export class SystemPulseApp {
           ${this.renderQuickModuleCard('network', 'Sieć, Speed Test Multi-Stream & Bufferbloat', 'Nielimitowany Speed Test (8–24 strumienie), Ping, Jitter, pomiar Bufferbloat pod obciążeniem oraz DNS/TCP.', 'Otwórz test sieci')}
         </div>
 
-        ${renderCopyrightAndFeedbackSectionHtml()}
+        ${renderCopyrightAndFeedbackSectionHtml(
+          getCurrentPcFingerprint({
+            gpuRenderer: this.specs?.gpuRenderer,
+            os: this.specs?.os,
+            cpuCores: this.specs?.cpuCores,
+          })
+        )}
       </div>
     `;
 
@@ -2437,7 +2474,15 @@ export class SystemPulseApp {
       },
       () => this.renderDashboard(host)
     );
-    bindCopyrightAndFeedbackEvents(host, () => this.renderDashboard(host));
+    bindCopyrightAndFeedbackEvents(
+      host,
+      () => this.renderDashboard(host),
+      getCurrentPcFingerprint({
+        gpuRenderer: this.specs?.gpuRenderer,
+        os: this.specs?.os,
+        cpuCores: this.specs?.cpuCores,
+      })
+    );
     triggerMetricCardEntranceTransitions(host);
     animateMetricValueElements(host, this.metricAnimPrevValues);
   }
@@ -6149,6 +6194,92 @@ export class SystemPulseApp {
           </p>
         </div>
 
+        <div class="panel stack-md" id="gpu-stability-log-panel">
+          <div class="panel-header" style="margin-bottom:0;flex-wrap:wrap;gap:10px;">
+            <div>
+              <h2 class="panel-title">Stability Log GPU — Historia czasu klatki (ms) LIVE, Stutter (&gt; <span id="gpu-ft-threshold-heading-val">${this.gpuFrameTimeThresholdMs}</span> ms), Throttling &amp; Eksport JSON</h2>
+              <span class="panel-caption">Wykres liniowy D3.js historii Frame Time (ms) · Własny próg stabilności uruchamia wskaźnik pulsowania i alert kolorystyczny</span>
+            </div>
+            <div class="row-wrap" style="gap:8px;align-items:center;">
+              <span id="gpu-stability-log-threshold-badge-slot"></span>
+              <button type="button" class="btn btn-primary btn-sm" id="gpu-export-stability-log-btn" title="Eksportuj szczegółowy Stability Log (JSON) ze skokami czasu klatki i zdarzeniami thermal throttlingu dla każdej fazy testu GPU">
+                ${iconSvg('download', 13)}<span>Eksportuj Stability Log (.JSON)</span>
+              </button>
+              <button type="button" class="btn btn-secondary btn-sm" id="gpu-clear-stability-log-btn" ${this.gpuStabilityPhaseLogs.length === 0 ? 'disabled' : ''}>
+                ${iconSvg('trash', 13)}<span>Wyczyść fazy (${this.gpuStabilityPhaseLogs.length})</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="row-between" style="flex-wrap:wrap;gap:10px;align-items:center;">
+            <div class="row-wrap" style="gap:10px;align-items:center;">
+              <div class="segmented" role="group" aria-label="Źródło danych wykresu Stability Log">
+                <button
+                  type="button"
+                  class="segmented-btn ${this.gpuStabilityChartSource === 'live' ? 'active' : ''}"
+                  data-gpu-stab-source="live"
+                >
+                  LIVE (czas rzeczywisty)
+                </button>
+                <button
+                  type="button"
+                  class="segmented-btn ${this.gpuStabilityChartSource === 'all_phases' ? 'active' : ''}"
+                  data-gpu-stab-source="all_phases"
+                  id="gpu-stab-source-phases-btn"
+                >
+                  Stability Log (fazy: ${this.gpuStabilityPhaseLogs.length})
+                </button>
+              </div>
+              <span style="font-size:12px;color:var(--text-secondary);font-weight:600;">Próg (ms):</span>
+              <div class="segmented" role="group" aria-label="Próg czasu klatki GPU w ms">
+                ${GPU_FRAMETIME_THRESHOLD_PRESETS_MS.map(
+                  (ms) => `
+                  <button
+                    type="button"
+                    class="segmented-btn ${Math.abs(this.gpuFrameTimeThresholdMs - ms) < 0.05 ? 'active' : ''}"
+                    data-gpu-ft-threshold="${ms}"
+                  >
+                    ${ms} ms
+                  </button>`
+                ).join('')}
+              </div>
+              <input
+                id="gpu-ft-threshold-range"
+                type="range"
+                min="8"
+                max="60"
+                step="0.5"
+                value="${Math.min(60, this.gpuFrameTimeThresholdMs)}"
+                aria-label="Suwak własnego progu czasu klatki GPU (ms)"
+                style="width:88px;accent-color:#f59e0b;cursor:pointer;"
+              />
+              <input
+                id="gpu-ft-threshold-input"
+                type="number"
+                class="field-input font-mono"
+                min="8"
+                max="100"
+                step="0.5"
+                value="${this.gpuFrameTimeThresholdMs}"
+                aria-label="Własny próg czasu klatki GPU w ms"
+                style="width:74px;padding:4px 6px;font-size:12px;text-align:right;"
+              />
+              <span class="font-mono" style="font-size:11.5px;color:var(--text-muted);">ms</span>
+            </div>
+            <span class="panel-caption">Zbliżanie ≥ 80% progu: pulsowanie bursztynowe · Przekroczenie &gt; 100%: alert czerwony</span>
+          </div>
+
+          <div id="gpu-stability-log-color-alert-slot"></div>
+
+          <div id="gpu-stability-log-d3-chart">
+            <!-- Rendered via D3 -->
+          </div>
+
+          <div id="gpu-stability-log-phases-slot">
+            ${this.renderGpuStabilityLogPhasesHtml()}
+          </div>
+        </div>
+
         <div class="panel stack-md">
           <div class="panel-header" style="margin-bottom:0;flex-wrap:wrap;gap:8px;">
             <div>
@@ -6314,6 +6445,10 @@ export class SystemPulseApp {
         gpuStressEngine.stop();
         const sceneMeta =
           GPU_SCENE_CATALOG.find((s) => s.id === this.gpuState.sceneMode) || GPU_SCENE_CATALOG[0];
+        this.recordGpuStabilityPhase('single', this.gpuState, {
+          startedAtMs: this.gpuSingleRunStartedAt || undefined,
+          resolution: this.gpuState.resolution || gpuStressEngine.getResolution(),
+        });
         void this.recordLog(
           'GPU',
           this.gpuState.verdict === 'STABILNY' ? 'OK' : 'WARN',
@@ -6328,6 +6463,7 @@ export class SystemPulseApp {
           `${sceneMeta.shortName} (${this.gpuState.preset}) · Śr. ${this.gpuState.avgFps} FPS · 1% Low ${this.gpuState.low1PctFps}`
         );
       } else {
+        this.gpuSingleRunStartedAt = Date.now();
         this.beginStressSession();
         gpuStressEngine.start();
       }
@@ -6340,8 +6476,111 @@ export class SystemPulseApp {
       this.renderGpuSceneHeatmap(host);
     });
 
+    host.querySelectorAll<HTMLButtonElement>('[data-gpu-stab-source]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const src = btn.dataset.gpuStabSource === 'all_phases' ? 'all_phases' : 'live';
+        this.gpuStabilityChartSource = src;
+        host.querySelectorAll<HTMLButtonElement>('[data-gpu-stab-source]').forEach((b) => {
+          b.classList.toggle('active', b.dataset.gpuStabSource === src);
+        });
+        this.renderGpuStabilityLogChartAndBadge(this.gpuState);
+      });
+    });
+
+    host.querySelectorAll<HTMLButtonElement>('[data-gpu-ft-threshold]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.applyGpuFrameTimeThreshold(Number(btn.dataset.gpuFtThreshold), true, host);
+      });
+    });
+
+    host.querySelector<HTMLInputElement>('#gpu-ft-threshold-range')?.addEventListener('input', (e) => {
+      const rng = e.currentTarget as HTMLInputElement;
+      this.applyGpuFrameTimeThreshold(Number(rng.value), true, host);
+    });
+
+    const ftNumInput = host.querySelector<HTMLInputElement>('#gpu-ft-threshold-input');
+    ftNumInput?.addEventListener('input', () => {
+      const parsed = Number(ftNumInput.value);
+      if (Number.isFinite(parsed) && parsed >= 8 && parsed <= 100) {
+        this.applyGpuFrameTimeThreshold(parsed, false, host);
+      }
+    });
+    ftNumInput?.addEventListener('change', () => {
+      this.applyGpuFrameTimeThreshold(Number(ftNumInput.value), true, host);
+    });
+
+    host.querySelector('#gpu-export-stability-log-btn')?.addEventListener('click', (e) => {
+      const btn = e.currentTarget as HTMLButtonElement;
+      const phasesToExport = [...this.gpuStabilityPhaseLogs];
+      // If user exports while running or after a session with telemetry not yet finalized, include current snapshot
+      if (
+        (this.gpuState.running || phasesToExport.length === 0) &&
+        (this.gpuState.telemetry.length > 0 || this.gpuState.avgFps > 0)
+      ) {
+        const activeMeta =
+          GPU_SCENE_CATALOG.find((s) => s.id === (this.gpuState.sceneMode || 'vortex')) ||
+          GPU_SCENE_CATALOG[0];
+        phasesToExport.push(
+          buildGpuStabilityPhaseLog({
+            phaseIndex: phasesToExport.length + 1,
+            runType: 'single',
+            metrics: this.gpuState,
+            sceneName: activeMeta.name,
+            targetUnit: activeMeta.targetUnit,
+            resolution: this.gpuState.resolution || gpuStressEngine.getResolution(),
+            frameTimeThresholdMs: this.gpuFrameTimeThresholdMs,
+            startedAtMs: this.gpuSingleRunStartedAt || undefined,
+            liveGpuTempPeakC: thermalMonitorService.getLiveGpuTempC(),
+          })
+        );
+      }
+
+      const exported = exportGpuStabilityLogToJson(phasesToExport, {
+        rendererName: this.gpuState.rendererName,
+        isSoftwareGl: this.gpuState.isSoftwareGl,
+        frameTimeThresholdMs: this.gpuFrameTimeThresholdMs,
+        specs: this.specs,
+      });
+
+      void this.recordLog(
+        'GPU',
+        exported.throttleCount > 0 || exported.spikeCount > 0 ? 'WARN' : 'OK',
+        'Eksport GPU Stability Log (JSON)',
+        'Fazy / Skoki / Throttling',
+        `${exported.phaseCount} faz · ${exported.spikeCount} skoków · ${exported.throttleCount} throttle`,
+        `Wyeksportowano plik ${exported.filename} (${(exported.byteSize / 1024).toFixed(1)} KB, próg > ${this.gpuFrameTimeThresholdMs} ms).`
+      );
+
+      const origHtml = btn.innerHTML;
+      btn.innerHTML = `${iconSvg('download', 13)}<span>Zapisano .json ✓</span>`;
+      window.setTimeout(() => {
+        if (btn.isConnected) btn.innerHTML = origHtml;
+      }, 2200);
+    });
+
+    host.querySelector('#gpu-clear-stability-log-btn')?.addEventListener('click', () => {
+      this.gpuStabilityPhaseLogs = [];
+      if (this.gpuStabilityChartSource === 'all_phases') {
+        this.gpuStabilityChartSource = 'live';
+        host.querySelectorAll<HTMLButtonElement>('[data-gpu-stab-source]').forEach((b) => {
+          b.classList.toggle('active', b.dataset.gpuStabSource === 'live');
+        });
+      }
+      const phasesBtn = host.querySelector<HTMLButtonElement>('#gpu-stab-source-phases-btn');
+      if (phasesBtn) phasesBtn.textContent = 'Stability Log (fazy: 0)';
+      this.renderGpuStabilityLogChartAndBadge(this.gpuState);
+      const phasesSlot = host.querySelector<HTMLElement>('#gpu-stability-log-phases-slot');
+      if (phasesSlot) phasesSlot.innerHTML = this.renderGpuStabilityLogPhasesHtml();
+      const clrBtn = host.querySelector<HTMLButtonElement>('#gpu-clear-stability-log-btn');
+      if (clrBtn) {
+        clrBtn.disabled = true;
+        clrBtn.innerHTML = `${iconSvg('trash', 13)}<span>Wyczyść fazy (0)</span>`;
+      }
+    });
+
     this.bindGpuSchedulerEvents(host);
     this.renderGpuStabilityChart(g);
+    this.renderGpuStabilityLogChartAndBadge(g);
     this.renderGpuSceneHeatmap(host);
   }
 
@@ -6548,6 +6787,7 @@ export class SystemPulseApp {
         });
 
         let peakTempC: number | null = thermalMonitorService.getLiveGpuTempC();
+        const schedPhaseStartMs = Date.now();
         const res = await gpuStressEngine.runTimedBenchmark(durationMs, (m) => {
           this.gpuState = this.processGpuMetrics(m);
           this.patchGpuLive();
@@ -6574,6 +6814,12 @@ export class SystemPulseApp {
         if (this.gpuScheduleState.abortRequested || this.activeModule !== 'gpu') {
           break;
         }
+
+        this.recordGpuStabilityPhase('scheduled_queue', res, {
+          startedAtMs: schedPhaseStartMs,
+          resolution: item.resolution,
+          liveGpuTempPeakC: peakTempC,
+        });
 
         if (!this.gpuSceneStabilityStore.has(item.sceneId)) {
           recordGpuSceneStabilitySample(this.gpuSceneStabilityStore, {
@@ -6760,9 +7006,15 @@ export class SystemPulseApp {
         if (descEl) descEl.innerHTML = `<strong>${esc(sc.name)}:</strong> ${esc(sc.description)}`;
 
         gpuStressEngine.setSceneMode(sc.id);
+        const suitePhaseStartMs = Date.now();
         const res = await gpuStressEngine.runTimedBenchmark(3000, (m) => {
           this.gpuState = this.processGpuMetrics(m);
           this.patchGpuLive();
+        });
+        this.recordGpuStabilityPhase('auto_suite', res, {
+          startedAtMs: suitePhaseStartMs,
+          resolution: gpuStressEngine.getResolution(),
+          liveGpuTempPeakC: thermalMonitorService.getLiveGpuTempC(),
         });
         this.gpuSuiteResults.push({
           sceneId: sc.id,
@@ -6959,6 +7211,7 @@ export class SystemPulseApp {
       chartEl.innerHTML = this.renderGpuChartHtml(g);
     }
     this.renderGpuStabilityChart(g);
+    this.renderGpuStabilityLogChartAndBadge(g);
     this.renderGpuSceneHeatmap();
     const vramChartEl = this.root.querySelector<HTMLElement>('#gpu-vram-d3-chart');
     if (vramChartEl) {
@@ -6985,6 +7238,183 @@ export class SystemPulseApp {
         180
       );
     }
+  }
+
+  private recordGpuStabilityPhase(
+    runType: GpuTestPhaseRunType,
+    metrics: GpuStressMetrics,
+    opts: {
+      startedAtMs?: number;
+      resolution?: BenchmarkResolutionId;
+      liveGpuTempPeakC?: number | null;
+    } = {}
+  ): GpuStabilityPhaseLog {
+    const meta =
+      GPU_SCENE_CATALOG.find((s) => s.id === (metrics.sceneMode || 'vortex')) ||
+      GPU_SCENE_CATALOG[0];
+    const phase = buildGpuStabilityPhaseLog({
+      phaseIndex: this.gpuStabilityPhaseLogs.length + 1,
+      runType,
+      metrics,
+      sceneName: meta.name,
+      targetUnit: meta.targetUnit,
+      resolution: opts.resolution ?? metrics.resolution ?? gpuStressEngine.getResolution(),
+      frameTimeThresholdMs: this.gpuFrameTimeThresholdMs,
+      startedAtMs: opts.startedAtMs,
+      liveGpuTempPeakC: opts.liveGpuTempPeakC ?? thermalMonitorService.getLiveGpuTempC(),
+    });
+    this.gpuStabilityPhaseLogs.push(phase);
+    if (this.gpuStabilityPhaseLogs.length > 60) {
+      this.gpuStabilityPhaseLogs.shift();
+    }
+
+    const phasesSlot = this.root.querySelector<HTMLElement>('#gpu-stability-log-phases-slot');
+    if (phasesSlot) phasesSlot.innerHTML = this.renderGpuStabilityLogPhasesHtml();
+    const phasesBtn = this.root.querySelector<HTMLButtonElement>('#gpu-stab-source-phases-btn');
+    if (phasesBtn) phasesBtn.textContent = `Stability Log (fazy: ${this.gpuStabilityPhaseLogs.length})`;
+    const clrBtn = this.root.querySelector<HTMLButtonElement>('#gpu-clear-stability-log-btn');
+    if (clrBtn) {
+      clrBtn.disabled = false;
+      clrBtn.innerHTML = `${iconSvg('trash', 13)}<span>Wyczyść fazy (${this.gpuStabilityPhaseLogs.length})</span>`;
+    }
+    if (this.gpuStabilityChartSource === 'all_phases' || this.gpuState.telemetry.length === 0) {
+      this.renderGpuStabilityLogChartAndBadge(this.gpuState);
+    }
+    return phase;
+  }
+
+  private applyGpuFrameTimeThreshold(
+    rawMs: number,
+    commitInput: boolean,
+    host: HTMLElement = this.root
+  ): void {
+    const nextMs = saveGpuFrameTimeThresholdMs(clampGpuFrameTimeThresholdMs(rawMs));
+    this.gpuFrameTimeThresholdMs = nextMs;
+
+    const headingSpan = host.querySelector<HTMLElement>('#gpu-ft-threshold-heading-val');
+    if (headingSpan) headingSpan.textContent = String(nextMs);
+
+    const inp = host.querySelector<HTMLInputElement>('#gpu-ft-threshold-input');
+    if (inp && commitInput) inp.value = String(nextMs);
+
+    const rng = host.querySelector<HTMLInputElement>('#gpu-ft-threshold-range');
+    if (rng) rng.value = String(Math.min(60, nextMs));
+
+    host.querySelectorAll<HTMLButtonElement>('[data-gpu-ft-threshold]').forEach((b) => {
+      b.classList.toggle('active', Math.abs(Number(b.dataset.gpuFtThreshold) - nextMs) < 0.05);
+    });
+
+    this.renderGpuStabilityLogChartAndBadge(this.gpuState);
+  }
+
+  private renderGpuStabilityLogChartAndBadge(g: GpuStressMetrics = this.gpuState): void {
+    const chartEl = this.root.querySelector<HTMLElement>('#gpu-stability-log-d3-chart');
+    const badgeSlot = this.root.querySelector<HTMLElement>('#gpu-stability-log-threshold-badge-slot');
+    const colorAlertSlot = this.root.querySelector<HTMLElement>('#gpu-stability-log-color-alert-slot');
+    const panelEl = this.root.querySelector<HTMLElement>('#gpu-stability-log-panel');
+    if (!chartEl && !badgeSlot && !colorAlertSlot) return;
+
+    const useLoggedPhases =
+      (this.gpuStabilityChartSource === 'all_phases' ||
+        (!g.running && g.telemetry.length === 0)) &&
+      this.gpuStabilityPhaseLogs.length > 0;
+
+    let points = g.telemetry;
+    let phaseBoundaries: GpuStabilityPhaseBoundary[] = [];
+    let isLive = g.running;
+    let sourceLabel = g.running ? 'LIVE — Stres-test GPU' : 'Bieżąca sesja GPU';
+
+    if (useLoggedPhases) {
+      const flattened = flattenStabilityPhasesToTelemetry(this.gpuStabilityPhaseLogs);
+      points = flattened.points;
+      phaseBoundaries = flattened.phaseBoundaries;
+      isLive = false;
+      sourceLabel = `Stability Log (${this.gpuStabilityPhaseLogs.length} faz)`;
+    }
+
+    const state = chartEl
+      ? renderGpuStabilityLogD3Chart(chartEl, points, {
+          thresholdMs: this.gpuFrameTimeThresholdMs,
+          isLive,
+          height: 225,
+          phaseBoundaries,
+          sourceLabel,
+        })
+      : evaluateGpuFrameTimeThreshold(points, this.gpuFrameTimeThresholdMs, isLive);
+
+    if (badgeSlot) {
+      badgeSlot.innerHTML = renderGpuFrameTimeThresholdBadgeHtml(state, isLive);
+    }
+    if (colorAlertSlot) {
+      colorAlertSlot.innerHTML = renderGpuFrameTimeColorAlertBarHtml(state, isLive);
+    }
+    if (panelEl) {
+      panelEl.classList.toggle('is-threshold-approaching', state.status === 'approaching');
+      panelEl.classList.toggle('is-threshold-breach', state.status === 'breach');
+    }
+  }
+
+  private renderGpuStabilityLogPhasesHtml(): string {
+    if (this.gpuStabilityPhaseLogs.length === 0) {
+      return `
+        <div style="font-size:12px;color:var(--text-muted);padding:8px 10px;background:var(--bg-inset);border-radius:8px;border:1px solid var(--border-hairline);">
+          Zarejestrowane fazy testowe GPU: <strong>0</strong>. Zakończ stres-test pojedynczej sceny, Auto-Suite lub Harmonogram GPU, aby każda faza trafiła do rejestru Stability Log JSON (bieżąca sesja również może zostać wyeksportowana od razu).
+        </div>
+      `;
+    }
+    const totalSpikes = this.gpuStabilityPhaseLogs.reduce((s, p) => s + p.frameTimeSpikeCount, 0);
+    const totalThrottles = this.gpuStabilityPhaseLogs.reduce(
+      (s, p) => s + p.thermalThrottlingCount,
+      0
+    );
+    return `
+      <div class="stack-sm">
+        <div class="row-between" style="flex-wrap:wrap;gap:6px;">
+          <span style="font-size:12px;font-weight:600;">Zarejestrowane fazy w Stability Log (${this.gpuStabilityPhaseLogs.length})</span>
+          <span class="font-mono" style="font-size:11.5px;color:var(--text-secondary);">
+            Skoki &gt; próg: <strong class="${totalSpikes > 0 ? 'status-err' : 'status-ok'}">${totalSpikes}</strong> · Zdarzenia throttlingu: <strong class="${totalThrottles > 0 ? 'status-warn' : 'status-ok'}">${totalThrottles}</strong>
+          </span>
+        </div>
+        <div style="overflow-x:auto;max-height:210px;overflow-y:auto;">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Scena 3D / Tryb</th>
+                <th>Rozdz.</th>
+                <th>Czas</th>
+                <th>Śr. / 1% Low</th>
+                <th>Max Frame Time</th>
+                <th>Skoki (&gt; próg)</th>
+                <th>Thermal Throttle</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${this.gpuStabilityPhaseLogs
+                .slice()
+                .reverse()
+                .map(
+                  (p) => `
+                  <tr>
+                    <td class="font-mono">#${p.phaseIndex}</td>
+                    <td>
+                      <div style="font-weight:600;font-size:12px;">${esc(p.sceneName)}</div>
+                      <div style="font-size:10.5px;color:var(--text-muted);">${p.runType === 'auto_suite' ? 'Auto-Suite' : p.runType === 'scheduled_queue' ? 'Harmonogram GPU' : 'Pojedyncza faza'} · ${p.preset.toUpperCase()}</div>
+                    </td>
+                    <td class="font-mono">${esc(getBenchmarkResolutionSpec(p.resolution).shortLabel)}</td>
+                    <td class="font-mono">${p.durationSec}s</td>
+                    <td class="font-mono status-cyan">${p.metrics.avgFps} / ${p.metrics.low1PctFps} FPS</td>
+                    <td class="font-mono ${p.metrics.maxFrameTimeMs > p.frameTimeThresholdMs ? 'status-err' : 'status-ok'}">${p.metrics.maxFrameTimeMs.toFixed(1)} ms</td>
+                    <td class="font-mono ${p.frameTimeSpikeCount > 0 ? 'status-err' : 'status-ok'}">${p.frameTimeSpikeCount}</td>
+                    <td class="font-mono ${p.thermalThrottlingCount > 0 ? 'status-warn' : 'status-ok'}">${p.thermalThrottlingCount} (${p.metrics.peakGpuTempC.toFixed(1)}°C)</td>
+                  </tr>`
+                )
+                .join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
   }
 
   /* =========================================================================
@@ -7548,6 +7978,10 @@ export class SystemPulseApp {
           this.powercfgErrorMsg
         )}
 
+        <div id="bat-endurance-estimator-slot">
+          ${this.renderBatteryEnduranceSlotHtml()}
+        </div>
+
         <div class="panel stack-md">
           <div class="panel-header" style="margin-bottom:0;flex-wrap:wrap;gap:8px;">
             <div>
@@ -7577,8 +8011,8 @@ export class SystemPulseApp {
 
           <div class="stack-sm">
             <div class="row-between" style="flex-wrap:wrap;gap:6px;">
-              <span style="font-size:13px;font-weight:600;">Trend stopnia zużycia (Wear Level) vs Szacowane cykle ładowania (Ostatnie 30 Dni)</span>
-              <span class="panel-caption">Wykres D3.js · Oś Y1: Wear Level (%) · Oś Y2: Est. Power Cycles</span>
+              <span style="font-size:13px;font-weight:600;">Trend stopnia zużycia baterii (Wear Level %) w czasie — dane z powerCycles</span>
+              <span class="panel-caption">Wykres D3.js · Oś Y1: Wear Level (%) + regresja liniowa · Oś Y2: Numer cyklu (powerCycles) · Progi 20% / 30%</span>
             </div>
             <div id="bat-wear-30d-d3-container"></div>
           </div>
@@ -8371,6 +8805,13 @@ export class SystemPulseApp {
       bindBatteryDegradationChartTooltip(batDegradationHost);
     }
 
+    const wearTrendEl = host.querySelector<HTMLElement>('#bat-wear-30d-d3-container');
+    if (wearTrendEl) {
+      renderBatteryWearLevelTrendChartD3(wearTrendEl, b.powerCycles, 235);
+    }
+
+    this.renderBatteryEnduranceChartAndBind(host);
+
     host.querySelector('#bat-add-cycle-form')?.addEventListener('submit', (e) => {
       e.preventDefault();
       const startPct = Number(host.querySelector<HTMLInputElement>('#cycle-start-pct')?.value ?? 20);
@@ -8625,6 +9066,41 @@ export class SystemPulseApp {
     `;
   }
 
+  private renderBatteryEnduranceSlotHtml(): string {
+    const est = estimateBatteryEndurance(this.batteryState, {
+      criticalHealthThresholdPct: this.batteryEnduranceThresholdPct,
+    });
+    return renderBatteryEnduranceEstimatorPanelHtml(est);
+  }
+
+  private renderBatteryEnduranceChartAndBind(host: HTMLElement): void {
+    const slot = host.querySelector<HTMLElement>('#bat-endurance-estimator-slot') ?? host;
+    const est = estimateBatteryEndurance(this.batteryState, {
+      criticalHealthThresholdPct: this.batteryEnduranceThresholdPct,
+    });
+    const chartEl = slot.querySelector<HTMLElement>('#bat-endurance-degradation-d3-chart');
+    if (chartEl) {
+      renderBatteryEnduranceDegradationD3Chart(chartEl, est, 235);
+    }
+    slot.querySelectorAll<HTMLButtonElement>('[data-bat-endurance-threshold]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const nextPct = clampCriticalHealthThresholdPct(Number(btn.dataset.batEnduranceThreshold));
+        this.batteryEnduranceThresholdPct = nextPct;
+        this.patchBatteryEnduranceEstimator(false);
+      });
+    });
+  }
+
+  private patchBatteryEnduranceEstimator(skipIfFocused = true): void {
+    const slot = this.root.querySelector<HTMLElement>('#bat-endurance-estimator-slot');
+    if (!slot) return;
+    if (skipIfFocused && document.activeElement && slot.contains(document.activeElement)) {
+      return;
+    }
+    slot.innerHTML = this.renderBatteryEnduranceSlotHtml();
+    this.renderBatteryEnduranceChartAndBind(this.root);
+  }
+
   private patchBatteryLive(): void {
     const b = this.batteryState;
     const condCls =
@@ -8665,8 +9141,10 @@ export class SystemPulseApp {
 
     const wear30El = this.root.querySelector('#bat-wear-30d-d3-container');
     if (wear30El) {
-      renderBatteryWearLevel30DaysChartD3(wear30El as HTMLElement, b.powerCycles, 220);
+      renderBatteryWearLevelTrendChartD3(wear30El as HTMLElement, b.powerCycles, 235);
     }
+
+    this.patchBatteryEnduranceEstimator(true);
 
     const cycleTable = this.root.querySelector('#bat-cycle-log-table');
     if (cycleTable) cycleTable.innerHTML = this.renderBatteryCycleTableHtml(b);

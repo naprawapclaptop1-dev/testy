@@ -689,18 +689,191 @@ export function renderRadarChart(axes: Array<{ label: string; value: number }>):
   `;
 }
 
-export function renderBatteryWearLevel30DaysChartD3(
+export interface BatteryWearLevelTrendPoint {
+  id: string;
+  date: Date;
+  timestamp: number;
+  dateLabel: string;
+  cycleNumber: number;
+  wearLevelPct: number;
+  healthPct: number;
+  fullChargeCapacityMWh: number;
+  designCapacityMWh: number;
+  degradationFromPrevMWh: number;
+  source: 'auto' | 'manual' | 'baseline';
+}
+
+export interface BatteryWearLevelTrendSummary {
+  points: BatteryWearLevelTrendPoint[];
+  firstWearPct: number;
+  latestWearPct: number;
+  wearIncreasePct: number;
+  spanDays: number;
+  wearRatePctPerMonth: number;
+  wearRatePctPerCycle: number;
+  trendSlopePerDay: number;
+  trendStartWearPct: number;
+  trendEndWearPct: number;
+}
+
+export function buildBatteryWearLevelTrendSeries(
+  powerCycles: BatteryPowerCycleEntry[]
+): BatteryWearLevelTrendSummary {
+  const sorted = [...(powerCycles || [])]
+    .filter((c) => Number.isFinite(c.timestamp))
+    .sort((a, b) => a.timestamp - b.timestamp || a.cycleNumber - b.cycleNumber);
+
+  if (sorted.length === 0) {
+    return {
+      points: [],
+      firstWearPct: 0,
+      latestWearPct: 0,
+      wearIncreasePct: 0,
+      spanDays: 0,
+      wearRatePctPerMonth: 0,
+      wearRatePctPerCycle: 0,
+      trendSlopePerDay: 0,
+      trendStartWearPct: 0,
+      trendEndWearPct: 0,
+    };
+  }
+
+  const points: BatteryWearLevelTrendPoint[] = sorted.map((entry) => {
+    const design = Math.max(1, entry.designCapacityMWh || 56000);
+    const full = Math.max(0, Math.min(design, entry.fullChargeCapacityMWh || design));
+    const computedWear = Number(
+      Math.max(0, Math.min(100, ((design - full) / design) * 100)).toFixed(2)
+    );
+    const wearLevelPct =
+      Number.isFinite(entry.cumulativeWearPct) && entry.cumulativeWearPct >= 0
+        ? Number(Math.min(100, entry.cumulativeWearPct).toFixed(2))
+        : computedWear;
+    const healthPct = Number(Math.max(0, 100 - wearLevelPct).toFixed(2));
+    return {
+      id: entry.id,
+      date: new Date(entry.timestamp),
+      timestamp: entry.timestamp,
+      dateLabel:
+        entry.dateLabel ||
+        new Date(entry.timestamp).toLocaleDateString('pl-PL', {
+          day: '2-digit',
+          month: '2-digit',
+          year: 'numeric',
+        }),
+      cycleNumber: entry.cycleNumber,
+      wearLevelPct,
+      healthPct,
+      fullChargeCapacityMWh: Math.round(full),
+      designCapacityMWh: Math.round(design),
+      degradationFromPrevMWh: Math.round(entry.degradationFromPrevMWh || 0),
+      source: entry.source,
+    };
+  });
+
+  const first = points[0];
+  const last = points[points.length - 1];
+  const spanDays = Number(
+    Math.max(0, (last.timestamp - first.timestamp) / 86_400_000).toFixed(1)
+  );
+  const wearIncreasePct = Number((last.wearLevelPct - first.wearLevelPct).toFixed(2));
+  const cycleSpan = Math.max(1, last.cycleNumber - first.cycleNumber);
+  const wearRatePctPerCycle = Number(
+    (Math.max(0, wearIncreasePct) / cycleSpan).toFixed(4)
+  );
+
+  // OLS linear regression of wearLevelPct over elapsed days
+  const trendInput = points.map((p, idx) => ({
+    x: spanDays > 0 ? (p.timestamp - first.timestamp) / 86_400_000 : idx,
+    y: p.wearLevelPct,
+  }));
+  const trend = computeLinearTrend(trendInput);
+  const xStart = trendInput[0].x;
+  const xEnd = trendInput[trendInput.length - 1].x;
+  const trendStartWearPct = Number(
+    Math.max(0, Math.min(100, trend.predict(xStart))).toFixed(2)
+  );
+  const trendEndWearPct = Number(
+    Math.max(0, Math.min(100, trend.predict(xEnd))).toFixed(2)
+  );
+  const trendSlopePerDay = spanDays > 0 ? Number(trend.slope.toFixed(5)) : 0;
+  const wearRatePctPerMonth =
+    spanDays >= 1
+      ? Number(Math.max(0, trend.slope * 30.4375).toFixed(2))
+      : Number(Math.max(0, wearRatePctPerCycle * 20).toFixed(2));
+
+  return {
+    points,
+    firstWearPct: first.wearLevelPct,
+    latestWearPct: last.wearLevelPct,
+    wearIncreasePct,
+    spanDays,
+    wearRatePctPerMonth,
+    wearRatePctPerCycle,
+    trendSlopePerDay,
+    trendStartWearPct,
+    trendEndWearPct,
+  };
+}
+
+export function renderBatteryWearLevelTrendChartD3(
   container: HTMLElement,
   powerCycles: BatteryPowerCycleEntry[],
-  height = 230
-): void {
+  height = 235
+): BatteryWearLevelTrendSummary {
+  const summary = buildBatteryWearLevelTrendSeries(powerCycles);
   const root = d3.select(container);
   root.selectAll('*').remove();
 
-  const width = Math.max(620, Math.min(1100, container.clientWidth || 780));
-  const margin = { top: 24, right: 54, bottom: 42, left: 56 };
-  const plotW = width - margin.left - margin.right;
-  const plotH = height - margin.top - margin.bottom;
+  if (summary.points.length === 0) {
+    root
+      .append('div')
+      .attr('class', 'chart-box')
+      .style('height', `${height}px`)
+      .style('display', 'flex')
+      .style('align-items', 'center')
+      .style('justify-content', 'center')
+      .style('color', 'var(--text-muted)')
+      .style('font-size', '12px')
+      .text(
+        'Brak zapisanych cykli w powerCycles — zarejestruj sesję ładowania, aby wyświetlić trend zużycia (Wear Level %).'
+      );
+    return summary;
+  }
+
+  const data = summary.points;
+  const width = Math.max(580, Math.min(1100, container.clientWidth || 780));
+  const margin = { top: 28, right: 62, bottom: 42, left: 56 };
+  const plotW = Math.max(220, width - margin.left - margin.right);
+  const plotH = Math.max(120, height - margin.top - margin.bottom);
+
+  // Compact header summary bar
+  const headerBar = root
+    .append('div')
+    .attr('class', 'row-between')
+    .style('margin-bottom', '6px')
+    .style('font-size', '11.5px')
+    .style('flex-wrap', 'wrap')
+    .style('gap', '8px');
+
+  headerBar.html(`
+    <div class="row-wrap" style="gap:14px;align-items:center;">
+      <span style="display:inline-flex;align-items:center;gap:6px;color:var(--text-secondary);">
+        <span style="display:inline-block;width:14px;height:2.5px;background:#06b6d4;"></span>
+        Wear Level (%) — dane z powerCycles
+      </span>
+      <span style="display:inline-flex;align-items:center;gap:6px;color:var(--text-secondary);">
+        <span style="display:inline-block;width:14px;height:0;border-top:2px dashed #f43f5e;"></span>
+        Trend regresji (<strong class="font-mono" style="color:#fb7185;">+${summary.wearRatePctPerMonth.toFixed(2)}%/mies.</strong>)
+      </span>
+      <span style="display:inline-flex;align-items:center;gap:6px;color:var(--text-secondary);">
+        <span style="display:inline-block;width:14px;height:0;border-top:2px dashed #f59e0b;"></span>
+        Cykle ładowania (#)
+      </span>
+    </div>
+    <span class="font-mono" style="color:var(--text-muted);font-size:11px;">
+      ${data.length} wpisów · Zakres: ${summary.spanDays >= 1 ? `${summary.spanDays.toFixed(0)} dni` : 'bieżąca sesja'} · Zużycie: <strong style="color:${summary.latestWearPct >= 30 ? '#fb7185' : summary.latestWearPct >= 20 ? '#fbbf24' : '#22d3ee'};">${summary.latestWearPct.toFixed(1)}%</strong>
+    </span>
+  `);
 
   const wrapper = root
     .append('div')
@@ -710,110 +883,205 @@ export function renderBatteryWearLevel30DaysChartD3(
 
   const svg = wrapper
     .append('svg')
-    .attr('width', width)
+    .attr('class', 'bat-wear-trend-d3-svg')
+    .attr('width', '100%')
     .attr('height', height)
     .attr('viewBox', `0 0 ${width} ${height}`)
-    .style('display', 'block')
-    .style('margin', '0 auto');
+    .attr('role', 'img')
+    .attr('aria-label', 'Wykres trendu zużycia baterii (Wear Level %) w czasie na podstawie powerCycles')
+    .style('display', 'block');
+
+  const defs = svg.append('defs');
+  const wearGrad = defs
+    .append('linearGradient')
+    .attr('id', 'bat-wear-powercycles-grad')
+    .attr('x1', '0%')
+    .attr('y1', '0%')
+    .attr('x2', '0%')
+    .attr('y2', '100%');
+  wearGrad.append('stop').attr('offset', '0%').attr('stop-color', '#06b6d4').attr('stop-opacity', 0.34);
+  wearGrad.append('stop').attr('offset', '100%').attr('stop-color', '#06b6d4').attr('stop-opacity', 0.02);
 
   const g = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`);
 
-  const now = Date.now();
-  const dayMs = 24 * 60 * 60 * 1000;
-  const data: Array<{ date: Date; wearLevel: number; cycles: number }> = [];
+  // Time scale across actual powerCycles span (handle single-point or identical-timestamp edge cases)
+  const minTs = data[0].timestamp;
+  const maxTs = data[data.length - 1].timestamp;
+  const paddedDomain: [Date, Date] =
+    maxTs > minTs
+      ? [new Date(minTs), new Date(maxTs)]
+      : [new Date(minTs - 86_400_000), new Date(maxTs + 86_400_000)];
 
-  for (let i = 29; i >= 0; i--) {
-    const d = new Date(now - i * dayMs);
-    const matching = powerCycles.find((c) => {
-      const cd = new Date(c.timestamp);
-      return cd.toDateString() === d.toDateString();
-    });
+  const xScale = d3.scaleTime().domain(paddedDomain).range([0, plotW]);
 
-    let wear = matching ? matching.cumulativeWearPct : Math.max(1.5, 7.8 - (i * 0.1));
-    let cycles = matching ? matching.cycleNumber : Math.max(1, 115 - Math.round(i * 1.0));
-    data.push({ date: d, wearLevel: wear, cycles });
+  const peakWear = Math.max(
+    25,
+    summary.latestWearPct,
+    summary.trendEndWearPct,
+    d3.max(data, (d) => d.wearLevelPct) || 15
+  );
+  const yWearMax = Math.min(100, Math.max(35, Math.ceil((peakWear * 1.2) / 5) * 5));
+  const yWearScale = d3.scaleLinear().domain([0, yWearMax]).range([plotH, 0]);
+
+  const maxCycles = Math.max(20, d3.max(data, (d) => d.cycleNumber) || 50);
+  const yCyclesScale = d3
+    .scaleLinear()
+    .domain([0, Math.ceil((maxCycles * 1.15) / 10) * 10])
+    .range([plotH, 0]);
+
+  // Shaded critical wear band (>= 30% wear = <= 70% health)
+  if (yWearMax >= 30) {
+    const y30 = yWearScale(30);
+    g.append('rect')
+      .attr('x', 0)
+      .attr('y', 0)
+      .attr('width', plotW)
+      .attr('height', Math.max(0, y30))
+      .attr('fill', 'rgba(244, 63, 94, 0.09)');
   }
 
-  const xScale = d3.scaleTime()
-    .domain(d3.extent(data, d => d.date) as [Date, Date])
-    .range([0, plotW]);
+  // Horizontal gridlines
+  g.append('g')
+    .selectAll('line')
+    .data(yWearScale.ticks(5))
+    .join('line')
+    .attr('x1', 0)
+    .attr('x2', plotW)
+    .attr('y1', (d) => yWearScale(d))
+    .attr('y2', (d) => yWearScale(d))
+    .attr('stroke', 'rgba(148, 163, 184, 0.14)')
+    .attr('stroke-dasharray', '2,3');
 
-  const maxWear = Math.max(15, d3.max(data, d => d.wearLevel) || 12);
-  const yWearScale = d3.scaleLinear()
-    .domain([0, Math.ceil(maxWear * 1.2)])
-    .range([plotH, 0]);
-
-  const maxCycles = Math.max(50, d3.max(data, d => d.cycles) || 100);
-  const yCyclesScale = d3.scaleLinear()
-    .domain([0, Math.ceil(maxCycles * 1.15)])
-    .range([plotH, 0]);
-
-  [0.25, 0.5, 0.75, 1].forEach((f) => {
-    const y = plotH * (1 - f);
+  // Reference wear lines: 20% (warning) and 30% (critical)
+  const drawWearRef = (pct: number, color: string, label: string) => {
+    if (pct > yWearMax) return;
+    const y = yWearScale(pct);
     g.append('line')
-      .attr('x1', 0).attr('x2', plotW)
-      .attr('y1', y).attr('y2', y)
-      .attr('stroke', 'rgba(148, 163, 184, 0.14)');
-  });
+      .attr('class', `bat-wear-ref-${pct}`)
+      .attr('x1', 0)
+      .attr('x2', plotW)
+      .attr('y1', y)
+      .attr('y2', y)
+      .attr('stroke', color)
+      .attr('stroke-width', 1.25)
+      .attr('stroke-dasharray', '5,4')
+      .attr('opacity', 0.85);
+    g.append('text')
+      .attr('x', plotW - 4)
+      .attr('y', Math.max(10, y - 4))
+      .attr('text-anchor', 'end')
+      .attr('fill', color)
+      .attr('font-size', '9.5px')
+      .attr('font-weight', '700')
+      .attr('font-family', 'JetBrains Mono, monospace')
+      .text(label);
+  };
+  drawWearRef(20, '#f59e0b', '20% zużycia (80% kondycji)');
+  drawWearRef(30, '#f43f5e', '30% zużycia (próg wymiany)');
 
-  const wearArea = d3.area<any>()
-    .x(d => xScale(d.date))
+  // Wear area & line
+  const wearArea = d3
+    .area<BatteryWearLevelTrendPoint>()
+    .x((d) => xScale(d.date))
     .y0(plotH)
-    .y1(d => yWearScale(d.wearLevel))
+    .y1((d) => yWearScale(d.wearLevelPct))
     .curve(d3.curveMonotoneX);
 
-  const wearLine = d3.line<any>()
-    .x(d => xScale(d.date))
-    .y(d => yWearScale(d.wearLevel))
+  const wearLine = d3
+    .line<BatteryWearLevelTrendPoint>()
+    .x((d) => xScale(d.date))
+    .y((d) => yWearScale(d.wearLevelPct))
     .curve(d3.curveMonotoneX);
 
-  g.append('path')
-    .datum(data)
-    .attr('fill', 'rgba(6, 182, 212, 0.14)')
-    .attr('d', wearArea);
+  if (data.length >= 2) {
+    g.append('path')
+      .datum(data)
+      .attr('fill', 'url(#bat-wear-powercycles-grad)')
+      .attr('d', wearArea);
 
-  g.append('path')
-    .datum(data)
-    .attr('fill', 'none')
-    .attr('stroke', '#06b6d4')
-    .attr('stroke-width', 2.5)
-    .attr('d', wearLine);
+    g.append('path')
+      .datum(data)
+      .attr('class', 'bat-wear-level-line')
+      .attr('fill', 'none')
+      .attr('stroke', '#06b6d4')
+      .attr('stroke-width', 2.5)
+      .attr('d', wearLine);
 
-  const cyclesLine = d3.line<any>()
-    .x(d => xScale(d.date))
-    .y(d => yCyclesScale(d.cycles))
-    .curve(d3.curveMonotoneX);
+    // OLS regression trendline for long-term wear trajectory
+    g.append('line')
+      .attr('class', 'bat-wear-regression-line')
+      .attr('x1', xScale(data[0].date))
+      .attr('y1', yWearScale(summary.trendStartWearPct))
+      .attr('x2', xScale(data[data.length - 1].date))
+      .attr('y2', yWearScale(summary.trendEndWearPct))
+      .attr('stroke', '#f43f5e')
+      .attr('stroke-width', 1.8)
+      .attr('stroke-dasharray', '6,4')
+      .attr('opacity', 0.9);
 
-  g.append('path')
-    .datum(data)
-    .attr('fill', 'none')
-    .attr('stroke', '#f59e0b')
-    .attr('stroke-width', 2.0)
-    .attr('stroke-dasharray', '4,3')
-    .attr('d', cyclesLine);
+    // Secondary curve: power cycle count
+    const cyclesLine = d3
+      .line<BatteryWearLevelTrendPoint>()
+      .x((d) => xScale(d.date))
+      .y((d) => yCyclesScale(d.cycleNumber))
+      .curve(d3.curveMonotoneX);
 
-  const xAxis = d3.axisBottom(xScale).ticks(6).tickFormat(d3.timeFormat('%d.%m') as any);
+    g.append('path')
+      .datum(data)
+      .attr('class', 'bat-wear-cycles-line')
+      .attr('fill', 'none')
+      .attr('stroke', '#f59e0b')
+      .attr('stroke-width', 1.9)
+      .attr('stroke-dasharray', '4,3')
+      .attr('d', cyclesLine);
+  }
+
+  // Data point circles for every powerCycle entry
+  g.selectAll('circle.bat-wear-cycle-dot')
+    .data(data)
+    .join('circle')
+    .attr('class', 'bat-wear-cycle-dot')
+    .attr('cx', (d) => xScale(d.date))
+    .attr('cy', (d) => yWearScale(d.wearLevelPct))
+    .attr('r', (d) => (d.source === 'manual' || d.source === 'auto' ? 4.5 : 3.6))
+    .attr('fill', (d) =>
+      d.wearLevelPct >= 30 ? '#f43f5e' : d.wearLevelPct >= 20 ? '#f59e0b' : '#06b6d4'
+    )
+    .attr('stroke', '#070b14')
+    .attr('stroke-width', 1.5);
+
+  // Axes
+  const timeFmt = summary.spanDays > 120 ? d3.timeFormat('%m.%Y') : d3.timeFormat('%d.%m');
+  const xAxis = d3
+    .axisBottom(xScale)
+    .ticks(Math.min(6, Math.max(2, data.length)))
+    .tickFormat(timeFmt as any);
   g.append('g')
     .attr('transform', `translate(0,${plotH})`)
     .call(xAxis)
+    .call((sel) => sel.select('.domain').attr('stroke', 'rgba(148,163,184,0.28)'))
+    .call((sel) => sel.selectAll('.tick line').attr('stroke', 'rgba(148,163,184,0.25)'))
     .selectAll('text')
     .style('fill', 'var(--text-muted)')
-    .style('font-size', '10px');
+    .style('font-size', '10px')
+    .style('font-family', 'JetBrains Mono, monospace');
 
-  const yAxisLeft = d3.axisLeft(yWearScale).ticks(5).tickFormat(d => `${d}%`);
   g.append('g')
-    .call(yAxisLeft)
+    .call(d3.axisLeft(yWearScale).ticks(5).tickFormat((d) => `${d}%`))
+    .call((sel) => sel.select('.domain').attr('stroke', 'rgba(148,163,184,0.28)'))
     .selectAll('text')
     .style('fill', '#06b6d4')
-    .style('font-size', '10px');
+    .style('font-size', '10px')
+    .style('font-family', 'JetBrains Mono, monospace');
 
-  const yAxisRight = d3.axisRight(yCyclesScale).ticks(5).tickFormat(d => `${d} cykli`);
   g.append('g')
     .attr('transform', `translate(${plotW},0)`)
-    .call(yAxisRight)
+    .call(d3.axisRight(yCyclesScale).ticks(5).tickFormat((d) => `#${d}`))
+    .call((sel) => sel.select('.domain').attr('stroke', 'rgba(148,163,184,0.28)'))
     .selectAll('text')
     .style('fill', '#f59e0b')
-    .style('font-size', '10px');
+    .style('font-size', '10px')
+    .style('font-family', 'JetBrains Mono, monospace');
 
   g.append('text')
     .attr('transform', 'rotate(-90)')
@@ -821,19 +1089,122 @@ export function renderBatteryWearLevel30DaysChartD3(
     .attr('y', -42)
     .attr('text-anchor', 'middle')
     .style('fill', '#06b6d4')
-    .style('font-size', '11px')
+    .style('font-size', '10.5px')
     .style('font-weight', '600')
     .text('Wear Level (%)');
 
   g.append('text')
     .attr('transform', 'rotate(90)')
     .attr('x', plotH / 2)
-    .attr('y', -plotW - 42)
+    .attr('y', -plotW - 46)
     .attr('text-anchor', 'middle')
     .style('fill', '#f59e0b')
-    .style('font-size', '11px')
+    .style('font-size', '10.5px')
     .style('font-weight', '600')
-    .text('Est. Power Cycles');
+    .text('Power Cycles (#)');
+
+  // Interactive hover crosshair & tooltip
+  const focusLine = g
+    .append('line')
+    .attr('y1', 0)
+    .attr('y2', plotH)
+    .attr('stroke', 'rgba(226, 232, 240, 0.35)')
+    .attr('stroke-dasharray', '3,3')
+    .style('display', 'none');
+
+  const focusDot = g
+    .append('circle')
+    .attr('r', 6)
+    .attr('fill', '#06b6d4')
+    .attr('stroke', '#ffffff')
+    .attr('stroke-width', 2)
+    .style('display', 'none');
+
+  const tooltip = wrapper
+    .append('div')
+    .style('position', 'absolute')
+    .style('pointer-events', 'none')
+    .style('display', 'none')
+    .style('z-index', '15')
+    .style('background', 'rgba(9, 14, 26, 0.96)')
+    .style('border', '1px solid rgba(6, 182, 212, 0.45)')
+    .style('border-radius', '8px')
+    .style('padding', '8px 10px')
+    .style('font-size', '11px')
+    .style('line-height', '1.45')
+    .style('color', '#e2e8f0')
+    .style('box-shadow', '0 8px 24px rgba(0,0,0,0.45)');
+
+  g.append('rect')
+    .attr('width', plotW)
+    .attr('height', plotH)
+    .attr('fill', 'transparent')
+    .style('cursor', 'crosshair')
+    .on('mousemove', (event: MouseEvent) => {
+      const [mx] = d3.pointer(event);
+      const hoverTs = xScale.invert(mx).getTime();
+      let nearest = data[0];
+      let bestDist = Infinity;
+      for (const pt of data) {
+        const dist = Math.abs(pt.timestamp - hoverTs);
+        if (dist < bestDist) {
+          bestDist = dist;
+          nearest = pt;
+        }
+      }
+      if (!nearest) return;
+
+      const cx = xScale(nearest.date);
+      const cy = yWearScale(nearest.wearLevelPct);
+      const srcName =
+        nearest.source === 'auto'
+          ? 'Auto Battery API'
+          : nearest.source === 'manual'
+            ? 'Wpis ręczny'
+            : 'Kalibracja bazowa';
+
+      focusLine.style('display', null).attr('x1', cx).attr('x2', cx);
+      focusDot
+        .style('display', null)
+        .attr('cx', cx)
+        .attr('cy', cy)
+        .attr(
+          'fill',
+          nearest.wearLevelPct >= 30
+            ? '#f43f5e'
+            : nearest.wearLevelPct >= 20
+              ? '#f59e0b'
+              : '#06b6d4'
+        );
+
+      tooltip
+        .style('display', 'block')
+        .html(
+          `<div class="font-mono"><strong>Cykl #${nearest.cycleNumber}</strong> · ${escapeAttr(nearest.dateLabel)}</div>
+           <div class="font-mono">Zużycie (Wear): <strong style="color:${nearest.wearLevelPct >= 30 ? '#fb7185' : nearest.wearLevelPct >= 20 ? '#fbbf24' : '#22d3ee'};">${nearest.wearLevelPct.toFixed(2)}%</strong> (Kondycja ${nearest.healthPct.toFixed(1)}%)</div>
+           <div class="font-mono">Pojemność: <strong>${nearest.fullChargeCapacityMWh.toLocaleString('pl-PL')}</strong> / ${nearest.designCapacityMWh.toLocaleString('pl-PL')} mWh</div>
+           <div class="font-mono">Zmiana vs poprz.: <strong style="color:${nearest.degradationFromPrevMWh < 0 ? '#fbbf24' : '#34d399'};">${nearest.degradationFromPrevMWh > 0 ? '+' : ''}${nearest.degradationFromPrevMWh.toLocaleString('pl-PL')} mWh</strong> · ${srcName}</div>`
+        );
+
+      const leftPx = Math.min(Math.max(8, margin.left + cx + 12), Math.max(8, width - 255));
+      const topPx = Math.max(8, margin.top + cy - 60);
+      tooltip.style('left', `${leftPx}px`).style('top', `${topPx}px`);
+    })
+    .on('mouseleave', () => {
+      focusLine.style('display', 'none');
+      focusDot.style('display', 'none');
+      tooltip.style('display', 'none');
+    });
+
+  return summary;
+}
+
+export function renderBatteryWearLevel30DaysChartD3(
+  container: HTMLElement,
+  powerCycles: BatteryPowerCycleEntry[],
+  height = 230
+): void {
+  renderBatteryWearLevelTrendChartD3(container, powerCycles, height);
 }
 
 export interface GpuVramPoint {
