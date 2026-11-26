@@ -1933,32 +1933,39 @@ export class SystemPulseApp {
                 <span class="kv-val">${s ? `${esc(s.os)} (${esc(s.platform)})` : 'Wykrywanie...'}</span>
               </div>
               <div class="kv-row">
-                <span class="kv-key">Rdzenie logiczne procesora</span>
-                <span class="kv-val">${s ? `${s.cpuCores} wątków` : '—'}</span>
+                <span class="kv-key">Procesor / Rdzenie logiczne</span>
+                <span class="kv-val">${this.hardwareScan?.deepInventory?.cpuModel ? `${esc(this.hardwareScan.deepInventory.cpuModel)} (${s ? `${s.cpuCores} wątków` : ''})` : s ? `${s.cpuCores} wątków logicznych` : '—'}</span>
               </div>
               <div class="kv-row">
-                <span class="kv-key">Wykryta pamięć RAM (API)</span>
-                <span class="kv-val">${s ? (typeof s.deviceMemory === 'number' ? `≥ ${s.deviceMemory} GB` : s.deviceMemory) : '—'}</span>
+                <span class="kv-key">Zainstalowana pamięć RAM</span>
+                <span id="dash-hw-ram-val" class="kv-val">${this.hardwareScan?.deepInventory?.ramModules?.length ? `${Math.round(this.hardwareScan.deepInventory.ramModules.reduce((acc, m) => acc + (m.capacityGB || 0), 0))} GB (${this.hardwareScan.deepInventory.ramModules.length}× ${this.hardwareScan.deepInventory.ramModules[0].memoryType} @ ${this.hardwareScan.deepInventory.ramModules[0].speedMHz} MHz)` : s ? (typeof s.deviceMemory === 'number' ? `≥ ${s.deviceMemory} GB (limit prywatności Web API)` : s.deviceMemory) : '—'}</span>
               </div>
               <div class="kv-row">
-                <span class="kv-key">Karta graficzna (GPU Renderer)</span>
-                <span class="kv-val">${s ? esc(s.gpuRenderer) : '—'}</span>
+                <span class="kv-key">Karta graficzna (GPU 3D & VRAM)</span>
+                <span id="dash-hw-gpu-val" class="kv-val">${(() => {
+                  const clean = hardwareScannerService.decodeCleanGpuSummary(s?.gpuRenderer, s?.gpuVendor);
+                  return this.hardwareScan?.deepInventory?.gpus?.[0]?.name
+                    ? esc(`${this.hardwareScan.deepInventory.gpus[0].name} · ${this.hardwareScan.deepInventory.gpus[0].vramGB || clean.vramLabel}`)
+                    : s
+                      ? esc(`${clean.modelWithPci} · ${clean.vramLabel}`)
+                      : '—';
+                })()}</span>
               </div>
               <div class="kv-row">
                 <span class="kv-key">Obsługa WebGL / WebGPU i tekstury</span>
-                <span class="kv-val">${s ? `${esc(s.webglVersion)} · ${s.maxTextureSize}px` : '—'}</span>
+                <span class="kv-val">${s ? `${esc(s.webglVersion)} · ${s.maxTextureSize}px${this.hardwareScan?.webGpuSummary ? ` · ${esc(this.hardwareScan.webGpuSummary)}` : ''}` : '—'}</span>
               </div>
               <div class="kv-row">
                 <span class="kv-key">Wykryty model matrycy / monitora</span>
-                <span id="dash-hw-panel-model" class="kv-val">${this.hardwareScan ? esc(this.hardwareScan.panel.label) : s ? `${s.screenResolution} @ ${s.estimatedRefreshRate} Hz` : '—'}</span>
+                <span id="dash-hw-panel-model" class="kv-val">${this.hardwareScan ? esc(this.hardwareScan.panel.label) : s ? `${s.screenResolution} @ ${hardwareScannerService.snapStandardRefreshRateHz(s.estimatedRefreshRate)} Hz` : '—'}</span>
               </div>
               <div class="kv-row">
                 <span class="kv-key">Parametry ekranu (Gamut / HDR / Hz)</span>
-                <span id="dash-hw-panel-params" class="kv-val">${this.hardwareScan ? `${this.hardwareScan.panel.nativeResolution} · ${this.hardwareScan.panel.colorGamut} · ${this.hardwareScan.panel.hdrSupported ? 'HDR' : 'SDR'} · ${this.hardwareScan.panel.refreshRateHz} Hz` : s ? `${s.screenResolution} · ${s.colorDepth}-bit · ~${s.estimatedRefreshRate} Hz` : '—'}</span>
+                <span id="dash-hw-panel-params" class="kv-val">${this.hardwareScan ? `${this.hardwareScan.panel.nativeResolution} · ${this.hardwareScan.panel.colorGamut} · ${this.hardwareScan.panel.hdrSupported ? 'HDR' : 'SDR'} · ${hardwareScannerService.snapStandardRefreshRateHz(this.hardwareScan.panel.refreshRateHz)} Hz` : s ? `${s.screenResolution} · ${s.colorDepth}-bit · ${hardwareScannerService.snapStandardRefreshRateHz(s.estimatedRefreshRate)} Hz` : '—'}</span>
               </div>
               <div class="kv-row">
-                <span class="kv-key">Pula przestrzeni dyskowej przeglądarki</span>
-                <span id="dash-hw-storage-pool" class="kv-val">${s && s.storageQuotaGB ? `${s.storageQuotaGB} GB (użyto ${s.storageUsageMB ?? 0} MB)` : 'Dostępna'}</span>
+                <span class="kv-key">Dyski fizyczne / Bufor I/O (OPFS)</span>
+                <span id="dash-hw-storage-pool" class="kv-val">${this.hardwareScan?.deepInventory?.disks?.length ? esc(this.hardwareScan.deepInventory.disks.map((d) => `${d.model} (${d.sizeGB} GB)`).join(' · ')) : s && s.storageQuotaGB ? `Bufor testowy I/O (OPFS): ${s.storageQuotaGB} GB (użyto ${s.storageUsageMB ?? 0} MB)` : 'Aktywny (Native OPFS)'}</span>
               </div>
               <div class="kv-row">
                 <span class="kv-key">Sieć i opóźnienie</span>
@@ -2377,23 +2384,26 @@ export class SystemPulseApp {
       panelModelEl.textContent = this.hardwareScan
         ? this.hardwareScan.panel.label
         : s
-          ? `${s.screenResolution} @ ${s.estimatedRefreshRate} Hz`
+          ? `${s.screenResolution} @ ${hardwareScannerService.snapStandardRefreshRateHz(s.estimatedRefreshRate)} Hz`
           : '—';
     }
 
     const panelParamsEl = host.querySelector<HTMLElement>('#dash-hw-panel-params');
     if (panelParamsEl) {
       panelParamsEl.textContent = this.hardwareScan
-        ? `${this.hardwareScan.panel.nativeResolution} · ${this.hardwareScan.panel.colorGamut} · ${this.hardwareScan.panel.hdrSupported ? 'HDR' : 'SDR'} · ${this.hardwareScan.panel.refreshRateHz} Hz`
+        ? `${this.hardwareScan.panel.nativeResolution} · ${this.hardwareScan.panel.colorGamut} · ${this.hardwareScan.panel.hdrSupported ? 'HDR' : 'SDR'} · ${hardwareScannerService.snapStandardRefreshRateHz(this.hardwareScan.panel.refreshRateHz)} Hz`
         : s
-          ? `${s.screenResolution} · ${s.colorDepth}-bit · ~${s.estimatedRefreshRate} Hz`
+          ? `${s.screenResolution} · ${s.colorDepth}-bit · ${hardwareScannerService.snapStandardRefreshRateHz(s.estimatedRefreshRate)} Hz`
           : '—';
     }
 
     const storagePoolEl = host.querySelector<HTMLElement>('#dash-hw-storage-pool');
     if (storagePoolEl) {
-      storagePoolEl.textContent =
-        s && s.storageQuotaGB ? `${s.storageQuotaGB} GB (użyto ${s.storageUsageMB ?? 0} MB)` : 'Dostępna';
+      storagePoolEl.textContent = this.hardwareScan?.deepInventory?.disks?.length
+        ? this.hardwareScan.deepInventory.disks.map((d) => `${d.model} (${d.sizeGB} GB)`).join(' · ')
+        : s && s.storageQuotaGB
+          ? `Bufor testowy I/O (OPFS): ${s.storageQuotaGB} GB (użyto ${s.storageUsageMB ?? 0} MB)`
+          : 'Aktywny (Native OPFS)';
     }
 
     const netStatusEl = host.querySelector<HTMLElement>('#dash-hw-net-status');

@@ -524,6 +524,103 @@ class HardwareScannerService {
     this.persistSavedDeepInventory(null);
   }
 
+  public snapStandardRefreshRateHz(rawHz: number | null | undefined): number {
+    const hz = Number(rawHz || 60);
+    if (!Number.isFinite(hz) || hz <= 0) return 60;
+    const standards = [60, 75, 90, 100, 120, 144, 165, 170, 175, 180, 200, 240, 280, 300, 360, 480];
+    let best = Math.round(hz);
+    let bestDiff = Infinity;
+    for (const std of standards) {
+      const diff = Math.abs(hz - std);
+      if (diff <= Math.max(3.5, std * 0.025) && diff < bestDiff) {
+        bestDiff = diff;
+        best = std;
+      }
+    }
+    return best;
+  }
+
+  public decodeCleanGpuSummary(
+    rawRenderer?: string | null,
+    rawVendor?: string | null
+  ): {
+    cleanModel: string;
+    modelWithPci: string;
+    vendor: string;
+    backend: string;
+    vramLabel: string;
+    vramShort: string;
+  } {
+    const r = String(rawRenderer || 'Akcelerator Graficzny 3D').trim();
+    const v = String(rawVendor || '').trim();
+    const pciMatch = r.match(/\((0x[0-9a-fA-F]+)\)/);
+    const pciId = pciMatch ? pciMatch[1] : '';
+
+    let cleanModel = r;
+    let backend = 'Direct3D 11 / WebGL 2.0';
+    const angleMatch = r.match(
+      /ANGLE\s*\(\s*([^,]+),\s*([^,]+?)(?:\s*\(0x[0-9a-fA-F]+\))?(?:\s+Direct3D11|\s+Direct3D|\s+Vulkan|\s+OpenGL|,|$)/i
+    );
+    if (angleMatch && angleMatch[2]) {
+      cleanModel = angleMatch[2].replace(/\s*\(0x[0-9a-fA-F]+\)\s*/i, '').trim();
+      if (/Direct3D11/i.test(r)) {
+        backend = r.match(/vs_5_0\s+ps_5_0/i) ? 'Direct3D 11 (SM 5.0)' : 'Direct3D 11';
+      } else if (/Vulkan/i.test(r)) {
+        backend = 'Vulkan API';
+      } else if (/OpenGL/i.test(r)) {
+        backend = 'OpenGL / ANGLE';
+      }
+    } else {
+      cleanModel = r.replace(/^ANGLE\s*\(/i, '').replace(/\)$/i, '').trim();
+    }
+
+    let vendor = v || 'Układ GPU';
+    if (/AMD|Radeon/i.test(r) || /AMD/i.test(v)) {
+      vendor = 'AMD (Advanced Micro Devices)';
+    } else if (/NVIDIA|GeForce|RTX|GTX/i.test(r) || /NVIDIA/i.test(v)) {
+      vendor = 'NVIDIA Corporation';
+    } else if (/Intel|Arc|Iris|UHD/i.test(r) || /Intel/i.test(v)) {
+      vendor = 'Intel Corporation';
+    } else if (/Apple/i.test(r) || /Apple/i.test(v)) {
+      vendor = 'Apple Silicon GPU';
+    }
+
+    let vramLabel = 'Dedykowany VRAM';
+    let vramShort = 'VRAM';
+    const ref = `${this.deepInventory?.gpus?.[0]?.name || ''} ${r}`;
+    if (/7900\s*XTX|4090|3090/i.test(ref)) {
+      vramLabel = '24 GB GDDR6 / GDDR6X';
+      vramShort = '24 GB GDDR6';
+    } else if (/5090/i.test(ref)) {
+      vramLabel = '32 GB GDDR7';
+      vramShort = '32 GB GDDR7';
+    } else if (/7900\s*XT/i.test(ref)) {
+      vramLabel = '20 GB GDDR6';
+      vramShort = '20 GB GDDR6';
+    } else if (/7900\s*GRE|7800\s*XT|6800|6900|6950|4080|4070\s*Ti\s*Super|5080|5070\s*Ti/i.test(ref)) {
+      vramLabel = '16 GB GDDR6 / GDDR6X';
+      vramShort = '16 GB GDDR6';
+    } else if (/4070|3080|6700\s*XT|6750\s*XT|7700\s*XT|5070/i.test(ref)) {
+      vramLabel = '12 GB GDDR6 / GDDR6X';
+      vramShort = '12 GB GDDR6';
+    } else if (/4060|3070|3060\s*Ti|7600|6600/i.test(ref)) {
+      vramLabel = '8 GB GDDR6';
+      vramShort = '8 GB GDDR6';
+    } else if (this.deepInventory?.gpus?.[0]?.vramGB) {
+      vramLabel = this.deepInventory.gpus[0].vramGB;
+      vramShort = this.deepInventory.gpus[0].vramGB;
+    }
+
+    return {
+      cleanModel,
+      modelWithPci: pciId ? `${cleanModel} (PCI ID: ${pciId})` : cleanModel,
+      vendor,
+      backend,
+      vramLabel,
+      vramShort,
+    };
+  }
+
   public async scanAll(
     refreshRateHz: number,
     gpuRenderer = '',
@@ -595,10 +692,13 @@ class HardwareScannerService {
           `${specs.os} · ${specs.browser} · Platforma: ${specs.platform}`,
         status: 'Aktywne',
       });
+      const cleanGpu = this.decodeCleanGpuSummary(specs.gpuRenderer, specs.gpuVendor);
       devices.push({
         category: 'Karta graficzna (GPU)',
-        name: this.deepInventory?.gpus[0]?.name || specs.gpuRenderer,
-        details: `${specs.gpuVendor} · WebGL MaxTex: ${specs.maxTextureSize}px · ${this.cachedWebGpuSummary}`,
+        name: this.deepInventory?.gpus[0]?.name
+          ? `${this.deepInventory.gpus[0].name} (${this.deepInventory.gpus[0].vramGB || cleanGpu.vramLabel})`
+          : `${cleanGpu.modelWithPci} · ${cleanGpu.vramLabel}`,
+        details: `${cleanGpu.vendor} · ${cleanGpu.backend} · WebGL MaxTex: ${specs.maxTextureSize}px · ${this.cachedWebGpuSummary}`,
         status: 'Aktywne',
       });
     }
@@ -621,7 +721,7 @@ class HardwareScannerService {
         : 'Pamięć operacyjna systemu';
       devices.push({
         category: 'Pamięć RAM',
-        name: memGB ? `${memGB >= 8 ? '≥ ' : ''}${memGB} GB RAM (wykryto przez przeglądarkę)` : 'Pamięć operacyjna (użyj Skanera SMBIOS dla pełnej listy kości DIMM)',
+        name: memGB ? `${memGB >= 8 ? '≥ ' : ''}${memGB} GB RAM (limit prywatności Web API)` : 'Pamięć operacyjna (użyj Skanera SMBIOS dla pełnej listy kości DIMM)',
         details: `${heapLimitGB} · Aby odczytać każdą fizyczną kość DIMM (slot, MHz, DDR4/DDR5, producenta), użyj Skanera 1-Klik poniżej`,
         status: 'Aktywne',
       });
@@ -640,8 +740,8 @@ class HardwareScannerService {
     } else {
       devices.push({
         category: 'Dysk / Pamięć masowa',
-        name: `Przestrzeń OPFS / Dysku (${storageSummary.quotaGB > 0 ? `pula ${storageSummary.quotaGB} GB` : 'aktywna'})`,
-        details: `Zajęto: ${storageSummary.usageMB} MB · OPFS: ${storageSummary.opfsSupported ? 'Tak' : 'Nie'} · Kliknij „Wskaż dysk/partycję” lub „Skaner SMBIOS”, aby odczytać modele NVMe/SSD/HDD`,
+        name: `Bufor testowy I/O przeglądarki (${storageSummary.quotaGB > 0 ? `${storageSummary.quotaGB} GB bufora OPFS` : 'aktywny'})`,
+        details: `Użyto: ${storageSummary.usageMB} MB · OPFS: ${storageSummary.opfsSupported ? 'Tak' : 'Nie'} (to bufor testowy przeglądarki, NIE rozmiar dysku fizycznego — użyj Skanera SMBIOS dla dysków NVMe/SSD)`,
         status: 'Aktywne',
       });
     }
@@ -1755,7 +1855,12 @@ class HardwareScannerService {
 
     const hasWasmSimd = typeof WebAssembly === 'object' && typeof SharedArrayBuffer !== 'undefined';
     const cpuModel = deep?.cpuModel || `${specs?.platform || 'x86-64'} · ${specs?.cpuCores || navigator.hardwareConcurrency || 4} wątków`;
-    const gpuName = deep?.gpus[0]?.name || specs?.gpuRenderer || 'Wykryty GPU WebGL2';
+    const cleanGpu = this.decodeCleanGpuSummary(specs?.gpuRenderer, specs?.gpuVendor);
+    const gpuName = deep?.gpus[0]?.name || cleanGpu.modelWithPci || 'Wykryty GPU WebGL2';
+    const gpuVramDisplay =
+      deep?.gpus[0]?.vramGB ||
+      cleanGpu.vramShort ||
+      (context.liveGpuTempC !== null ? `${context.liveGpuTempC.toFixed(0)} °C` : 'Sprzętowy');
     const ramTotalGB = deep?.ramModules?.length
       ? deep.ramModules.reduce((acc, m) => acc + m.capacityGB, 0)
       : typeof specs?.deviceMemory === 'number'
@@ -1793,13 +1898,13 @@ class HardwareScannerService {
         category: 'GPU',
         status: context.gpuState.isSoftwareGl ? 'UWAGA' : 'OK',
         score: context.gpuState.overallScore > 0 ? context.gpuState.overallScore : context.gpuState.isSoftwareGl ? 52 : 96,
-        headline: gpuName.slice(0, 62),
-        summary: `${specs?.webglVersion || 'WebGL 2.0'} · ${scan?.webGpuSummary || 'WebGPU Gotowy'}`,
+        headline: gpuName.slice(0, 68),
+        summary: `${cleanGpu.vendor} · ${specs?.webglVersion || 'WebGL 2.0'} · ${scan?.webGpuSummary || 'WebGPU Gotowy'}`,
         source: deep?.gpus?.length ? (isNative ? 'Auto (.EXE Native)' : 'SMBIOS') : 'Auto (Web API)',
         metrics: [
           { label: 'Max Tekstura', value: `${glLim.maxTex}px` },
           { label: 'MSAA / AF', value: `${glLim.maxMsaa}× / ${glLim.maxAniso}×` },
-          { label: 'VRAM / Ster.', value: deep?.gpus[0]?.vramGB || (context.liveGpuTempC !== null ? `${context.liveGpuTempC.toFixed(0)} °C` : 'Sprzętowy') },
+          { label: 'VRAM / Klasa', value: gpuVramDisplay },
         ],
         scannedAt: now,
       },
@@ -1872,11 +1977,11 @@ class HardwareScannerService {
         category: 'DISPLAY',
         status: 'OK',
         score: 95,
-        headline: scan?.panel?.label || `${specs?.screenResolution || '1920×1080'} @ ${specs?.estimatedRefreshRate || 60}Hz`,
-        summary: `${scan?.panel?.nativeResolution || specs?.screenResolution || '—'} · ${scan?.panel?.refreshRateHz || specs?.estimatedRefreshRate || 60} Hz · ${scan?.panel?.colorGamut || 'sRGB'} · ${scan?.panel?.hdrSupported ? 'HDR Aktywne' : 'SDR'}`,
+        headline: scan?.panel?.label || `${specs?.screenResolution || '1920×1080'} @ ${this.snapStandardRefreshRateHz(specs?.estimatedRefreshRate || 60)} Hz`,
+        summary: `${scan?.panel?.nativeResolution || specs?.screenResolution || '—'} · ${this.snapStandardRefreshRateHz(scan?.panel?.refreshRateHz || specs?.estimatedRefreshRate || 60)} Hz · ${scan?.panel?.colorGamut || 'sRGB'} · ${scan?.panel?.hdrSupported ? 'HDR Aktywne' : 'SDR'}`,
         source: this.cachedPanelLabel ? (isNative ? 'Auto (.EXE Native)' : 'Live Probe') : 'Auto (Web API)',
         metrics: [
-          { label: 'Odświeżanie', value: `${scan?.panel?.refreshRateHz || specs?.estimatedRefreshRate || 60} Hz` },
+          { label: 'Odświeżanie', value: `${this.snapStandardRefreshRateHz(scan?.panel?.refreshRateHz || specs?.estimatedRefreshRate || 60)} Hz` },
           { label: 'Gamut / Bit', value: `${scan?.panel?.colorGamut || 'sRGB'} ${scan?.panel?.colorDepthBit || 24}b` },
           { label: 'Ekrany', value: `${scan?.panel?.screenCount || 1}` },
         ],
@@ -2045,12 +2150,14 @@ export function analyzeDeepHardware(
       });
     }
   } else {
+    const cleanGpu = hardwareScannerService.decodeCleanGpuSummary(specs?.gpuRenderer, specs?.gpuVendor);
+    const snappedLiveHz = hardwareScannerService.snapStandardRefreshRateHz(scan?.panel?.refreshRateHz || specs?.estimatedRefreshRate || 60);
     specRows.push(
       { category: 'System / Platforma', parameter: 'OS i architektura', value: specs ? `${specs.os} (${specs.platform})` : '—', source: 'Live API' },
       { category: 'Procesor (CPU)', parameter: 'Wątki logiczne (Navigator)', value: specs ? `${specs.cpuCores} wątków logicznych` : '—', source: 'Live API' },
-      { category: 'Karta graficzna (GPU)', parameter: 'Renderer WebGL / ANGLE', value: specs?.gpuRenderer || '—', source: 'Live API' },
-      { category: 'Pamięć RAM (Navigator)', parameter: 'Przybliżona pojemność', value: specs ? `${specs.deviceMemory} GB (limit API 8 GB)` : '—', source: 'Live API' },
-      { category: 'Ekran / Wyświetlacz', parameter: 'Rozdzielczość & Odświeżanie', value: specs ? `${specs.screenResolution} @ ${specs.estimatedRefreshRate} Hz (DPR ${specs.devicePixelRatio}x)` : '—', source: 'Live API' }
+      { category: 'Karta graficzna (GPU)', parameter: 'Model GPU + VRAM + Silnik', value: `${cleanGpu.modelWithPci} · ${cleanGpu.vramLabel} (${cleanGpu.vendor} | ${cleanGpu.backend})`, source: 'Live API' },
+      { category: 'Pamięć RAM (Navigator)', parameter: 'Pojemność (Web API)', value: specs ? `≥ ${specs.deviceMemory} GB (limit prywatności Web API — użyj Skanera 1-Klik SMBIOS dla pełnej listy kości DIMM)` : '—', source: 'Live API' },
+      { category: 'Ekran / Wyświetlacz', parameter: 'Rozdzielczość & Odświeżanie', value: specs ? `${scan?.panel?.label ? `${scan.panel.label} · ` : ''}${scan?.panel?.nativeResolution || specs.screenResolution} @ ${snappedLiveHz} Hz (DPR ${specs.devicePixelRatio}x)` : '—', source: 'Live API' }
     );
   }
 

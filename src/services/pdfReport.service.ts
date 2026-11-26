@@ -1880,22 +1880,25 @@ export function generateBatteryTrendReportPdf(
   const nowStr = new Date().toLocaleString('pl-PL');
 
   // --- Header Band ---
-  doc.setFillColor(15, 23, 42);
-  doc.rect(0, 0, pageW, 30, 'F');
+  doc.setFillColor(12, 18, 30);
+  doc.rect(0, 0, pageW, 34, 'F');
   doc.setFillColor(16, 185, 129);
-  doc.rect(0, 29, pageW, 1.2, 'F');
+  doc.rect(0, 33, pageW, 1.2, 'F');
 
   doc.setTextColor(255, 255, 255);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(15);
-  doc.text('SystemPulse Pro - Battery Trend & Degradation Report', margin, 13);
+  doc.setFontSize(14.5);
+  doc.text('SystemPulse Pro - Raport Baterii i Degradacji', margin, 13);
 
   doc.setFont('helvetica', 'normal');
-  doc.setFontSize(9);
+  doc.setFontSize(8.2);
   doc.setTextColor(148, 163, 184);
-  doc.text(pdfText(`Analiza trendu poboru mocy vs degradacja ogniw (ostatnie 30+ dni) | Wygenerowano: ${nowStr}`), margin, 21);
+  doc.text(pdfText('Analiza trendu poboru mocy vs degradacja ogniw (ostatnie 30+ dni)'), margin, 19.8);
+  doc.text(pdfText(`Wygenerowano: ${nowStr}`), margin, 26);
 
-  let y = 38;
+  drawRafalJaroszServiceLogoPdf(doc, pageW - margin - 66, 4.6, 66, 24);
+
+  let y = 42;
   let sectionIdx = 1;
 
   // --- Summary KPIs ---
@@ -1960,7 +1963,7 @@ export function generateBatteryTrendReportPdf(
 
     const cycles = [...battery.powerCycles].slice(-15);
     for (const c of cycles) {
-      if (y > 275) {
+      if (y > 272) {
         doc.addPage();
         y = 20;
       }
@@ -1979,13 +1982,25 @@ export function generateBatteryTrendReportPdf(
   }
 
   // Footer
-  doc.setDrawColor(226, 232, 240);
-  doc.line(margin, 282, pageW - margin, 282);
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(7.5);
-  doc.setTextColor(100, 116, 139);
-  doc.text(pdfText('SystemPulse Pro | Raport trendu baterii i degradacji ogniw.'), margin, 287);
-  doc.text('Strona 1 / 1', pageW - margin, 287, { align: 'right' });
+  const totalPages = doc.getNumberOfPages();
+  for (let p = 1; p <= totalPages; p++) {
+    doc.setPage(p);
+    doc.setDrawColor(226, 232, 240);
+    doc.line(margin, 282.5, pageW - margin, 282.5);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.0);
+    doc.setTextColor(15, 23, 42);
+    doc.text(
+      pdfText('NAPRAWA KOMPUTEROW I LAPTOPOW - Rafal Jarosz | NAPRAWAPCLAPTOP.PL | Tel. 786 409 187 | Warszawa, ul. Marymoncka 125 m.109 p.6'),
+      margin,
+      286.5
+    );
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(6.8);
+    doc.setTextColor(100, 116, 139);
+    doc.text(pdfText('Copyright (c) Rafal Jarosz - SystemPulse Pro | Raport trendu baterii i degradacji ogniw.'), margin, 290.2);
+    doc.text(`Strona ${p} / ${totalPages}`, pageW - margin, 288.5, { align: 'right' });
+  }
 
   doc.save(`systempulse-battery-trend-report-${new Date().toISOString().slice(0, 10)}.pdf`);
 }
