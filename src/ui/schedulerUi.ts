@@ -104,6 +104,7 @@ export function createScheduledItem(type: ScheduledTestType): ScheduledTestItem 
       durationSec: type === 'gpu_all_scenes' ? 10 : 6,
       gpuPreset: 'high',
       gpuFpsMode: 'uncapped',
+      gpuSceneId: type === 'gpu_stress' ? 'vortex' : undefined,
       resolution: '1080p',
     };
   }
@@ -167,7 +168,8 @@ export function describeItemConfig(item: ScheduledTestItem): string {
   if (item.type === 'ram') return `Bufor: ${item.ramSizeMB || 128} MB · 10 etapów MemTest86+`;
   if (item.type === 'gpu_stress') {
     const res = getBenchmarkResolutionSpec(item.resolution || '1080p').shortLabel;
-    return `Czas: ${item.durationSec || 6}s · ${res} · Preset: ${item.gpuPreset || 'high'} · ${item.gpuFpsMode === 'vsync' ? 'VSync' : 'Bez limitu FPS'}`;
+    const scenePart = item.gpuSceneId ? `Scena: ${item.gpuSceneId} · ` : '';
+    return `${scenePart}Czas: ${item.durationSec || 6}s · ${res} · Preset: ${item.gpuPreset || 'high'} · ${item.gpuFpsMode === 'vsync' ? 'VSync' : 'Bez limitu FPS'}`;
   }
   if (item.type === 'gpu_all_scenes') {
     const res = getBenchmarkResolutionSpec(item.resolution || '1080p').shortLabel;

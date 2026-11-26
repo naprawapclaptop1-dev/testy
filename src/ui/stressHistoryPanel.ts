@@ -139,6 +139,15 @@ export function renderStressHistoryPanelHtml(history: StressSessionRecord[]): st
             ${iconSvg('csv', 14)}
             <span>Eksport CSV</span>
           </button>
+          <button
+            id="dash-export-stress-json-btn"
+            type="button"
+            class="btn btn-secondary btn-sm"
+            ${count === 0 ? 'disabled title="Uruchom przynajmniej jeden stres-test, aby wyeksportować szczegółową historię logów do JSON"' : 'title="Eksportuj pełną, ustrukturyzowaną historię sesji stres-testów i logów diagnostycznych do pliku JSON"'}
+          >
+            ${iconSvg('download', 14)}
+            <span>Eksport JSON</span>
+          </button>
           ${
             count > 0
               ? `<button id="dash-clear-stress-history-btn" type="button" class="btn btn-secondary btn-sm">Wyczyść historię</button>`

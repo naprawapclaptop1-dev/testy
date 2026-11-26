@@ -877,6 +877,7 @@ export interface ScheduledTestItem {
   ramSizeMB?: number;
   gpuPreset?: GpuLoadPreset;
   gpuFpsMode?: GpuFpsMode;
+  gpuSceneId?: GpuSceneMode;
   resolution?: BenchmarkResolutionId;
 }
 

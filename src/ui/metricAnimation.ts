@@ -4,6 +4,7 @@ export interface MetricAnimationOptions {
 
 const activeAnimationFrames = new WeakMap<HTMLElement, number>();
 const activeHighlightTimers = new WeakMap<HTMLElement, number>();
+const activeCardUpdateTimers = new WeakMap<HTMLElement, number>();
 
 export function formatAnimatedMetricNumber(
   value: number,
@@ -21,6 +22,76 @@ export function formatAnimatedMetricNumber(
       })
     : rounded.toFixed(decimals);
   return `${prefix}${formatted}${suffix}`;
+}
+
+/**
+ * Applies a subtle staggered CSS entrance transition to `.metric-card` elements
+ * inside a freshly rendered Dashboard container, respecting prefers-reduced-motion.
+ */
+export function triggerMetricCardEntranceTransitions(
+  container: ParentNode | null | undefined,
+  staggerMs = 45
+): number {
+  if (!container) return 0;
+  const cards = container.querySelectorAll<HTMLElement>('.metric-card');
+  if (cards.length === 0) return 0;
+
+  const reduceMotion =
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  if (reduceMotion || typeof requestAnimationFrame !== 'function') {
+    cards.forEach((card) => {
+      card.classList.remove('metric-card-enter-ready');
+      card.classList.add('metric-card-entered');
+    });
+    return cards.length;
+  }
+
+  cards.forEach((card, idx) => {
+    const delay = Math.min(idx, 7) * Math.max(0, staggerMs);
+    card.style.transitionDelay = `${delay}ms`;
+    card.classList.remove('metric-card-entered');
+    card.classList.add('metric-card-enter-ready');
+  });
+
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      cards.forEach((card, idx) => {
+        if (!card.isConnected) return;
+        card.classList.remove('metric-card-enter-ready');
+        card.classList.add('metric-card-entered');
+        const delay = Math.min(idx, 7) * Math.max(0, staggerMs);
+        window.setTimeout(() => {
+          if (card.isConnected) {
+            card.style.transitionDelay = '';
+          }
+        }, delay + 360);
+      });
+    });
+  });
+
+  return cards.length;
+}
+
+function pulseParentMetricCard(el: HTMLElement): void {
+  if (typeof el.closest !== 'function') return;
+  const card = el.closest<HTMLElement>('.metric-card');
+  if (!card) return;
+  const prevTimer = activeCardUpdateTimers.get(card);
+  if (prevTimer !== undefined) {
+    clearTimeout(prevTimer);
+    activeCardUpdateTimers.delete(card);
+  }
+  card.classList.add('is-value-updated');
+  const timer = window.setTimeout(() => {
+    if (card.isConnected) {
+      card.classList.remove('is-value-updated');
+    }
+    activeCardUpdateTimers.delete(card);
+  }, 520);
+  activeCardUpdateTimers.set(card, timer);
 }
 
 export function animateMetricValueElements(
@@ -82,6 +153,7 @@ export function animateMetricValueElements(
     const startRaf = requestAnimationFrame(() => {
       if (!el.isConnected) return;
       el.classList.add('is-updating');
+      pulseParentMetricCard(el);
       const startTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
 
       const step = (now: number) => {

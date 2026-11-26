@@ -76,7 +76,12 @@ import {
 } from './ui/pcPsuChart';
 import { downloadPortableExeZip } from './services/portableExeBuilder.service';
 import { pwaInstallService } from './services/pwaInstall.service';
-import { soundNotificationService, NotificationEventType, SoundPreset } from './services/soundNotification.service';
+import {
+  CUSTOM_AUDIO_MAX_RECORD_SEC,
+  NotificationEventType,
+  SoundPreset,
+  soundNotificationService,
+} from './services/soundNotification.service';
 import {
   DISPLAY_PATTERNS,
   OLED_PROTECTION_DURATION_SEC,
@@ -155,7 +160,24 @@ import {
   renderFanResonanceZonesHtml,
   renderPredictiveBearingAlertModalHtml,
 } from './ui/fanDiagnosticsVisuals';
-import { animateMetricValueElements } from './ui/metricAnimation';
+import {
+  animateMetricValueElements,
+  triggerMetricCardEntranceTransitions,
+} from './ui/metricAnimation';
+import {
+  clampSensorThresholdC,
+  createTemperatureAlertRuntimeState,
+  evaluateTemperatureThresholds,
+  getDefaultTemperatureThresholds,
+  loadTemperatureThresholds,
+  renderTemperatureThresholdsPanelHtml,
+  saveTemperatureThresholds,
+  TEMP_SENSOR_META,
+  TempSensorKey,
+  TemperatureAlertRuntimeState,
+  TemperatureSensorReadings,
+  TemperatureThresholdSettings,
+} from './ui/temperatureThresholds';
 import { isLowBatteryHealth, renderLowBatteryHealthAlertHtml } from './ui/batteryLowHealthAlert';
 import { isPsuCapacityOver95, renderPsuCapacityAlertBannerHtml } from './ui/psuCapacityAlert';
 import { PsuRail5sCoord, renderRail5sSparklinePreviewHtml } from './ui/psuRailSparklinePreview';
@@ -169,6 +191,7 @@ import { renderStressHistoryPanelHtml } from './ui/stressHistoryPanel';
 import { WorkspaceErrorBoundary } from './ui/workspaceErrorBoundary';
 import {
   exportStressHistoryToCsv,
+  exportStressHistoryToJson,
   exportStressHistoryToXlsx,
 } from './services/stressExport.service';
 import { downloadFullDiagnosticDataJson } from './services/fullDataExport.service';
@@ -203,6 +226,28 @@ import {
   renderGpuStabilityAlertIndicatorHtml,
   renderGpuStabilityD3Chart,
 } from './ui/gpuStabilityChart';
+import {
+  GpuHeatmapPipelineFilter,
+  GpuHeatmapVisibilityMode,
+  GpuSceneStabilityAccumulator,
+  recordGpuSceneStabilitySample,
+  renderGpuSceneStabilityHeatmapD3,
+} from './ui/gpuSceneStabilityHeatmap';
+import {
+  GpuSchedulePresetId,
+  GpuScheduleRunState,
+  addGpuScheduleItem,
+  clampGpuScheduleDurationSec,
+  createGpuSchedulePreset,
+  createGpuScheduledItem,
+  createInitialGpuScheduleState,
+  duplicateGpuScheduleItem,
+  moveGpuScheduleItem,
+  removeGpuScheduleItem,
+  renderGpuSchedulerPanelHtml,
+  summarizeGpuScheduleResults,
+  updateGpuScheduleItem,
+} from './ui/gpuStressScheduler';
 import {
   ParsedBatteryReport,
   bindPowercfgBatteryReportEvents,
@@ -485,11 +530,24 @@ export class SystemPulseApp {
   private stressHistory: StressSessionRecord[] = [];
   private activeStressSession: { startedAt: number; cpuTemps: number[]; gpuTemps: number[] } | null = null;
   private gpuStabilityWindowMode: GpuStabilityWindowMode = 'all';
+  private gpuSceneStabilityStore = new Map<GpuSceneMode, GpuSceneStabilityAccumulator>();
+  private gpuHeatmapPipelineFilter: GpuHeatmapPipelineFilter = 'all';
+  private gpuHeatmapVisibilityMode: GpuHeatmapVisibilityMode = 'tested';
+  private lastGpuHeatmapSampleKey = '';
   private powercfgReport: ParsedBatteryReport | null = loadSavedPowercfgReport();
   private powercfgRawText = '';
   private powercfgErrorMsg = '';
   private gpuSuiteRunning = false;
   private gpuSuiteStatus = '';
+  private gpuScheduleState: GpuScheduleRunState = createInitialGpuScheduleState();
+  private customAudioStatusMsg = '';
+  private customAudioStatusTone: 'ok' | 'err' | 'info' = 'info';
+  private customAudioRecording = false;
+  private customAudioRecordElapsedSec = 0;
+  private customAudioRecordTimer: number | null = null;
+  private customAudioRecordCleanup: ((save: boolean) => void) | null = null;
+  private tempThresholds: TemperatureThresholdSettings = loadTemperatureThresholds();
+  private tempAlertRuntime: TemperatureAlertRuntimeState = createTemperatureAlertRuntimeState();
   private gpuSuiteResults: Array<{
     sceneId: GpuSceneMode;
     name: string;
@@ -718,6 +776,7 @@ export class SystemPulseApp {
       if (this.activeModule === 'dashboard') {
         this.patchDashboardThermalMap();
       }
+      this.checkCustomTemperatureThresholds(true);
     });
     thermalMonitorService.start();
 
@@ -737,6 +796,7 @@ export class SystemPulseApp {
       } else if (this.activeModule === 'dashboard') {
         this.patchDashboardBatterySummary();
       }
+      this.checkCustomTemperatureThresholds(true);
     });
 
     const [specs, battery, saved, logs] = await Promise.all([
@@ -1036,6 +1096,9 @@ export class SystemPulseApp {
     this.schedulerQueue = getDefaultSchedulerQueue();
     this.stressHistory = [];
     this.gpuSuiteResults = [];
+    this.gpuScheduleState = createInitialGpuScheduleState();
+    this.gpuSceneStabilityStore.clear();
+    this.lastGpuHeatmapSampleKey = '';
     batteryHealthService.resetPowerCycles();
     this.batteryState = batteryHealthService.getState();
     this.logCount = 0;
@@ -1106,7 +1169,13 @@ export class SystemPulseApp {
     if (this.activeModule === mod) return;
 
     // Cleanly detach canvas-bound or hardware-bound modules when leaving
+    if (this.activeModule === 'dashboard' && this.customAudioRecording) {
+      this.stopCustomAudioRecording(false);
+    }
     if (this.activeModule === 'gpu') {
+      if (this.gpuScheduleState.running) {
+        this.gpuScheduleState.abortRequested = true;
+      }
       gpuStressEngine.unmount();
     }
     if (this.activeModule === 'game') {
@@ -1501,6 +1570,7 @@ export class SystemPulseApp {
       await new Promise((r) => setTimeout(r, 150));
       this.gpuState = await gpuStressEngine.runTimedBenchmark(4200, (m) => {
         this.gpuState = m;
+        this.recordLiveGpuHeatmapSample(m);
         this.patchGpuLive();
       });
       await this.recordLog(
@@ -1955,7 +2025,9 @@ export class SystemPulseApp {
 
         ${this.renderDetailedStressLogHtml()}
 
-        ${this.renderSoundAlertsConfigHtml()}
+        <div id="dash-temp-thresholds-slot">${this.renderTemperatureThresholdsSlotHtml()}</div>
+
+        <div id="dash-sound-config-slot">${this.renderSoundAlertsConfigHtml()}</div>
 
         <div class="grid-split-wide">
           <div class="panel stack-md">
@@ -2190,40 +2262,38 @@ export class SystemPulseApp {
         if (btn.isConnected) btn.innerHTML = origHtml;
       }, 2200);
     });
+    host.querySelector('#dash-export-stress-json-btn')?.addEventListener('click', (e) => {
+      if (this.stressHistory.length === 0) return;
+      const btn = e.currentTarget as HTMLButtonElement;
+      const origHtml = btn.innerHTML;
+      void (async () => {
+        const diagnosticLogs = await persistenceService.getAllLogs();
+        const exported = exportStressHistoryToJson(this.stressHistory, {
+          specs: this.specs,
+          diagnosticLogs,
+        });
+        void this.recordLog(
+          'SYSTEM',
+          'OK',
+          'Eksport historii stres-testów (JSON)',
+          'Sesje / Logi',
+          `${exported.sessionCount} sesji · ${exported.logCount} logów`,
+          `Wyeksportowano pełny ustrukturyzowany plik JSON (${exported.filename}, ${(exported.byteSize / 1024).toFixed(1)} KB) do ręcznej analizy`
+        );
+        if (btn.isConnected) {
+          btn.innerHTML = `${iconSvg('download', 14)}<span>Zapisano .json ✓</span>`;
+          window.setTimeout(() => {
+            if (btn.isConnected) btn.innerHTML = origHtml;
+          }, 2200);
+        }
+      })();
+    });
 
-    // Sound Alerts Config Binders
-    const masterToggle = host.querySelector<HTMLInputElement>('#sound-master-toggle');
-    masterToggle?.addEventListener('change', () => {
-      soundNotificationService.setEnabled(masterToggle.checked);
-    });
-    host.querySelectorAll<HTMLInputElement>('[data-sound-ev-toggle]').forEach((chk) => {
-      chk.addEventListener('change', () => {
-        const evKey = chk.dataset.soundEvToggle as NotificationEventType;
-        if (!evKey) return;
-        const cur = soundNotificationService.getSettings();
-        const evMap = cur.events;
-        evMap[evKey].enabled = chk.checked;
-        soundNotificationService.updateSettings({ events: evMap });
-      });
-    });
-    host.querySelectorAll<HTMLSelectElement>('[data-sound-preset]').forEach((sel) => {
-      sel.addEventListener('change', () => {
-        const evKey = sel.dataset.soundPreset as NotificationEventType;
-        if (!evKey) return;
-        const preset = sel.value as SoundPreset;
-        const cur = soundNotificationService.getSettings();
-        const evMap = cur.events;
-        evMap[evKey].preset = preset;
-        soundNotificationService.updateSettings({ events: evMap });
-      });
-    });
-    host.querySelectorAll<HTMLButtonElement>('[data-sound-test]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const evKey = btn.dataset.soundTest as NotificationEventType;
-        if (!evKey) return;
-        soundNotificationService.playEvent(evKey, 'preview');
-      });
-    });
+    // Temperature Warning Thresholds Config Binders (CPU / GPU / PSU)
+    this.bindTemperatureThresholdsEvents(host);
+
+    // Sound Alerts Config Binders (System Alerts + custom .mp3/.wav upload & recording)
+    this.bindSoundAlertsConfigEvents(host);
 
     // Detailed Stress Log Filter & Search
     const searchInput = host.querySelector<HTMLInputElement>('#stress-log-search');
@@ -2368,6 +2438,7 @@ export class SystemPulseApp {
       () => this.renderDashboard(host)
     );
     bindCopyrightAndFeedbackEvents(host, () => this.renderDashboard(host));
+    triggerMetricCardEntranceTransitions(host);
     animateMetricValueElements(host, this.metricAnimPrevValues);
   }
 
@@ -2678,6 +2749,16 @@ export class SystemPulseApp {
                             : ''
                         }
                         ${
+                          item.type === 'gpu_stress'
+                            ? `<select class="field-input" style="width:auto;max-width:170px;padding:5px 8px;font-size:12px;" data-sched-gpuscene="${item.id}" aria-label="Scena GPU 3D" ${running ? 'disabled' : ''}>
+                                ${GPU_SCENE_CATALOG.map(
+                                  (sc) =>
+                                    `<option value="${sc.id}" ${(item.gpuSceneId || 'vortex') === sc.id ? 'selected' : ''}>${esc(sc.shortName)}</option>`
+                                ).join('')}
+                              </select>`
+                            : ''
+                        }
+                        ${
                           item.type === 'gpu_stress' ||
                           item.type === 'gpu_all_scenes' ||
                           item.type === 'game_ultra' ||
@@ -2773,6 +2854,14 @@ export class SystemPulseApp {
         const it = this.schedulerQueue.find((q) => q.id === sel.dataset.schedGpupreset);
         if (it) it.gpuPreset = (sel.value as GpuLoadPreset) || 'high';
         this.emitDiagnosticChanged('scheduler-config', false);
+      });
+    });
+    host.querySelectorAll<HTMLSelectElement>('[data-sched-gpuscene]').forEach((sel) => {
+      sel.addEventListener('change', () => {
+        const it = this.schedulerQueue.find((q) => q.id === sel.dataset.schedGpuscene);
+        if (it) it.gpuSceneId = (sel.value as GpuSceneMode) || 'vortex';
+        this.emitDiagnosticChanged('scheduler-config', false);
+        this.renderSchedulerView(host);
       });
     });
     host.querySelectorAll<HTMLSelectElement>('[data-sched-res]').forEach((sel) => {
@@ -3127,6 +3216,9 @@ export class SystemPulseApp {
             gpuStressEngine.setPreset(item.gpuPreset || 'high');
             gpuStressEngine.setFpsMode(item.gpuFpsMode || 'uncapped');
             gpuStressEngine.setResolution(item.resolution || '1080p');
+            if (item.type === 'gpu_stress' && item.gpuSceneId) {
+              gpuStressEngine.setSceneMode(item.gpuSceneId);
+            }
             let sceneCycleTimer: number | null = null;
             if (item.type === 'gpu_all_scenes') {
               let scIdx = 0;
@@ -3137,6 +3229,7 @@ export class SystemPulseApp {
             }
             gpuStressEngine.mount(vp, (m) => {
               this.gpuState = m;
+              this.recordLiveGpuHeatmapSample(m);
               const liveGpu = thermalMonitorService.getLiveGpuTempC();
               const frac = Math.min(1, (m.elapsedSec * 1000) / Math.max(1000, durMs));
               this.schedulerProgressPct = Math.round(basePct + frac * (100 / queueSnapshot.length));
@@ -3145,6 +3238,7 @@ export class SystemPulseApp {
             });
             this.gpuState = await gpuStressEngine.runTimedBenchmark(durMs, (m) => {
               this.gpuState = m;
+              this.recordLiveGpuHeatmapSample(m);
               const frac = Math.min(1, (m.elapsedSec * 1000) / Math.max(1000, durMs));
               this.schedulerProgressPct = Math.round(basePct + frac * (100 / queueSnapshot.length));
               this.schedulerStatusText = `Krok ${i + 1}/${queueSnapshot.length}: GPU 3D [${m.sceneMode}] (${m.fps} FPS · Max ${m.maxFps} · ${m.frameTimeMs} ms)`;
@@ -6022,6 +6116,10 @@ export class SystemPulseApp {
           ${this.renderGpuMetricCardsHtml(g)}
         </div>
 
+        <div id="gpu-scheduler-slot">
+          ${renderGpuSchedulerPanelHtml(this.gpuScheduleState, GPU_SCENE_CATALOG, this.gpuSuiteRunning)}
+        </div>
+
         <div class="panel stack-md">
           <div class="panel-header" style="margin-bottom:0;flex-wrap:wrap;gap:8px;">
             <div>
@@ -6048,6 +6146,24 @@ export class SystemPulseApp {
           </div>
           <p style="margin:0;font-size:12px;color:var(--text-muted);">
             Wykres śledzi procentową stabilność spójności klatek GPU w czasie trwania bieżącej sesji stres-testu. Przełącz okno czasowe (Cała sesja / 60s / 30s) lub najedź na krzywą, aby przeanalizować spadki poniżej 75% i czas klatki.
+          </p>
+        </div>
+
+        <div class="panel stack-md">
+          <div class="panel-header" style="margin-bottom:0;flex-wrap:wrap;gap:8px;">
+            <div>
+              <h2 class="panel-title">Mapa cieplna 2D korelacji: Stabilność GPU (%) vs ID Sceny (D3.js)</h2>
+              <span class="panel-caption">Porównanie Ray Tracing / RT vs Rasteryzacja / PBR · Wiersze: ID sceny · Kolumny: przedziały stabilności (&lt;75% – 100%)</span>
+            </div>
+            <button type="button" class="btn btn-sm" id="gpu-heatmap-reset-btn" title="Wyczyść zgromadzone próbki korelacji scen">
+              ${iconSvg('trash', 13)}<span>Wyczyść mapę</span>
+            </button>
+          </div>
+          <div id="gpu-scene-stability-heatmap">
+            <!-- Rendered via D3 -->
+          </div>
+          <p style="margin:0;font-size:12px;color:var(--text-muted);">
+            Każda komórka mapy cieplnej 2D pokazuje udział próbek danej sceny 3D w konkretnym przedziale stabilności klatek. Uruchom pojedyncze sceny lub <strong>Auto-Suite (${GPU_SCENE_CATALOG.length} scen)</strong>, aby porównać stabilność Ray Tracingu względem Rasteryzacji i wykryć spadki specyficzne dla konkretnego ID sceny. Kliknij wiersz sceny, aby ją aktywować.
           </p>
         </div>
 
@@ -6137,7 +6253,7 @@ export class SystemPulseApp {
 
     host.querySelectorAll<HTMLButtonElement>('[data-gpu-scene]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        if (this.gpuSuiteRunning) return;
+        if (this.gpuSuiteRunning || this.gpuScheduleState.running) return;
         const mode = btn.dataset.gpuScene as GpuSceneMode;
         gpuStressEngine.setSceneMode(mode);
         host.querySelectorAll<HTMLButtonElement>('[data-gpu-scene]').forEach((b) => {
@@ -6154,7 +6270,7 @@ export class SystemPulseApp {
 
     host.querySelectorAll<HTMLButtonElement>('[data-gpu-fps-mode]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        if (this.gpuSuiteRunning) return;
+        if (this.gpuSuiteRunning || this.gpuScheduleState.running) return;
         const mode = btn.dataset.gpuFpsMode as GpuFpsMode;
         gpuStressEngine.setFpsMode(mode);
         host.querySelectorAll<HTMLButtonElement>('[data-gpu-fps-mode]').forEach((b) => {
@@ -6165,7 +6281,7 @@ export class SystemPulseApp {
 
     host.querySelectorAll<HTMLButtonElement>('[data-gpu-res]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        if (this.gpuSuiteRunning) return;
+        if (this.gpuSuiteRunning || this.gpuScheduleState.running) return;
         const res = (btn.dataset.gpuRes || '1080p') as BenchmarkResolutionId;
         gpuStressEngine.setResolution(res);
         this.gpuState = this.processGpuMetrics(gpuStressEngine.getMetrics());
@@ -6178,7 +6294,7 @@ export class SystemPulseApp {
 
     host.querySelectorAll<HTMLButtonElement>('[data-gpu-preset]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        if (this.gpuSuiteRunning) return;
+        if (this.gpuSuiteRunning || this.gpuScheduleState.running) return;
         const p = btn.dataset.gpuPreset as GpuLoadPreset;
         gpuStressEngine.setPreset(p);
         host.querySelectorAll<HTMLButtonElement>('[data-gpu-preset]').forEach((b) => {
@@ -6188,11 +6304,12 @@ export class SystemPulseApp {
     });
 
     host.querySelector('#gpu-run-all-scenes-btn')?.addEventListener('click', () => {
+      if (this.gpuScheduleState.running) return;
       void this.runGpuAllScenesSuite(host);
     });
 
     host.querySelector('#gpu-toggle-btn')?.addEventListener('click', () => {
-      if (this.gpuSuiteRunning) return;
+      if (this.gpuSuiteRunning || this.gpuScheduleState.running) return;
       if (gpuStressEngine.isRunning()) {
         gpuStressEngine.stop();
         const sceneMeta =
@@ -6217,7 +6334,371 @@ export class SystemPulseApp {
       this.patchGpuLive();
     });
 
+    host.querySelector('#gpu-heatmap-reset-btn')?.addEventListener('click', () => {
+      this.gpuSceneStabilityStore.clear();
+      this.lastGpuHeatmapSampleKey = '';
+      this.renderGpuSceneHeatmap(host);
+    });
+
+    this.bindGpuSchedulerEvents(host);
     this.renderGpuStabilityChart(g);
+    this.renderGpuSceneHeatmap(host);
+  }
+
+  private refreshGpuSchedulerSlot(host?: HTMLElement): void {
+    const scope = host ?? this.root;
+    const slot = scope.querySelector<HTMLElement>('#gpu-scheduler-slot');
+    if (!slot) return;
+    slot.innerHTML = renderGpuSchedulerPanelHtml(
+      this.gpuScheduleState,
+      GPU_SCENE_CATALOG,
+      this.gpuSuiteRunning
+    );
+    this.bindGpuSchedulerEvents(scope);
+  }
+
+  private bindGpuSchedulerEvents(host: HTMLElement): void {
+    const slot = host.querySelector<HTMLElement>('#gpu-scheduler-slot');
+    if (!slot) return;
+
+    slot.querySelector<HTMLSelectElement>('#gpu-sched-cooldown')?.addEventListener('change', (e) => {
+      const val = Number((e.currentTarget as HTMLSelectElement).value);
+      this.gpuScheduleState.cooldownSec = Number.isFinite(val) ? Math.max(0, Math.min(10, val)) : 1;
+      this.refreshGpuSchedulerSlot(host);
+    });
+
+    slot.querySelector<HTMLSelectElement>('#gpu-sched-draft-scene')?.addEventListener('change', (e) => {
+      this.gpuScheduleState.draftSceneId = (e.currentTarget as HTMLSelectElement).value as GpuSceneMode;
+    });
+    slot.querySelector<HTMLSelectElement>('#gpu-sched-draft-res')?.addEventListener('change', (e) => {
+      this.gpuScheduleState.draftResolution = (e.currentTarget as HTMLSelectElement).value as BenchmarkResolutionId;
+    });
+    slot.querySelector<HTMLInputElement>('#gpu-sched-draft-dur')?.addEventListener('change', (e) => {
+      const inp = e.currentTarget as HTMLInputElement;
+      const clamped = clampGpuScheduleDurationSec(Number(inp.value));
+      this.gpuScheduleState.draftDurationSec = clamped;
+      inp.value = String(clamped);
+    });
+    slot.querySelector<HTMLSelectElement>('#gpu-sched-draft-preset')?.addEventListener('change', (e) => {
+      this.gpuScheduleState.draftPreset = (e.currentTarget as HTMLSelectElement).value as GpuLoadPreset;
+    });
+
+    slot.querySelector('#gpu-sched-add-btn')?.addEventListener('click', () => {
+      if (this.gpuScheduleState.running || this.gpuSuiteRunning) return;
+      const durInp = slot.querySelector<HTMLInputElement>('#gpu-sched-draft-dur');
+      const dur = clampGpuScheduleDurationSec(
+        durInp ? Number(durInp.value) : this.gpuScheduleState.draftDurationSec
+      );
+      this.gpuScheduleState.draftDurationSec = dur;
+      const newItem = createGpuScheduledItem(this.gpuScheduleState.draftSceneId, {
+        resolution: this.gpuScheduleState.draftResolution,
+        durationSec: dur,
+        preset: this.gpuScheduleState.draftPreset,
+        fpsMode: this.gpuScheduleState.draftFpsMode,
+      });
+      this.gpuScheduleState.queue = addGpuScheduleItem(this.gpuScheduleState.queue, newItem);
+      this.refreshGpuSchedulerSlot(host);
+    });
+
+    slot.querySelectorAll<HTMLButtonElement>('[data-gpu-sched-preset]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (this.gpuScheduleState.running || this.gpuSuiteRunning) return;
+        const pid = btn.dataset.gpuSchedPreset as GpuSchedulePresetId;
+        this.gpuScheduleState.queue = createGpuSchedulePreset(pid);
+        this.gpuScheduleState.results = [];
+        this.gpuScheduleState.statusText = '';
+        this.refreshGpuSchedulerSlot(host);
+      });
+    });
+
+    slot.querySelector('#gpu-sched-clear-btn')?.addEventListener('click', () => {
+      if (this.gpuScheduleState.running || this.gpuSuiteRunning) return;
+      this.gpuScheduleState.queue = [];
+      this.gpuScheduleState.results = [];
+      this.gpuScheduleState.statusText = '';
+      this.refreshGpuSchedulerSlot(host);
+    });
+
+    slot.querySelectorAll<HTMLSelectElement>('[data-gpu-sched-res]').forEach((sel) => {
+      sel.addEventListener('change', () => {
+        const id = sel.dataset.gpuSchedRes;
+        if (!id) return;
+        this.gpuScheduleState.queue = updateGpuScheduleItem(this.gpuScheduleState.queue, id, {
+          resolution: sel.value as BenchmarkResolutionId,
+        });
+        this.refreshGpuSchedulerSlot(host);
+      });
+    });
+
+    slot.querySelectorAll<HTMLInputElement>('[data-gpu-sched-dur]').forEach((inp) => {
+      inp.addEventListener('change', () => {
+        const id = inp.dataset.gpuSchedDur;
+        if (!id) return;
+        this.gpuScheduleState.queue = updateGpuScheduleItem(this.gpuScheduleState.queue, id, {
+          durationSec: Number(inp.value),
+        });
+        this.refreshGpuSchedulerSlot(host);
+      });
+    });
+
+    slot.querySelectorAll<HTMLSelectElement>('[data-gpu-sched-preset]').forEach((sel) => {
+      sel.addEventListener('change', () => {
+        const id = sel.dataset.gpuSchedPreset;
+        if (!id) return;
+        this.gpuScheduleState.queue = updateGpuScheduleItem(this.gpuScheduleState.queue, id, {
+          preset: sel.value as GpuLoadPreset,
+        });
+        this.refreshGpuSchedulerSlot(host);
+      });
+    });
+
+    slot.querySelectorAll<HTMLButtonElement>('[data-gpu-sched-up]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.gpuSchedUp;
+        if (!id) return;
+        this.gpuScheduleState.queue = moveGpuScheduleItem(this.gpuScheduleState.queue, id, 'up');
+        this.refreshGpuSchedulerSlot(host);
+      });
+    });
+
+    slot.querySelectorAll<HTMLButtonElement>('[data-gpu-sched-down]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.gpuSchedDown;
+        if (!id) return;
+        this.gpuScheduleState.queue = moveGpuScheduleItem(this.gpuScheduleState.queue, id, 'down');
+        this.refreshGpuSchedulerSlot(host);
+      });
+    });
+
+    slot.querySelectorAll<HTMLButtonElement>('[data-gpu-sched-dup]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.gpuSchedDup;
+        if (!id) return;
+        this.gpuScheduleState.queue = duplicateGpuScheduleItem(this.gpuScheduleState.queue, id);
+        this.refreshGpuSchedulerSlot(host);
+      });
+    });
+
+    slot.querySelectorAll<HTMLButtonElement>('[data-gpu-sched-del]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.gpuSchedDel;
+        if (!id) return;
+        this.gpuScheduleState.queue = removeGpuScheduleItem(this.gpuScheduleState.queue, id);
+        this.refreshGpuSchedulerSlot(host);
+      });
+    });
+
+    slot.querySelector('#gpu-sched-run-btn')?.addEventListener('click', () => {
+      void this.runGpuScheduledQueue(host);
+    });
+
+    slot.querySelector('#gpu-sched-stop-btn')?.addEventListener('click', () => {
+      this.gpuScheduleState.abortRequested = true;
+      this.gpuScheduleState.statusText = 'Przerywanie harmonogramu GPU po bieżącej klatce...';
+      gpuStressEngine.stop();
+      this.refreshGpuSchedulerSlot(host);
+    });
+  }
+
+  private async runGpuScheduledQueue(host: HTMLElement): Promise<void> {
+    if (this.gpuScheduleState.running || this.gpuSuiteRunning) return;
+    if (this.gpuScheduleState.queue.length === 0) return;
+
+    const queueSnapshot = [...this.gpuScheduleState.queue];
+    const prevScene = gpuStressEngine.getSceneMode();
+    const prevRes = gpuStressEngine.getResolution();
+
+    this.gpuScheduleState.running = true;
+    this.gpuScheduleState.abortRequested = false;
+    this.gpuScheduleState.activeIndex = 0;
+    this.gpuScheduleState.results = [];
+    this.gpuScheduleState.statusText = `Uruchamianie harmonogramu GPU (${queueSnapshot.length} scen)...`;
+    this.beginStressSession();
+    this.refreshGpuSchedulerSlot(host);
+
+    try {
+      for (let i = 0; i < queueSnapshot.length; i++) {
+        if (this.gpuScheduleState.abortRequested || this.activeModule !== 'gpu') break;
+
+        const item = queueSnapshot[i];
+        const scMeta =
+          GPU_SCENE_CATALOG.find((c) => c.id === item.sceneId) || GPU_SCENE_CATALOG[0];
+        const resLabel = getBenchmarkResolutionSpec(item.resolution).shortLabel;
+        const durationMs = clampGpuScheduleDurationSec(item.durationSec) * 1000;
+
+        this.gpuScheduleState.activeIndex = i;
+        this.gpuScheduleState.activeRemainingSec = item.durationSec;
+        this.gpuScheduleState.statusText = `Krok ${i + 1}/${queueSnapshot.length}: ${scMeta.name} (${resLabel}, ${item.durationSec}s, ${item.preset.toUpperCase()})`;
+        this.refreshGpuSchedulerSlot(host);
+
+        // Sync GPU controls & engine settings cleanly
+        gpuStressEngine.setFpsMode(item.fpsMode);
+        gpuStressEngine.setPreset(item.preset);
+        gpuStressEngine.setResolution(item.resolution);
+        gpuStressEngine.setSceneMode(item.sceneId);
+
+        this.root.querySelectorAll<HTMLButtonElement>('[data-gpu-scene]').forEach((b) => {
+          b.classList.toggle('active', b.dataset.gpuScene === item.sceneId);
+        });
+        this.root.querySelectorAll<HTMLButtonElement>('[data-gpu-res]').forEach((b) => {
+          b.classList.toggle('active', b.dataset.gpuRes === item.resolution);
+        });
+        this.root.querySelectorAll<HTMLButtonElement>('[data-gpu-preset]').forEach((b) => {
+          b.classList.toggle('active', b.dataset.gpuPreset === item.preset);
+        });
+
+        let peakTempC: number | null = thermalMonitorService.getLiveGpuTempC();
+        const res = await gpuStressEngine.runTimedBenchmark(durationMs, (m) => {
+          this.gpuState = this.processGpuMetrics(m);
+          this.patchGpuLive();
+          const liveT = thermalMonitorService.getLiveGpuTempC();
+          if (liveT !== null) {
+            peakTempC = peakTempC === null ? liveT : Math.max(peakTempC, liveT);
+          }
+          const rem = Math.max(0, Math.ceil(item.durationSec - m.elapsedSec));
+          if (rem !== this.gpuScheduleState.activeRemainingSec) {
+            this.gpuScheduleState.activeRemainingSec = rem;
+            const banner = this.root.querySelector<HTMLElement>('#gpu-sched-status-banner');
+            if (banner) {
+              const stepCounter = banner.querySelector('span:last-child');
+              if (stepCounter && banner.children.length > 1) {
+                stepCounter.textContent = `Krok ${i + 1} / ${queueSnapshot.length} · pozostało ~${rem}s`;
+              }
+            }
+          }
+          if (this.gpuScheduleState.abortRequested) {
+            gpuStressEngine.stop();
+          }
+        });
+
+        if (this.gpuScheduleState.abortRequested || this.activeModule !== 'gpu') {
+          break;
+        }
+
+        if (!this.gpuSceneStabilityStore.has(item.sceneId)) {
+          recordGpuSceneStabilitySample(this.gpuSceneStabilityStore, {
+            sceneId: item.sceneId,
+            stabilityPct: res.stabilityPct,
+            fps: res.avgFps,
+            frameTimeMs: res.frameTimeMs,
+            thermalThrottle: Boolean(res.thermalThrottleRecent60s),
+          });
+        }
+        this.renderGpuSceneHeatmap(host);
+
+        this.gpuScheduleState.results.push({
+          itemId: item.id,
+          sceneId: item.sceneId,
+          sceneName: scMeta.name,
+          targetUnit: scMeta.targetUnit,
+          resolution: item.resolution,
+          durationSec: item.durationSec,
+          preset: item.preset,
+          avgFps: res.avgFps,
+          low1PctFps: res.low1PctFps,
+          frameTimeMs: res.frameTimeMs,
+          stabilityPct: res.stabilityPct,
+          score: res.overallScore,
+          peakTempC,
+          finishedAt: Date.now(),
+        });
+
+        soundNotificationService.playEvent('stepCompletion', 'complete');
+        this.refreshGpuSchedulerSlot(host);
+
+        if (i < queueSnapshot.length - 1 && this.gpuScheduleState.cooldownSec > 0) {
+          for (let c = this.gpuScheduleState.cooldownSec; c > 0; c--) {
+            if (this.gpuScheduleState.abortRequested || this.activeModule !== 'gpu') break;
+            this.gpuScheduleState.statusText = `Chłodzenie GPU między scenami... (${c}s przed krokiem ${i + 2}/${queueSnapshot.length})`;
+            this.gpuScheduleState.activeRemainingSec = c;
+            this.refreshGpuSchedulerSlot(host);
+            await new Promise((r) => window.setTimeout(r, 1000));
+          }
+        }
+      }
+
+      const summary = summarizeGpuScheduleResults(this.gpuScheduleState.results);
+      if (this.gpuScheduleState.abortRequested) {
+        this.gpuScheduleState.statusText = `Harmonogram przerwany po ${this.gpuScheduleState.results.length}/${queueSnapshot.length} scenach.`;
+      } else if (summary) {
+        this.gpuScheduleState.statusText = `Ukończono harmonogram (${summary.totalScenes} scen) — śr. ${summary.avgFps} FPS · śr. stabilność ${summary.avgStabilityPct}% (min ${summary.minStabilityPct}%) · wynik ${summary.avgScore}/100.`;
+        await this.recordLog(
+          'GPU',
+          summary.minStabilityPct >= 75 ? 'OK' : 'WARN',
+          `Harmonogram GPU (${summary.totalScenes} scen)`,
+          'Śr. FPS / Stabilność',
+          `${summary.avgFps} FPS · ${summary.avgStabilityPct}%`,
+          this.gpuScheduleState.results
+            .map(
+              (r) =>
+                `${r.sceneId}@${getBenchmarkResolutionSpec(r.resolution).shortLabel}(${r.durationSec}s): ${r.avgFps} FPS / ${r.stabilityPct}%`
+            )
+            .join('; ')
+        );
+        this.finalizeStressSession(
+          'GPU 3D',
+          summary.avgStabilityPct,
+          `Harmonogram GPU (${summary.totalScenes} scen) · Śr. ${summary.avgFps} FPS · Min stab. ${summary.minStabilityPct}%`
+        );
+        soundNotificationService.playEvent('generalComplete', 'complete');
+      }
+    } finally {
+      gpuStressEngine.setResolution(prevRes);
+      gpuStressEngine.setSceneMode(prevScene);
+      this.gpuScheduleState.running = false;
+      this.gpuScheduleState.abortRequested = false;
+      this.gpuScheduleState.activeIndex = -1;
+      this.gpuScheduleState.activeRemainingSec = 0;
+      if (this.activeModule === 'gpu') {
+        this.refreshGpuSchedulerSlot(host);
+        this.patchGpuLive();
+      }
+    }
+  }
+
+  private recordLiveGpuHeatmapSample(g: GpuStressMetrics): void {
+    if (!g.running || g.telemetry.length === 0) return;
+    const lastPt = g.telemetry[g.telemetry.length - 1];
+    const sceneId = g.sceneMode || 'vortex';
+    const sampleKey = `${sceneId}:${lastPt.timeSec}:${g.telemetry.length}`;
+    if (sampleKey === this.lastGpuHeatmapSampleKey) return;
+    this.lastGpuHeatmapSampleKey = sampleKey;
+    const stabilityPct =
+      typeof lastPt.stabilityPct === 'number' && Number.isFinite(lastPt.stabilityPct)
+        ? lastPt.stabilityPct
+        : g.stabilityPct;
+    recordGpuSceneStabilitySample(this.gpuSceneStabilityStore, {
+      sceneId,
+      stabilityPct,
+      fps: lastPt.fps,
+      frameTimeMs: lastPt.frameTimeMs,
+      thermalThrottle: Boolean(lastPt.thermalThrottle),
+    });
+  }
+
+  private renderGpuSceneHeatmap(host?: HTMLElement): void {
+    const scope = host ?? this.root;
+    const heatmapEl = scope.querySelector<HTMLElement>('#gpu-scene-stability-heatmap');
+    if (!heatmapEl) return;
+    renderGpuSceneStabilityHeatmapD3(heatmapEl, GPU_SCENE_CATALOG, this.gpuSceneStabilityStore, {
+      activeSceneId: this.gpuState.sceneMode || 'vortex',
+      pipelineFilter: this.gpuHeatmapPipelineFilter,
+      visibilityMode: this.gpuHeatmapVisibilityMode,
+      onPipelineFilterChange: (filter) => {
+        this.gpuHeatmapPipelineFilter = filter;
+        this.renderGpuSceneHeatmap(host);
+      },
+      onVisibilityModeChange: (mode) => {
+        this.gpuHeatmapVisibilityMode = mode;
+        this.renderGpuSceneHeatmap(host);
+      },
+      onSelectScene: (sceneId) => {
+        if (this.gpuSuiteRunning) return;
+        gpuStressEngine.setSceneMode(sceneId);
+        this.gpuState = this.processGpuMetrics(gpuStressEngine.getMetrics());
+        this.patchGpuLive();
+      },
+    });
   }
 
   private renderGpuStabilityChart(g: GpuStressMetrics = this.gpuState): void {
@@ -6293,6 +6774,16 @@ export class SystemPulseApp {
           stabilityPct: res.stabilityPct,
           score: res.overallScore,
         });
+        if (!this.gpuSceneStabilityStore.has(sc.id)) {
+          recordGpuSceneStabilitySample(this.gpuSceneStabilityStore, {
+            sceneId: sc.id,
+            stabilityPct: res.stabilityPct,
+            fps: res.avgFps,
+            frameTimeMs: res.frameTimeMs,
+            thermalThrottle: Boolean(res.thermalThrottleRecent60s),
+          });
+        }
+        this.renderGpuSceneHeatmap(host);
       }
 
       if (this.gpuSuiteResults.length > 0) {
@@ -6454,6 +6945,7 @@ export class SystemPulseApp {
       toggleBtn.className = `btn ${g.running ? 'btn-danger' : 'btn-primary'} btn-sm`;
       toggleBtn.innerHTML = `${iconSvg(g.running ? 'stop' : 'play', 14)}<span>${g.running ? 'Zatrzymaj stres-test' : 'Start stres-testu GPU'}</span>`;
     }
+    this.recordLiveGpuHeatmapSample(g);
     // Skip rebuilding offscreen metric cards & D3 charts during fullscreen 3D rendering for zero UI jank
     if (document.fullscreenElement) {
       return;
@@ -6467,6 +6959,7 @@ export class SystemPulseApp {
       chartEl.innerHTML = this.renderGpuChartHtml(g);
     }
     this.renderGpuStabilityChart(g);
+    this.renderGpuSceneHeatmap();
     const vramChartEl = this.root.querySelector<HTMLElement>('#gpu-vram-d3-chart');
     if (vramChartEl) {
       renderGpuVramUsageChartD3(
@@ -11024,20 +11517,241 @@ export class SystemPulseApp {
     `;
   }
 
+  private getCurrentTempSensorReadings(): TemperatureSensorReadings {
+    return {
+      cpuTempC: thermalMonitorService.getLiveCpuTempC(),
+      gpuTempC: thermalMonitorService.getLiveGpuTempC(),
+      psuTempC: this.batteryState.psu?.tempC ?? null,
+    };
+  }
+
+  private renderTemperatureThresholdsSlotHtml(): string {
+    const evalPreview = evaluateTemperatureThresholds(
+      this.getCurrentTempSensorReadings(),
+      this.tempThresholds,
+      {
+        lastTriggeredAt: { ...this.tempAlertRuntime.lastTriggeredAt },
+        exceededLatched: { ...this.tempAlertRuntime.exceededLatched },
+      },
+      Date.now()
+    );
+    const customClip = soundNotificationService.getCustomAudio();
+    return renderTemperatureThresholdsPanelHtml(
+      this.tempThresholds,
+      evalPreview,
+      customClip ? customClip.name : null
+    );
+  }
+
+  private refreshTemperatureThresholdsSlot(host?: HTMLElement, skipIfFocused = false): void {
+    const scope = host ?? this.root;
+    const slot = scope.querySelector<HTMLElement>('#dash-temp-thresholds-slot');
+    if (!slot) return;
+    if (skipIfFocused && document.activeElement && slot.contains(document.activeElement)) {
+      return;
+    }
+    slot.innerHTML = this.renderTemperatureThresholdsSlotHtml();
+    this.bindTemperatureThresholdsEvents(scope);
+    animateMetricValueElements(slot, this.metricAnimPrevValues);
+  }
+
+  private checkCustomTemperatureThresholds(refreshDom: boolean): void {
+    const evaluation = evaluateTemperatureThresholds(
+      this.getCurrentTempSensorReadings(),
+      this.tempThresholds,
+      this.tempAlertRuntime,
+      Date.now()
+    );
+
+    for (const trig of evaluation.newlyTriggered) {
+      soundNotificationService.playPresetSignal(trig.soundPreset, 'warning');
+      void this.recordLog(
+        'THERMAL',
+        'WARN',
+        `Przekroczenie progu temperatury: ${trig.label}`,
+        'Temperatura / Próg',
+        `${trig.tempC.toFixed(1)} °C / ${trig.thresholdC} °C`,
+        `Czujnik ${trig.label} osiągnął ${trig.tempC.toFixed(1)} °C (próg: ${trig.thresholdC} °C). Uruchomiono alarm dźwiękowy (${trig.soundPreset}).`
+      );
+    }
+
+    if (refreshDom && this.activeModule === 'dashboard') {
+      this.refreshTemperatureThresholdsSlot(this.root, true);
+    }
+  }
+
+  private bindTemperatureThresholdsEvents(host: HTMLElement): void {
+    const scope = host.querySelector<HTMLElement>('#dash-temp-thresholds-slot') ?? host;
+
+    const cooldownSel = scope.querySelector<HTMLSelectElement>('#temp-thresh-cooldown');
+    cooldownSel?.addEventListener('change', () => {
+      const sec = Math.max(5, Math.min(120, Math.round(Number(cooldownSel.value) || 15)));
+      this.tempThresholds = { ...this.tempThresholds, cooldownSec: sec };
+      saveTemperatureThresholds(this.tempThresholds);
+    });
+
+    scope.querySelector('#temp-thresh-reset-btn')?.addEventListener('click', () => {
+      this.tempThresholds = getDefaultTemperatureThresholds();
+      this.tempAlertRuntime = createTemperatureAlertRuntimeState();
+      saveTemperatureThresholds(this.tempThresholds);
+      this.checkCustomTemperatureThresholds(false);
+      this.refreshTemperatureThresholdsSlot(host, false);
+    });
+
+    scope.querySelectorAll<HTMLInputElement>('[data-temp-thresh-enabled]').forEach((chk) => {
+      chk.addEventListener('change', () => {
+        const key = chk.dataset.tempThreshEnabled as TempSensorKey;
+        if (!key || !this.tempThresholds[key]) return;
+        this.tempThresholds[key] = { ...this.tempThresholds[key], enabled: chk.checked };
+        if (!chk.checked) {
+          this.tempAlertRuntime.exceededLatched[key] = false;
+        }
+        saveTemperatureThresholds(this.tempThresholds);
+        this.checkCustomTemperatureThresholds(false);
+        this.refreshTemperatureThresholdsSlot(host, false);
+      });
+    });
+
+    scope.querySelectorAll<HTMLInputElement>('[data-temp-thresh-range]').forEach((range) => {
+      range.addEventListener('input', () => {
+        const key = range.dataset.tempThreshRange as TempSensorKey;
+        if (!key || !this.tempThresholds[key]) return;
+        const clamped = clampSensorThresholdC(key, Number(range.value));
+        this.tempThresholds[key] = { ...this.tempThresholds[key], thresholdC: clamped };
+        const numInput = scope.querySelector<HTMLInputElement>(`[data-temp-thresh-input="${key}"]`);
+        if (numInput) numInput.value = String(clamped);
+        const card = scope.querySelector<HTMLElement>(`[data-temp-sensor-card="${key}"]`);
+        const unitStrong = card?.querySelector<HTMLElement>('.metric-unit strong');
+        if (unitStrong) unitStrong.textContent = `${clamped}°C`;
+      });
+      range.addEventListener('change', () => {
+        const key = range.dataset.tempThreshRange as TempSensorKey;
+        if (!key || !this.tempThresholds[key]) return;
+        const clamped = clampSensorThresholdC(key, Number(range.value));
+        this.tempThresholds[key] = { ...this.tempThresholds[key], thresholdC: clamped };
+        saveTemperatureThresholds(this.tempThresholds);
+        this.checkCustomTemperatureThresholds(false);
+        this.refreshTemperatureThresholdsSlot(host, false);
+      });
+    });
+
+    scope.querySelectorAll<HTMLInputElement>('[data-temp-thresh-input]').forEach((input) => {
+      input.addEventListener('change', () => {
+        const key = input.dataset.tempThreshInput as TempSensorKey;
+        if (!key || !this.tempThresholds[key]) return;
+        const clamped = clampSensorThresholdC(key, Number(input.value));
+        this.tempThresholds[key] = { ...this.tempThresholds[key], thresholdC: clamped };
+        saveTemperatureThresholds(this.tempThresholds);
+        this.checkCustomTemperatureThresholds(false);
+        this.refreshTemperatureThresholdsSlot(host, false);
+      });
+    });
+
+    scope.querySelectorAll<HTMLButtonElement>('[data-temp-thresh-quick]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const raw = btn.dataset.tempThreshQuick || '';
+        const [keyStr, valStr] = raw.split(':');
+        const key = keyStr as TempSensorKey;
+        if (!key || !this.tempThresholds[key]) return;
+        const clamped = clampSensorThresholdC(key, Number(valStr));
+        this.tempThresholds[key] = { ...this.tempThresholds[key], thresholdC: clamped };
+        saveTemperatureThresholds(this.tempThresholds);
+        this.checkCustomTemperatureThresholds(false);
+        this.refreshTemperatureThresholdsSlot(host, false);
+      });
+    });
+
+    scope.querySelectorAll<HTMLSelectElement>('[data-temp-thresh-sound]').forEach((sel) => {
+      sel.addEventListener('change', () => {
+        const key = sel.dataset.tempThreshSound as TempSensorKey;
+        if (!key || !this.tempThresholds[key]) return;
+        const preset = sel.value as SoundPreset;
+        this.tempThresholds[key] = { ...this.tempThresholds[key], soundPreset: preset };
+        saveTemperatureThresholds(this.tempThresholds);
+        soundNotificationService.playPresetSignal(preset, 'preview');
+      });
+    });
+
+    scope.querySelectorAll<HTMLButtonElement>('[data-temp-thresh-test]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const key = btn.dataset.tempThreshTest as TempSensorKey;
+        if (!key || !this.tempThresholds[key]) return;
+        soundNotificationService.playPresetSignal(this.tempThresholds[key].soundPreset, 'preview');
+      });
+    });
+  }
+
   private renderSoundAlertsConfigHtml(): string {
     const sets = soundNotificationService.getSettings();
+    const customClip = soundNotificationService.getCustomAudio();
+    const clipSizeKb = customClip ? (customClip.sizeBytes / 1024).toFixed(1) : null;
+    const clipDurTxt =
+      customClip && customClip.durationSec !== null ? ` · ${customClip.durationSec.toFixed(1)}s` : '';
+    const statusColorCls =
+      this.customAudioStatusTone === 'ok'
+        ? 'status-ok'
+        : this.customAudioStatusTone === 'err'
+          ? 'status-err'
+          : 'status-cyan';
+
     return `
       <div class="panel stack-md" id="dash-sound-config-panel">
         <div class="panel-header" style="margin-bottom:0;flex-wrap:wrap;gap:8px;">
           <div>
-            <h2 class="panel-title">Konfiguracja powiadomień dźwiękowych (Sound Alerts)</h2>
-            <span class="panel-caption">Włączaj powiadomienia audio dla kluczowych zdarzeń i wybieraj presety sygnałów (Web Audio API)</span>
+            <h2 class="panel-title">Konfiguracja alertów systemowych i dźwięków (System Alerts)</h2>
+            <span class="panel-caption">Wybieraj presety Web Audio API lub wgraj / nagraj własny krótki plik audio (.mp3 / .wav) jako sygnał alertu</span>
           </div>
           <label class="row-wrap" style="gap:8px;cursor:pointer;">
             <input type="checkbox" id="sound-master-toggle" ${sets.enabled ? 'checked' : ''} />
             <span style="font-weight:600;font-size:13px;">Główny dźwięk (Master Audio)</span>
           </label>
         </div>
+
+        <div class="panel stack-sm" id="sound-custom-audio-box" style="background:var(--bg-inset);padding:12px 14px;border-color:${customClip ? 'rgba(16,185,129,0.35)' : 'var(--border)'};">
+          <div class="row-between" style="flex-wrap:wrap;gap:10px;align-items:center;">
+            <div>
+              <div style="font-weight:700;font-size:13px;">Własny dźwięk alertu (.mp3 / .wav) — Wgraj plik lub nagraj mikrofonem</div>
+              <div style="font-size:11.5px;color:var(--text-muted);">
+                Krótki sygnał audio (do 2 MB, nagranie do ${CUSTOM_AUDIO_MAX_RECORD_SEC}s jako WAV) zapisywany lokalnie i dostępny dla każdego alertu poniżej.
+              </div>
+            </div>
+            <div class="row-wrap" style="gap:8px;align-items:center;flex-wrap:wrap;">
+              <input id="sound-custom-file-input" type="file" accept=".mp3,.wav,audio/mpeg,audio/wav" style="display:none;" />
+              <button type="button" class="btn btn-secondary btn-sm" id="sound-custom-upload-btn" ${this.customAudioRecording ? 'disabled' : ''}>
+                ${iconSvg('download', 13)}<span>Wgraj .mp3 / .wav</span>
+              </button>
+              <button type="button" class="btn ${this.customAudioRecording ? 'btn-danger' : 'btn-amber'} btn-sm" id="sound-custom-record-btn">
+                <span>${this.customAudioRecording ? `⏹ Zatrzymaj (${this.customAudioRecordElapsedSec.toFixed(1)}s / ${CUSTOM_AUDIO_MAX_RECORD_SEC}s)` : `🎙 Nagraj WAV (max ${CUSTOM_AUDIO_MAX_RECORD_SEC}s)`}</span>
+              </button>
+            </div>
+          </div>
+
+          ${
+            customClip
+              ? `<div class="row-between" style="flex-wrap:wrap;gap:8px;padding-top:8px;border-top:1px solid var(--border);align-items:center;">
+                  <div class="font-mono" style="font-size:12px;">
+                    <span class="status-ok" style="font-weight:700;">✓ Aktywny klip:</span>
+                    <strong>${esc(customClip.name)}</strong>
+                    <span style="color:var(--text-muted);">(${customClip.source === 'recording' ? 'Nagranie WAV' : 'Plik'} · ${clipSizeKb} KB${clipDurTxt})</span>
+                  </div>
+                  <div class="row-wrap" style="gap:6px;">
+                    <button type="button" class="btn btn-secondary btn-sm" id="sound-custom-play-btn">▶ Odtwórz</button>
+                    <button type="button" class="btn btn-primary btn-sm" id="sound-custom-apply-all-btn">Ustaw dla wszystkich alertów</button>
+                    <button type="button" class="btn btn-sm" id="sound-custom-clear-btn">${iconSvg('trash', 13)}<span>Usuń</span></button>
+                  </div>
+                </div>`
+              : `<div style="font-size:11.5px;color:var(--text-muted);padding-top:4px;">
+                  Brak wgranego lub nagranego własnego klipu audio. Wgraj plik <span class="font-mono">.mp3</span> / <span class="font-mono">.wav</span> lub nagraj krótki sygnał mikrofonem, aby odblokować opcję <strong>Własny dźwięk</strong> w alertach poniżej.
+                </div>`
+          }
+
+          ${
+            this.customAudioStatusMsg
+              ? `<div id="sound-custom-status" class="font-mono ${statusColorCls}" style="font-size:11.5px;">${esc(this.customAudioStatusMsg)}</div>`
+              : `<div id="sound-custom-status" style="display:none;"></div>`
+          }
+        </div>
+
         <div class="grid-2" style="gap:12px;">
           ${Object.entries(sets.events)
             .map(([evKey, evConf]) => {
@@ -11047,6 +11761,9 @@ export class SystemPulseApp {
                 stepCompletion: 'Zakończenie kroku harmonogramu',
                 generalComplete: 'Zakończenie pełnej diagnostyki',
               };
+              const customLabel = customClip
+                ? `Własny dźwięk (${customClip.name})`
+                : 'Własny dźwięk (najpierw wgraj lub nagraj .mp3/.wav)';
               return `
                 <div class="panel stack-sm" style="background:var(--bg-inset);padding:12px;">
                   <div class="row-between">
@@ -11063,6 +11780,7 @@ export class SystemPulseApp {
                       <option value="chime" ${evConf.preset === 'chime' ? 'selected' : ''}>Dual Chime (Dwuton)</option>
                       <option value="beep" ${evConf.preset === 'beep' ? 'selected' : ''}>Sharp Beep (Krótki pik)</option>
                       <option value="pulse" ${evConf.preset === 'pulse' ? 'selected' : ''}>Sawtooth Pulse (Pulsujący)</option>
+                      <option value="custom" ${evConf.preset === 'custom' ? 'selected' : ''} ${!customClip ? 'disabled' : ''}>${esc(customLabel)}</option>
                     </select>
                   </div>
                 </div>
@@ -11072,6 +11790,251 @@ export class SystemPulseApp {
         </div>
       </div>
     `;
+  }
+
+  private refreshSoundAlertsConfigSlot(host?: HTMLElement): void {
+    const scope = host ?? this.root;
+    const slot = scope.querySelector<HTMLElement>('#dash-sound-config-slot');
+    if (slot) {
+      slot.innerHTML = this.renderSoundAlertsConfigHtml();
+      this.bindSoundAlertsConfigEvents(scope);
+    }
+    if (!soundNotificationService.getCustomAudio()) {
+      let changed = false;
+      (['cpu', 'gpu', 'psu'] as TempSensorKey[]).forEach((key) => {
+        if (this.tempThresholds[key].soundPreset === 'custom') {
+          this.tempThresholds[key] = {
+            ...this.tempThresholds[key],
+            soundPreset: TEMP_SENSOR_META[key].defaultSound,
+          };
+          changed = true;
+        }
+      });
+      if (changed) {
+        saveTemperatureThresholds(this.tempThresholds);
+      }
+    }
+    this.refreshTemperatureThresholdsSlot(scope, false);
+  }
+
+  private bindSoundAlertsConfigEvents(host: HTMLElement): void {
+    const scope = host.querySelector<HTMLElement>('#dash-sound-config-slot') ?? host;
+    const masterToggle = scope.querySelector<HTMLInputElement>('#sound-master-toggle');
+    masterToggle?.addEventListener('change', () => {
+      soundNotificationService.setEnabled(masterToggle.checked);
+    });
+    scope.querySelectorAll<HTMLInputElement>('[data-sound-ev-toggle]').forEach((chk) => {
+      chk.addEventListener('change', () => {
+        const evKey = chk.dataset.soundEvToggle as NotificationEventType;
+        if (!evKey) return;
+        const cur = soundNotificationService.getSettings();
+        const evMap = cur.events;
+        evMap[evKey].enabled = chk.checked;
+        soundNotificationService.updateSettings({ events: evMap });
+      });
+    });
+    scope.querySelectorAll<HTMLSelectElement>('[data-sound-preset]').forEach((sel) => {
+      sel.addEventListener('change', () => {
+        const evKey = sel.dataset.soundPreset as NotificationEventType;
+        if (!evKey) return;
+        const preset = sel.value as SoundPreset;
+        const cur = soundNotificationService.getSettings();
+        const evMap = cur.events;
+        evMap[evKey].preset = preset;
+        soundNotificationService.updateSettings({ events: evMap });
+      });
+    });
+    scope.querySelectorAll<HTMLButtonElement>('[data-sound-test]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const evKey = btn.dataset.soundTest as NotificationEventType;
+        if (!evKey) return;
+        soundNotificationService.playEvent(evKey, 'preview');
+      });
+    });
+
+    const fileInput = scope.querySelector<HTMLInputElement>('#sound-custom-file-input');
+    scope.querySelector('#sound-custom-upload-btn')?.addEventListener('click', () => {
+      fileInput?.click();
+    });
+    fileInput?.addEventListener('change', () => {
+      const file = fileInput.files?.[0];
+      if (!file) return;
+      void (async () => {
+        const res = await soundNotificationService.loadCustomAudioFromFile(file);
+        if (res.ok && res.clip) {
+          this.customAudioStatusTone = 'ok';
+          this.customAudioStatusMsg = `Wgrano plik „${res.clip.name}” — wybierz „Własny dźwięk” przy dowolnym alercie lub kliknij „Ustaw dla wszystkich alertów”.`;
+          soundNotificationService.playCustomAudioClip(res.clip);
+          void this.recordLog(
+            'SYSTEM',
+            'OK',
+            'Wgrano własny dźwięk alertu',
+            'Audio',
+            res.clip.name,
+            `Rozmiar: ${(res.clip.sizeBytes / 1024).toFixed(1)} KB, typ: ${res.clip.mimeType}`
+          );
+        } else {
+          this.customAudioStatusTone = 'err';
+          this.customAudioStatusMsg = res.error || 'Nie udało się wczytać pliku audio.';
+        }
+        this.refreshSoundAlertsConfigSlot(host);
+      })();
+    });
+
+    scope.querySelector('#sound-custom-record-btn')?.addEventListener('click', () => {
+      if (this.customAudioRecording) {
+        this.stopCustomAudioRecording(true, host);
+      } else {
+        void this.startCustomAudioRecording(host);
+      }
+    });
+
+    scope.querySelector('#sound-custom-play-btn')?.addEventListener('click', () => {
+      soundNotificationService.playCustomAudioClip();
+    });
+
+    scope.querySelector('#sound-custom-apply-all-btn')?.addEventListener('click', () => {
+      if (soundNotificationService.applyCustomAudioToAllEvents()) {
+        this.customAudioStatusTone = 'ok';
+        this.customAudioStatusMsg = 'Przypisano własny dźwięk alertu do wszystkich zdarzeń systemowych.';
+        soundNotificationService.playCustomAudioClip();
+        this.refreshSoundAlertsConfigSlot(host);
+      }
+    });
+
+    scope.querySelector('#sound-custom-clear-btn')?.addEventListener('click', () => {
+      soundNotificationService.clearCustomAudio();
+      this.customAudioStatusTone = 'info';
+      this.customAudioStatusMsg = 'Usunięto własny klip audio i przywrócono domyślne presety sygnałów.';
+      this.refreshSoundAlertsConfigSlot(host);
+    });
+  }
+
+  private async startCustomAudioRecording(host: HTMLElement): Promise<void> {
+    if (this.customAudioRecording) return;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      this.customAudioStatusTone = 'err';
+      this.customAudioStatusMsg = 'Przeglądarka nie udostępnia mikrofonu (getUserMedia). Użyj wgrywania pliku .mp3 / .wav.';
+      this.refreshSoundAlertsConfigSlot(host);
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) {
+        stream.getTracks().forEach((t) => t.stop());
+        this.customAudioStatusTone = 'err';
+        this.customAudioStatusMsg = 'Web Audio API jest niedostępne w tej przeglądarce.';
+        this.refreshSoundAlertsConfigSlot(host);
+        return;
+      }
+
+      const ctx = new AudioCtx();
+      const source = ctx.createMediaStreamSource(stream);
+      const processor = ctx.createScriptProcessor(4096, 1, 1);
+      const silentGain = ctx.createGain();
+      silentGain.gain.setValueAtTime(0, ctx.currentTime);
+
+      const chunks: Float32Array[] = [];
+      const sampleRate = ctx.sampleRate || 44100;
+      const maxSamples = Math.round(sampleRate * CUSTOM_AUDIO_MAX_RECORD_SEC);
+      let recordedSamples = 0;
+
+      processor.onaudioprocess = (ev) => {
+        if (!this.customAudioRecording) return;
+        const input = ev.inputBuffer.getChannelData(0);
+        const remaining = maxSamples - recordedSamples;
+        if (remaining <= 0) return;
+        const slice = input.length <= remaining ? new Float32Array(input) : new Float32Array(input.subarray(0, remaining));
+        chunks.push(slice);
+        recordedSamples += slice.length;
+      };
+
+      source.connect(processor);
+      processor.connect(silentGain);
+      silentGain.connect(ctx.destination);
+
+      this.customAudioRecording = true;
+      this.customAudioRecordElapsedSec = 0;
+      this.customAudioStatusTone = 'info';
+      this.customAudioStatusMsg = `Nagrywanie z mikrofonu... Powiedz lub zagraj krótki sygnał (max ${CUSTOM_AUDIO_MAX_RECORD_SEC}s).`;
+
+      const startedAt = performance.now();
+      this.customAudioRecordCleanup = (save: boolean) => {
+        if (this.customAudioRecordTimer !== null) {
+          window.clearInterval(this.customAudioRecordTimer);
+          this.customAudioRecordTimer = null;
+        }
+        this.customAudioRecording = false;
+        this.customAudioRecordCleanup = null;
+        try {
+          processor.disconnect();
+          source.disconnect();
+          silentGain.disconnect();
+        } catch {
+          // Ignore disconnect errors
+        }
+        stream.getTracks().forEach((t) => t.stop());
+        void ctx.close().catch(() => {});
+
+        if (save) {
+          const merged = new Float32Array(recordedSamples);
+          let offset = 0;
+          for (const c of chunks) {
+            merged.set(c, offset);
+            offset += c.length;
+          }
+          const saved = soundNotificationService.saveRecordedPcmAsCustomWav(merged, sampleRate);
+          if (saved.ok && saved.clip) {
+            this.customAudioStatusTone = 'ok';
+            this.customAudioStatusMsg = `Zapisano nagranie „${saved.clip.name}” (${saved.clip.durationSec ?? 0}s, ${(saved.clip.sizeBytes / 1024).toFixed(1)} KB).`;
+            soundNotificationService.playCustomAudioClip(saved.clip);
+            void this.recordLog(
+              'SYSTEM',
+              'OK',
+              'Nagrano własny dźwięk alertu (WAV)',
+              'Audio',
+              saved.clip.name,
+              `Czas: ${saved.clip.durationSec ?? 0}s, rozmiar: ${(saved.clip.sizeBytes / 1024).toFixed(1)} KB`
+            );
+          } else {
+            this.customAudioStatusTone = 'err';
+            this.customAudioStatusMsg = saved.error || 'Nie udało się zapisać nagrania.';
+          }
+        }
+      };
+
+      this.refreshSoundAlertsConfigSlot(host);
+      this.customAudioRecordTimer = window.setInterval(() => {
+        const elapsed = (performance.now() - startedAt) / 1000;
+        this.customAudioRecordElapsedSec = Math.min(CUSTOM_AUDIO_MAX_RECORD_SEC, elapsed);
+        const btn = this.root.querySelector<HTMLButtonElement>('#sound-custom-record-btn');
+        if (btn) {
+          btn.innerHTML = `<span>⏹ Zatrzymaj (${this.customAudioRecordElapsedSec.toFixed(1)}s / ${CUSTOM_AUDIO_MAX_RECORD_SEC}s)</span>`;
+        }
+        if (elapsed >= CUSTOM_AUDIO_MAX_RECORD_SEC) {
+          this.stopCustomAudioRecording(true, host);
+        }
+      }, 100);
+    } catch {
+      this.customAudioRecording = false;
+      this.customAudioStatusTone = 'err';
+      this.customAudioStatusMsg = 'Brak uprawnień do mikrofonu lub mikrofon jest niedostępny. Możesz wgrać plik .mp3 / .wav.';
+      this.refreshSoundAlertsConfigSlot(host);
+    }
+  }
+
+  private stopCustomAudioRecording(save: boolean, host?: HTMLElement): void {
+    const cleanup = this.customAudioRecordCleanup;
+    if (cleanup) {
+      cleanup(save);
+    }
+    if (this.activeModule === 'dashboard') {
+      this.refreshSoundAlertsConfigSlot(host);
+    }
   }
 
   private renderDetailedStressLogHtml(): string {
