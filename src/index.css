@@ -1343,6 +1343,194 @@ body {
   border-radius: 999px;
 }
 
+/* GPU Stability D3 threshold tooltip legend & <75% live stability alert */
+.gpu-stab-legend-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.gpu-stab-legend-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-inset);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: help;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.gpu-stab-legend-trigger:hover,
+.gpu-stab-legend-trigger:focus-visible,
+.gpu-stab-legend-wrap.is-open .gpu-stab-legend-trigger {
+  border-color: var(--accent-cyan);
+  color: var(--text-primary);
+  background: var(--bg-surface-elevated);
+  outline: none;
+}
+
+.gpu-stab-legend-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 24;
+  width: 330px;
+  max-width: min(330px, 84vw);
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--bg-surface-elevated);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  text-align: left;
+}
+
+.gpu-stab-legend-wrap.is-centered .gpu-stab-legend-popover {
+  left: 50%;
+  right: auto;
+  transform: translateX(-50%);
+}
+
+.gpu-stab-legend-wrap:hover .gpu-stab-legend-popover,
+.gpu-stab-legend-wrap:focus-within .gpu-stab-legend-popover,
+.gpu-stab-legend-wrap.is-open .gpu-stab-legend-popover {
+  display: flex;
+}
+
+.gpu-stab-legend-title {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--border-hairline);
+}
+
+.gpu-stab-legend-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.gpu-stab-legend-line {
+  display: inline-block;
+  width: 18px;
+  height: 0;
+  margin-top: 7px;
+  flex-shrink: 0;
+}
+
+.chart-box.is-stability-alert {
+  border-color: rgba(244, 63, 94, 0.75);
+  box-shadow: 0 0 0 1px rgba(244, 63, 94, 0.28), 0 0 22px rgba(244, 63, 94, 0.16);
+}
+
+.gpu-stability-live-alert-ring,
+.gpu-stability-svg-alert-dot {
+  animation: gpu-stab-svg-blink 1.15s ease-in-out infinite;
+}
+
+@keyframes gpu-stab-svg-blink {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.32;
+  }
+}
+
+.gpu-stab-alert-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 6px;
+  border: 1px solid rgba(244, 63, 94, 0.72);
+  background: rgba(244, 63, 94, 0.16);
+  color: #fda4af;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  animation: gpu-stab-alert-pulse 1.25s ease-in-out infinite;
+}
+
+.gpu-stab-alert-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #f43f5e;
+  box-shadow: 0 0 8px rgba(244, 63, 94, 0.9);
+}
+
+.gpu-stab-alert-badge.is-ok {
+  border-color: rgba(16, 185, 129, 0.42);
+  background: rgba(16, 185, 129, 0.1);
+  color: #6ee7b7;
+  animation: none;
+}
+
+.gpu-stab-alert-badge.is-ok .gpu-stab-alert-dot {
+  background: #10b981;
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.7);
+}
+
+.gpu-stab-alert-badge.is-standby {
+  border-color: var(--border-subtle);
+  background: var(--bg-inset);
+  color: var(--text-muted);
+  animation: none;
+}
+
+.gpu-stab-alert-badge.is-standby .gpu-stab-alert-dot {
+  background: var(--text-muted);
+  box-shadow: none;
+}
+
+.gpu-stab-alert-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(244, 63, 94, 0.58);
+  background: rgba(244, 63, 94, 0.12);
+  color: #fecdd3;
+  font-size: 12px;
+  animation: gpu-stab-alert-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes gpu-stab-alert-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.35);
+    border-color: rgba(244, 63, 94, 0.65);
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(244, 63, 94, 0.04);
+    border-color: rgba(251, 113, 133, 0.98);
+  }
+}
+
+[data-theme='high-contrast'] .gpu-stab-alert-badge,
+[data-theme='high-contrast'] .gpu-stab-alert-banner {
+  background: #3b0815;
+  border-color: #ff4d6d;
+  color: #ffffff;
+}
+
 /* Spacing helpers */
 .stack-sm {
   display: flex;

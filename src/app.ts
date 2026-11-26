@@ -1,6 +1,7 @@
 import {
   ActiveModule,
   BatteryHealthState,
+  BenchmarkResolutionId,
   ComponentScanCard,
   CpuStressMode,
   CpuTestResult,
@@ -196,6 +197,38 @@ import {
   getSchedulerPresetQueue,
   renderSchedulerSummaryReportHtml,
 } from './ui/schedulerUi';
+import {
+  GpuStabilityWindowMode,
+  evaluateGpuStabilityAlert,
+  renderGpuStabilityAlertIndicatorHtml,
+  renderGpuStabilityD3Chart,
+} from './ui/gpuStabilityChart';
+import {
+  ParsedBatteryReport,
+  bindPowercfgBatteryReportEvents,
+  loadSavedPowercfgReport,
+  renderPowercfgBatteryReportSectionHtml,
+} from './ui/batteryReportParser';
+import {
+  GameSuiteAutoDurationSec,
+  GameSuiteRunMode,
+  GameSuiteRunResult,
+  GameSuiteState,
+  clearGameSelection,
+  createInitialGameSuiteState,
+  renderGameSuiteControlPanelHtml,
+  renderGameSuiteProgressHtml,
+  renderGameSuiteResultsTableHtml,
+  selectAllGames,
+  selectFilteredGames,
+  selectSingleGame,
+  selectTopNewGames,
+  toggleGameSelection,
+} from './ui/gameBenchSuite';
+import {
+  BENCHMARK_RESOLUTION_LIST,
+  getBenchmarkResolutionSpec,
+} from './utils/benchmarkResolution';
 
 const THEME_STORAGE_KEY = 'systempulse_theme';
 
@@ -375,8 +408,13 @@ export class SystemPulseApp {
   private displayCategoryFilter: string = 'ALL';
   private displaySlideshowTimer: number | null = null;
 
-  // Game Bench category & Network LAN/IXP UI state
+  // Game Bench category, Auto/Manual multi-select suite & Network LAN/IXP UI state
   private gameCategoryFilter: 'ALL' | 'COMBAT' | 'RACING' | 'SOCCER' | 'FLIGHT' | 'SCIFI' = 'ALL';
+  private gameSuite: GameSuiteState = createInitialGameSuiteState(GAME_CATALOG[0].id);
+  private gameSuiteRunToken = 0;
+  private gameSuiteCountdownTimer: number | null = null;
+  private gameSuiteCurrentStartedAt = 0;
+  private gameSuiteSkipResolver: (() => void) | null = null;
   private netServerScanBusy = false;
   private lanProbeBusy = false;
   private netAdapterPasteText = '';
@@ -446,6 +484,10 @@ export class SystemPulseApp {
   private oledProtectionNotice = '';
   private stressHistory: StressSessionRecord[] = [];
   private activeStressSession: { startedAt: number; cpuTemps: number[]; gpuTemps: number[] } | null = null;
+  private gpuStabilityWindowMode: GpuStabilityWindowMode = 'all';
+  private powercfgReport: ParsedBatteryReport | null = loadSavedPowercfgReport();
+  private powercfgRawText = '';
+  private powercfgErrorMsg = '';
   private gpuSuiteRunning = false;
   private gpuSuiteStatus = '';
   private gpuSuiteResults: Array<{
@@ -1068,6 +1110,7 @@ export class SystemPulseApp {
       gpuStressEngine.unmount();
     }
     if (this.activeModule === 'game') {
+      this.stopGameSuite(false);
       gameBenchService.unmount();
     }
     if (this.activeModule === 'display') {
@@ -1793,6 +1836,20 @@ export class SystemPulseApp {
                   </button>`
                 : ''
             }
+            <div class="segmented" role="group" aria-label="Rozdzielczość testów 3D i gier">
+              ${BENCHMARK_RESOLUTION_LIST.map(
+                (r) => `
+                <button
+                  type="button"
+                  class="segmented-btn ${(this.gameSuite.resolution || gpuStressEngine.getResolution()) === r.id ? 'active' : ''}"
+                  data-dash-res="${r.id}"
+                  title="Rozdzielczość testów GPU 3D i Gier: ${esc(r.label)}"
+                  ${this.fullSuiteRunning ? 'disabled' : ''}
+                >
+                  ${r.shortLabel}
+                </button>`
+              ).join('')}
+            </div>
             <button id="dash-run-all-btn" type="button" class="btn btn-primary" ${this.fullSuiteRunning ? 'disabled' : ''}>
               ${iconSvg('play', 14)}
               <span>${this.fullSuiteRunning ? 'Wykonywanie testów...' : 'Uruchom pełną diagnostykę'}</span>
@@ -2080,6 +2137,20 @@ export class SystemPulseApp {
     });
     host.querySelector('#dash-download-all-data-btn')?.addEventListener('click', (e) => {
       void this.downloadAllDiagnosticData(e.currentTarget as HTMLButtonElement);
+    });
+    host.querySelectorAll<HTMLButtonElement>('[data-dash-res]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (this.fullSuiteRunning) return;
+        const res = (btn.dataset.dashRes || '1080p') as BenchmarkResolutionId;
+        this.gameSuite.resolution = res;
+        gpuStressEngine.setResolution(res);
+        gameBenchService.setResolution(res);
+        this.gpuState = this.processGpuMetrics(gpuStressEngine.getMetrics());
+        this.gameState = gameBenchService.getMetrics();
+        host.querySelectorAll<HTMLButtonElement>('[data-dash-res]').forEach((b) => {
+          b.classList.toggle('active', b.dataset.dashRes === res);
+        });
+      });
     });
     host.querySelector('#dash-export-btn')?.addEventListener('click', () => this.exportReport());
     host.querySelector('#dash-clear-saved-btn')?.addEventListener('click', () => void this.clearPersistedResults());
@@ -2606,6 +2677,19 @@ export class SystemPulseApp {
                               </select>`
                             : ''
                         }
+                        ${
+                          item.type === 'gpu_stress' ||
+                          item.type === 'gpu_all_scenes' ||
+                          item.type === 'game_ultra' ||
+                          item.type === 'game_racing'
+                            ? `<select class="field-input" style="width:auto;padding:5px 8px;font-size:12px;" data-sched-res="${item.id}" aria-label="Rozdzielczość testu" ${running ? 'disabled' : ''}>
+                                ${BENCHMARK_RESOLUTION_LIST.map(
+                                  (r) =>
+                                    `<option value="${r.id}" ${(item.resolution || '1080p') === r.id ? 'selected' : ''}>${r.shortLabel} (${r.width}×${r.height})</option>`
+                                ).join('')}
+                              </select>`
+                            : ''
+                        }
                         <button type="button" class="btn btn-secondary btn-sm" data-sched-up="${idx}" ${running || idx === 0 ? 'disabled' : ''} title="Przesuń w górę">▲</button>
                         <button type="button" class="btn btn-secondary btn-sm" data-sched-down="${idx}" ${running || idx === this.schedulerQueue.length - 1 ? 'disabled' : ''} title="Przesuń w dół">▼</button>
                         <button type="button" class="btn btn-danger btn-sm" data-sched-del="${item.id}" ${running ? 'disabled' : ''}>Usuń</button>
@@ -2689,6 +2773,14 @@ export class SystemPulseApp {
         const it = this.schedulerQueue.find((q) => q.id === sel.dataset.schedGpupreset);
         if (it) it.gpuPreset = (sel.value as GpuLoadPreset) || 'high';
         this.emitDiagnosticChanged('scheduler-config', false);
+      });
+    });
+    host.querySelectorAll<HTMLSelectElement>('[data-sched-res]').forEach((sel) => {
+      sel.addEventListener('change', () => {
+        const it = this.schedulerQueue.find((q) => q.id === sel.dataset.schedRes);
+        if (it) it.resolution = (sel.value as BenchmarkResolutionId) || '1080p';
+        this.emitDiagnosticChanged('scheduler-config', false);
+        this.renderSchedulerView(host);
       });
     });
 
@@ -3034,6 +3126,7 @@ export class SystemPulseApp {
           if (vp) {
             gpuStressEngine.setPreset(item.gpuPreset || 'high');
             gpuStressEngine.setFpsMode(item.gpuFpsMode || 'uncapped');
+            gpuStressEngine.setResolution(item.resolution || '1080p');
             let sceneCycleTimer: number | null = null;
             if (item.type === 'gpu_all_scenes') {
               let scIdx = 0;
@@ -3089,6 +3182,7 @@ export class SystemPulseApp {
             }
             gameBenchService.setPreset('ultra');
             gameBenchService.setFpsMode('uncapped');
+            gameBenchService.setResolution(item.resolution || '1080p');
             gameBenchService.mount(vp, (m) => {
               this.gameState = m;
               const frac = Math.min(1, (m.elapsedSec * 1000) / Math.max(1000, durMs));
@@ -3454,6 +3548,8 @@ export class SystemPulseApp {
           </div>
         </div>
 
+        ${renderGameSuiteControlPanelHtml(this.gameSuite, GAME_CATALOG.length, filteredCatalog.length)}
+
         <div class="panel stack-sm" style="padding:14px;">
           <div class="row-between" style="flex-wrap:wrap;gap:8px;margin-bottom:6px;">
             <div class="row-wrap" style="gap:8px;align-items:center;">
@@ -3473,6 +3569,8 @@ export class SystemPulseApp {
             ${filteredCatalog
               .map((item) => {
                 const isAct = item.id === activeGame.id;
+                const selIdx = this.gameSuite.selectedIds.indexOf(item.id);
+                const isSelected = selIdx >= 0;
                 const cat = this.getGameCategory(item);
                 const icon =
                   cat === 'COMBAT'
@@ -3486,37 +3584,65 @@ export class SystemPulseApp {
                           : '';
                 const accentBorder = isAct
                   ? 'var(--accent-cyan)'
-                  : cat === 'COMBAT'
-                    ? 'rgba(244, 63, 94, 0.42)'
-                    : cat === 'SOCCER'
-                      ? 'rgba(16, 185, 129, 0.38)'
-                      : cat === 'FLIGHT'
-                        ? 'rgba(56, 189, 248, 0.35)'
-                        : cat === 'RACING'
-                          ? 'rgba(245, 158, 11, 0.35)'
-                          : 'rgba(255,255,255,0.08)';
+                  : isSelected
+                    ? 'rgba(16, 185, 129, 0.72)'
+                    : cat === 'COMBAT'
+                      ? 'rgba(244, 63, 94, 0.42)'
+                      : cat === 'SOCCER'
+                        ? 'rgba(16, 185, 129, 0.38)'
+                        : cat === 'FLIGHT'
+                          ? 'rgba(56, 189, 248, 0.35)'
+                          : cat === 'RACING'
+                            ? 'rgba(245, 158, 11, 0.35)'
+                            : 'rgba(255,255,255,0.08)';
                 const accentBg = isAct
                   ? 'rgba(6, 182, 212, 0.14)'
-                  : cat === 'COMBAT'
-                    ? 'rgba(244, 63, 94, 0.08)'
-                    : cat === 'SOCCER'
-                      ? 'rgba(16, 185, 129, 0.07)'
-                      : cat === 'RACING'
-                        ? 'rgba(245, 158, 11, 0.06)'
-                        : 'var(--bg-inset)';
+                  : isSelected
+                    ? 'rgba(16, 185, 129, 0.1)'
+                    : cat === 'COMBAT'
+                      ? 'rgba(244, 63, 94, 0.08)'
+                      : cat === 'SOCCER'
+                        ? 'rgba(16, 185, 129, 0.07)'
+                        : cat === 'RACING'
+                          ? 'rgba(245, 158, 11, 0.06)'
+                          : 'var(--bg-inset)';
                 return `
-                  <button
-                    type="button"
-                    data-game-scene="${item.id}"
+                  <div
+                    data-game-card="${item.id}"
                     class="panel stack-xs"
-                    style="text-align:left;padding:10px 12px;cursor:pointer;transition:all 150ms ease;border:1.5px solid ${accentBorder};background:${accentBg};border-radius:10px;"
+                    style="text-align:left;padding:10px 12px;transition:all 150ms ease;border:1.5px solid ${accentBorder};background:${accentBg};border-radius:10px;position:relative;"
                   >
-                    <div class="row-between" style="width:100%;gap:6px;">
-                      <span style="font-size:12.5px;font-weight:700;color:${isAct ? 'var(--accent-cyan)' : cat === 'COMBAT' ? '#fb7185' : cat === 'SOCCER' ? 'var(--status-ok)' : cat === 'RACING' ? 'var(--accent-amber)' : 'var(--text-primary)'};">${icon}${esc(item.shortTitle)}</span>
-                      <span class="font-mono" style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(255,255,255,0.07);color:var(--text-secondary);">${esc(item.badge)}</span>
+                    <div class="row-between" style="width:100%;gap:6px;align-items:flex-start;">
+                      <button
+                        type="button"
+                        data-game-scene="${item.id}"
+                        style="background:transparent;border:0;padding:0;text-align:left;cursor:pointer;flex:1;min-width:0;color:inherit;"
+                        title="Kliknij, aby otworzyć podgląd gry ${esc(item.shortTitle)}"
+                      >
+                        <span style="font-size:12.5px;font-weight:700;color:${isAct ? 'var(--accent-cyan)' : cat === 'COMBAT' ? '#fb7185' : cat === 'SOCCER' ? 'var(--status-ok)' : cat === 'RACING' ? 'var(--accent-amber)' : 'var(--text-primary)'};">${icon}${esc(item.shortTitle)}</span>
+                      </button>
+                      <div style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
+                        <span class="font-mono" style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(255,255,255,0.07);color:var(--text-secondary);">${esc(item.badge)}</span>
+                        <button
+                          type="button"
+                          data-game-check="${item.id}"
+                          aria-pressed="${isSelected ? 'true' : 'false'}"
+                          title="${isSelected ? 'Usuń z kolejki testów' : 'Dodaj do kolejki testów'}"
+                          ${this.gameSuite.queueRunning ? 'disabled' : ''}
+                          style="cursor:pointer;font-family:var(--font-mono);font-size:10.5px;font-weight:700;padding:2px 6px;border-radius:5px;border:1px solid ${isSelected ? '#10b981' : 'var(--border-subtle)'};background:${isSelected ? 'rgba(16, 185, 129, 0.22)' : 'rgba(255,255,255,0.04)'};color:${isSelected ? '#6ee7b7' : 'var(--text-muted)'};"
+                        >
+                          ${isSelected ? `✓ #${selIdx + 1}` : '+ Wybierz'}
+                        </button>
+                      </div>
                     </div>
-                    <span style="font-size:11px;color:var(--text-muted);line-height:1.35;">${esc(item.genre)}</span>
-                  </button>
+                    <button
+                      type="button"
+                      data-game-scene="${item.id}"
+                      style="background:transparent;border:0;padding:0;text-align:left;cursor:pointer;width:100%;"
+                    >
+                      <span style="font-size:11px;color:var(--text-muted);line-height:1.35;display:block;">${esc(item.genre)}</span>
+                    </button>
+                  </div>
                 `;
               })
               .join('')}
@@ -3544,6 +3670,20 @@ export class SystemPulseApp {
           </div>
 
           <div class="gpu-hud-bottom">
+            <div class="segmented" role="group" aria-label="Rozdzielczość gry 3D">
+              ${BENCHMARK_RESOLUTION_LIST.map(
+                (r) => `
+                <button
+                  type="button"
+                  class="segmented-btn ${(g.resolution || this.gameSuite.resolution || '1080p') === r.id ? 'active' : ''}"
+                  data-game-res="${r.id}"
+                  title="${esc(r.label)}"
+                >
+                  ${r.shortLabel}
+                </button>`
+              ).join('')}
+            </div>
+
             <div class="segmented" role="group" aria-label="Limit FPS gry">
               <button type="button" class="segmented-btn ${g.fpsMode === 'vsync' ? 'active' : ''}" data-game-fps="vsync">VSync (Płynny)</button>
               <button type="button" class="segmented-btn ${g.fpsMode === 'uncapped' ? 'active' : ''}" data-game-fps="uncapped">Bez limitu FPS</button>
@@ -3556,20 +3696,25 @@ export class SystemPulseApp {
             <button id="game-fullscreen-btn" type="button" class="btn btn-secondary btn-sm" title="Pełny ekran 3D">⛶ Pełny Ekran</button>
             <button id="game-rocket-salvo-btn" type="button" class="btn btn-danger btn-sm" title="Wystrzel salwę 4 samonaprowadzających rakiet 3D (klawisz F / E / Prawy Przycisk Myszy)">🚀 Salwa Rakiet (F / PPM)</button>
             <button id="game-nitro-burst-btn" type="button" class="btn btn-amber btn-sm" title="Włącz dopalacz NITRO / Afterburner +45% prędkości z płomieniami Mach (klawisz Shift / N)">⚡ Dopalacz NITRO (Shift / N)</button>
+            <button id="game-mode-btn" type="button" class="btn ${g.interactiveMode ? 'btn-amber' : 'btn-secondary'} btn-sm">
+              ${g.interactiveMode ? '🎮 Tryb: Ręczny (Gracz WASD)' : '🤖 Tryb: Automatyczny (Auto)'}
+            </button>
             ${
               activeCat === 'SOCCER'
                 ? `<button id="game-soccer-kick-btn" type="button" class="btn btn-amber btn-sm">⚽ Strzał na bramkę (Spacja)</button>`
                 : isCombatOrFlight
                   ? `<button id="game-fire-btn" type="button" class="btn btn-danger btn-sm">🔥 Ogień / Działo (Spacja)</button>`
-                  : `<button id="game-mode-btn" type="button" class="btn ${g.interactiveMode ? 'btn-amber' : 'btn-secondary'} btn-sm">
-                       ${g.interactiveMode ? 'Tryb: Gracz (WASD+Mysz)' : 'Tryb: Kamera Benchmark'}
-                     </button>`
+                  : ''
             }
             <button id="game-toggle-btn" type="button" class="btn ${g.running ? 'btn-danger' : 'btn-primary'} btn-sm">
               ${iconSvg(g.running ? 'stop' : 'play', 14)}
               <span>${g.running ? 'Zatrzymaj grę' : 'Start Gry MAX'}</span>
             </button>
           </div>
+        </div>
+
+        <div id="game-suite-results-slot">
+          ${renderGameSuiteResultsTableHtml(this.gameSuite.results)}
         </div>
 
         <div class="grid-2" style="gap:14px;">
@@ -3911,11 +4056,112 @@ export class SystemPulseApp {
       });
     });
 
+    host.querySelectorAll<HTMLButtonElement>('[data-game-suite-mode-btn]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (this.gameSuite.queueRunning) return;
+        const mode = (btn.dataset.gameSuiteModeBtn as GameSuiteRunMode) || 'auto';
+        this.gameSuite.runMode = mode;
+        gameBenchService.setInteractiveMode(mode === 'manual');
+        this.gameState = gameBenchService.getMetrics();
+        this.renderGameBenchView(host);
+      });
+    });
+
+    host.querySelectorAll<HTMLButtonElement>('[data-game-suite-dur]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (this.gameSuite.queueRunning) return;
+        const sec = Number(btn.dataset.gameSuiteDur) as GameSuiteAutoDurationSec;
+        if (sec === 5 || sec === 8 || sec === 12 || sec === 20) {
+          this.gameSuite.autoDurationSec = sec;
+          this.renderGameBenchView(host);
+        }
+      });
+    });
+
+    host.querySelector('#game-select-all-btn')?.addEventListener('click', () => {
+      if (this.gameSuite.queueRunning) return;
+      this.gameSuite.selectedIds = selectAllGames(GAME_CATALOG);
+      this.renderGameBenchView(host);
+    });
+
+    host.querySelector('#game-select-filtered-btn')?.addEventListener('click', () => {
+      if (this.gameSuite.queueRunning) return;
+      this.gameSuite.selectedIds = selectFilteredGames(filteredCatalog);
+      this.renderGameBenchView(host);
+    });
+
+    host.querySelector('#game-select-single-btn')?.addEventListener('click', () => {
+      if (this.gameSuite.queueRunning) return;
+      this.gameSuite.selectedIds = selectSingleGame(activeGame.id);
+      this.renderGameBenchView(host);
+    });
+
+    host.querySelector('#game-select-topnew-btn')?.addEventListener('click', () => {
+      if (this.gameSuite.queueRunning) return;
+      this.gameSuite.selectedIds = selectTopNewGames(GAME_CATALOG);
+      this.renderGameBenchView(host);
+    });
+
+    host.querySelector('#game-select-clear-btn')?.addEventListener('click', () => {
+      if (this.gameSuite.queueRunning) return;
+      this.gameSuite.selectedIds = clearGameSelection();
+      this.renderGameBenchView(host);
+    });
+
+    host.querySelectorAll<HTMLButtonElement>('[data-game-check]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (this.gameSuite.queueRunning) return;
+        const sceneId = btn.dataset.gameCheck as GameSceneId;
+        this.gameSuite.selectedIds = toggleGameSelection(this.gameSuite.selectedIds, sceneId);
+        this.renderGameBenchView(host);
+      });
+    });
+
+    host.querySelector('#game-suite-start-btn')?.addEventListener('click', () => {
+      void this.startGameSuite(host);
+    });
+
+    host.querySelector('#game-suite-stop-main-btn')?.addEventListener('click', () => {
+      this.stopGameSuite(true, host);
+    });
+
+    host.querySelector('#game-suite-clear-results-btn')?.addEventListener('click', () => {
+      this.gameSuite.results = [];
+      this.renderGameBenchView(host);
+    });
+
+    host.querySelectorAll<HTMLButtonElement>('[data-game-suite-res], [data-game-res]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const res = (btn.dataset.gameSuiteRes || btn.dataset.gameRes || '1080p') as BenchmarkResolutionId;
+        this.gameSuite.resolution = res;
+        gameBenchService.setResolution(res);
+        this.gameState = gameBenchService.getMetrics();
+        host.querySelectorAll<HTMLButtonElement>('[data-game-suite-res]').forEach((b) => {
+          b.classList.toggle('active', b.dataset.gameSuiteRes === res);
+        });
+        host.querySelectorAll<HTMLButtonElement>('[data-game-res]').forEach((b) => {
+          b.classList.toggle('active', b.dataset.gameRes === res);
+        });
+        if (!this.gameSuite.queueRunning) {
+          this.renderGameBenchView(host);
+        } else {
+          this.patchGameLive();
+        }
+      });
+    });
+
+    this.bindGameSuiteProgressEvents(host);
+
     host.querySelectorAll<HTMLButtonElement>('[data-game-scene]').forEach((btn) => {
       btn.addEventListener('click', () => {
+        if (this.gameSuite.queueRunning) return;
         const sceneId = btn.dataset.gameScene as GameSceneId;
         gameBenchService.setGameScene(sceneId);
         this.gameState = gameBenchService.getMetrics();
+        if (this.gameSuite.selectedIds.length <= 1) {
+          this.gameSuite.selectedIds = [sceneId];
+        }
         this.renderGameBenchView(host);
       });
     });
@@ -4187,14 +4433,19 @@ export class SystemPulseApp {
 
     host.querySelector('#game-mode-btn')?.addEventListener('click', (e) => {
       const next = !this.gameState.interactiveMode;
+      this.gameSuite.runMode = next ? 'manual' : 'auto';
       gameBenchService.setInteractiveMode(next);
       this.gameState = gameBenchService.getMetrics();
       const btn = e.currentTarget as HTMLButtonElement;
       btn.className = `btn ${next ? 'btn-amber' : 'btn-secondary'} btn-sm`;
-      btn.textContent = next ? 'Tryb: Gracz (WASD+Mysz)' : 'Tryb: Kamera Benchmark';
+      btn.textContent = next ? '🎮 Tryb: Ręczny (Gracz WASD)' : '🤖 Tryb: Automatyczny (Auto)';
     });
 
     host.querySelector('#game-toggle-btn')?.addEventListener('click', () => {
+      if (this.gameSuite.queueRunning) {
+        this.stopGameSuite(true, host);
+        return;
+      }
       if (gameBenchService.isRunning()) {
         gameBenchService.stop();
         const currentMeta = gameBenchService.getGameCatalogItem();
@@ -4231,6 +4482,262 @@ export class SystemPulseApp {
     });
   }
 
+  private bindGameSuiteProgressEvents(host: HTMLElement): void {
+    host.querySelector('#game-suite-stop-btn')?.addEventListener('click', () => {
+      this.stopGameSuite(true, host);
+    });
+    host.querySelector('#game-suite-next-btn')?.addEventListener('click', () => {
+      if (!this.gameSuite.queueRunning) return;
+      if (this.gameSuite.runMode === 'auto') {
+        if (this.gameSuiteSkipResolver) {
+          const resolve = this.gameSuiteSkipResolver;
+          this.gameSuiteSkipResolver = null;
+          resolve();
+        }
+      } else {
+        this.advanceManualGameSuite(host);
+      }
+    });
+  }
+
+  private captureCurrentGameSuiteResult(sceneId: GameSceneId, mode: GameSuiteRunMode): GameSuiteRunResult {
+    const meta = GAME_CATALOG.find((c) => c.id === sceneId) || gameBenchService.getGameCatalogItem();
+    const metrics = gameBenchService.getMetrics();
+    const elapsedSec = Math.max(
+      1,
+      Math.round((performance.now() - (this.gameSuiteCurrentStartedAt || performance.now())) / 1000)
+    );
+    const result: GameSuiteRunResult = {
+      sceneId: meta.id,
+      shortTitle: meta.shortTitle,
+      badge: meta.badge,
+      mode,
+      preset: metrics.preset,
+      resolution: metrics.resolution || this.gameSuite.resolution || '1080p',
+      avgFps: Math.round(metrics.avgFps || metrics.fps || 0),
+      low1PctFps: Math.round(metrics.low1PctFps || 0),
+      low01PctFps: Math.round(metrics.low01PctFps || 0),
+      avgFrameTimeMs: Number((metrics.frameTimeMs || 0).toFixed(1)),
+      stabilityPct: Number((metrics.stabilityPct || 100).toFixed(1)),
+      verdict: metrics.verdict || 'UKOŃCZONO',
+      durationSec: elapsedSec,
+      completedAt: new Date().toLocaleTimeString('pl-PL'),
+    };
+    this.gameSuite.results = [...this.gameSuite.results, result];
+    void this.recordLog(
+      'GAME_MAX',
+      result.avgFps >= 45 ? 'OK' : 'WARN',
+      `Test gry (${mode === 'auto' ? 'AUTO' : 'RĘCZNY'}): ${meta.shortTitle}`,
+      result.preset.toUpperCase(),
+      `${result.avgFps} FPS (1% Low: ${result.low1PctFps})`,
+      `Tryb: ${mode === 'auto' ? 'Automatyczny' : 'Ręczny (Użytkownik)'}, Czas: ${result.durationSec}s, Stabilność: ${result.stabilityPct}%`
+    );
+    return result;
+  }
+
+  private refreshGameSuiteSlots(host: HTMLElement): void {
+    const progressSlot = host.querySelector<HTMLElement>('#game-suite-progress-slot');
+    if (progressSlot) {
+      progressSlot.innerHTML = renderGameSuiteProgressHtml(this.gameSuite);
+      this.bindGameSuiteProgressEvents(host);
+    }
+    const resultsSlot = host.querySelector<HTMLElement>('#game-suite-results-slot');
+    if (resultsSlot) {
+      resultsSlot.innerHTML = renderGameSuiteResultsTableHtml(this.gameSuite.results);
+      resultsSlot.querySelector('#game-suite-clear-results-btn')?.addEventListener('click', () => {
+        this.gameSuite.results = [];
+        this.refreshGameSuiteSlots(host);
+      });
+    }
+  }
+
+  private async startGameSuite(host: HTMLElement): Promise<void> {
+    if (this.gameSuite.queueRunning) return;
+    const queue = [...this.gameSuite.selectedIds];
+    if (queue.length === 0) return;
+
+    const token = ++this.gameSuiteRunToken;
+    this.gameSuite.queueRunning = true;
+    this.gameSuite.queueIndex = 0;
+    this.gameSuite.queueTotal = queue.length;
+    this.gameSuite.results = [];
+    this.beginStressSession();
+
+    const mode = this.gameSuite.runMode;
+
+    if (mode === 'manual') {
+      const firstId = queue[0];
+      const meta = GAME_CATALOG.find((c) => c.id === firstId) || GAME_CATALOG[0];
+      this.gameSuite.activeQueueGameTitle = meta.shortTitle;
+      this.gameSuite.remainingSec = 0;
+      gameBenchService.stop();
+      gameBenchService.setResolution(this.gameSuite.resolution);
+      gameBenchService.setGameScene(firstId);
+      gameBenchService.setInteractiveMode(true);
+      this.gameSuiteCurrentStartedAt = performance.now();
+      gameBenchService.start();
+      this.gameState = gameBenchService.getMetrics();
+      this.renderGameBenchView(host);
+      host.querySelector('#game-viewport-shell')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+
+    // Automatic multi-game sequential benchmark runner
+    this.renderGameBenchView(host);
+    host.querySelector('#game-viewport-shell')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+    for (let i = 0; i < queue.length; i++) {
+      if (token !== this.gameSuiteRunToken || !this.gameSuite.queueRunning) break;
+      const sceneId = queue[i];
+      const meta = GAME_CATALOG.find((c) => c.id === sceneId) || GAME_CATALOG[0];
+
+      this.gameSuite.queueIndex = i;
+      this.gameSuite.activeQueueGameTitle = meta.shortTitle;
+      this.gameSuite.remainingSec = this.gameSuite.autoDurationSec;
+      this.gameSuiteCurrentStartedAt = performance.now();
+
+      gameBenchService.stop();
+      gameBenchService.setResolution(this.gameSuite.resolution);
+      gameBenchService.setGameScene(sceneId);
+      gameBenchService.setInteractiveMode(false);
+      gameBenchService.start();
+      this.gameState = gameBenchService.getMetrics();
+
+      const activeTitleEl = host.querySelector('#game-active-title-lbl');
+      if (activeTitleEl) activeTitleEl.textContent = meta.shortTitle;
+      const chartTitleEl = host.querySelector('#game-chart-title');
+      if (chartTitleEl) chartTitleEl.textContent = `Wykres FPS i czasu klatki (Frame-Time ms) — ${meta.title}`;
+      this.refreshGameSuiteSlots(host);
+
+      const durationMs = this.gameSuite.autoDurationSec * 1000;
+      const startedAt = performance.now();
+
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          if (this.gameSuiteCountdownTimer !== null) {
+            clearInterval(this.gameSuiteCountdownTimer);
+            this.gameSuiteCountdownTimer = null;
+          }
+          if (this.gameSuiteSkipResolver === finish) {
+            this.gameSuiteSkipResolver = null;
+          }
+          resolve();
+        };
+        this.gameSuiteSkipResolver = finish;
+        this.gameSuiteCountdownTimer = window.setInterval(() => {
+          if (token !== this.gameSuiteRunToken || !this.gameSuite.queueRunning) {
+            finish();
+            return;
+          }
+          const elapsed = performance.now() - startedAt;
+          this.gameSuite.remainingSec = Math.max(0, (durationMs - elapsed) / 1000);
+          this.refreshGameSuiteSlots(host);
+          if (elapsed >= durationMs) {
+            finish();
+          }
+        }, 250);
+      });
+
+      if (token !== this.gameSuiteRunToken || !this.gameSuite.queueRunning) {
+        break;
+      }
+
+      gameBenchService.stop();
+      this.captureCurrentGameSuiteResult(sceneId, 'auto');
+      this.gameState = gameBenchService.getMetrics();
+      this.refreshGameSuiteSlots(host);
+    }
+
+    if (token === this.gameSuiteRunToken) {
+      this.gameSuite.queueRunning = false;
+      this.gameSuite.remainingSec = 0;
+      gameBenchService.stop();
+      this.gameState = gameBenchService.getMetrics();
+      const lastSummaryCount = this.gameSuite.results.length;
+      if (lastSummaryCount > 0) {
+        const avgAll = Math.round(
+          this.gameSuite.results.reduce((s, r) => s + r.avgFps, 0) / lastSummaryCount
+        );
+        this.finalizeStressSession(
+          'Gra 3D MAX',
+          this.gameState.stabilityPct,
+          `Auto-Kolejka: ukończono ${lastSummaryCount} gier · Śr. ${avgAll} FPS`
+        );
+      }
+      this.renderGameBenchView(host);
+    }
+  }
+
+  private advanceManualGameSuite(host: HTMLElement): void {
+    if (!this.gameSuite.queueRunning || this.gameSuite.runMode !== 'manual') return;
+    const queue = this.gameSuite.selectedIds;
+    const currentId = queue[this.gameSuite.queueIndex];
+    if (currentId) {
+      gameBenchService.stop();
+      this.captureCurrentGameSuiteResult(currentId, 'manual');
+    }
+
+    const nextIndex = this.gameSuite.queueIndex + 1;
+    if (nextIndex >= queue.length) {
+      this.gameSuite.queueRunning = false;
+      this.gameState = gameBenchService.getMetrics();
+      const count = this.gameSuite.results.length;
+      if (count > 0) {
+        const avgAll = Math.round(this.gameSuite.results.reduce((s, r) => s + r.avgFps, 0) / count);
+        this.finalizeStressSession(
+          'Gra 3D MAX',
+          this.gameState.stabilityPct,
+          `Tryb ręczny: ukończono ${count} gier · Śr. ${avgAll} FPS`
+        );
+      }
+      this.renderGameBenchView(host);
+      return;
+    }
+
+    const nextId = queue[nextIndex];
+    const meta = GAME_CATALOG.find((c) => c.id === nextId) || GAME_CATALOG[0];
+    this.gameSuite.queueIndex = nextIndex;
+    this.gameSuite.activeQueueGameTitle = meta.shortTitle;
+    this.gameSuiteCurrentStartedAt = performance.now();
+    gameBenchService.setResolution(this.gameSuite.resolution);
+    gameBenchService.setGameScene(nextId);
+    gameBenchService.setInteractiveMode(true);
+    gameBenchService.start();
+    this.gameState = gameBenchService.getMetrics();
+    this.renderGameBenchView(host);
+  }
+
+  private stopGameSuite(reRender = true, host?: HTMLElement): void {
+    this.gameSuiteRunToken++;
+    if (this.gameSuiteCountdownTimer !== null) {
+      clearInterval(this.gameSuiteCountdownTimer);
+      this.gameSuiteCountdownTimer = null;
+    }
+    if (this.gameSuiteSkipResolver) {
+      const resolve = this.gameSuiteSkipResolver;
+      this.gameSuiteSkipResolver = null;
+      resolve();
+    }
+    const wasManual = this.gameSuite.queueRunning && this.gameSuite.runMode === 'manual';
+    const currentId = this.gameSuite.selectedIds[this.gameSuite.queueIndex];
+    this.gameSuite.queueRunning = false;
+    this.gameSuite.remainingSec = 0;
+
+    if (wasManual && currentId && gameBenchService.isRunning()) {
+      gameBenchService.stop();
+      this.captureCurrentGameSuiteResult(currentId, 'manual');
+    } else if (gameBenchService.isRunning()) {
+      gameBenchService.stop();
+    }
+    this.gameState = gameBenchService.getMetrics();
+    if (reRender && host && this.activeModule === 'game') {
+      this.renderGameBenchView(host);
+    }
+  }
+
   private renderGameHudStripInner(
     g: GameBenchMetrics,
     shortTitle: string,
@@ -4261,8 +4768,12 @@ export class SystemPulseApp {
            <span>Wynik GPU: <strong class="${g.overallScore >= 80 ? 'status-ok' : g.overallScore >= 55 ? 'status-cyan' : 'status-warn'}">${g.overallScore > 0 ? `${g.overallScore}/100` : '—'}</strong></span>
            <span>1% Low: <strong>${g.low1PctFps}</strong></span>
            <span>Frame: <strong>${g.frameTimeMs} ms</strong></span>`;
+    const activeResSpec = getBenchmarkResolutionSpec(
+      g.resolution || this.gameSuite.resolution || gameBenchService.getResolution()
+    );
     return `
       <span>Gra: <strong class="status-cyan">${esc(shortTitle)}</strong></span>
+      <span>Rozdz.: <strong class="status-ok">${activeResSpec.shortLabel}</strong></span>
       ${perfPart}
       ${modeSpecific}
     `;
@@ -5450,7 +5961,7 @@ export class SystemPulseApp {
               <span>Wynik GPU: <strong class="${g.overallScore >= 80 ? 'status-ok' : g.overallScore >= 55 ? 'status-cyan' : 'status-warn'}">${g.overallScore > 0 ? `${g.overallScore}/100` : '—'}</strong></span>
               <span>Frame: <strong>${g.frameTimeMs} ms</strong></span>
               <span>Temp: <strong>${(thermalMonitorService.getLiveGpuTempC() ?? g.estTempC).toFixed(1)} °C</strong> · <strong>${g.coreClockMhz || 2550} MHz</strong></span>
-              <span>Bufor: <strong>${g.renderWidth && g.renderHeight ? `${g.renderWidth}×${g.renderHeight}` : 'Auto'} (${g.renderScalePct ?? 100}%)</strong></span>
+              <span>Bufor: <strong class="status-cyan">${getBenchmarkResolutionSpec(g.resolution || gpuStressEngine.getResolution()).shortLabel}</strong> · <strong>${g.renderWidth && g.renderHeight ? `${g.renderWidth}×${g.renderHeight}` : 'Auto'} (${g.renderScalePct ?? 100}%)</strong></span>
               <span>Tryb: <strong class="status-ok">${g.fpsMode === 'uncapped' ? 'Bez limitu FPS' : 'VSync (rAF)'}</strong></span>
             </div>
             <div id="gpu-hud-verdict" class="gpu-hud-strip">
@@ -5472,6 +5983,21 @@ export class SystemPulseApp {
               <button type="button" class="segmented-btn ${this.gpuFpsSmoothing ? 'active' : ''}" id="gpu-fps-smoothing-toggle" title="Wygładzanie FPS (Średnia krocząca SMA)">
                 Wygładzanie: ${this.gpuFpsSmoothing ? 'WŁ.' : 'WYŁ.'}
               </button>
+            </div>
+
+            <div class="segmented" role="group" aria-label="Rozdzielczość stres-testu GPU 3D">
+              ${BENCHMARK_RESOLUTION_LIST.map(
+                (r) => `
+                <button
+                  type="button"
+                  class="segmented-btn ${(g.resolution || gpuStressEngine.getResolution()) === r.id ? 'active' : ''}"
+                  data-gpu-res="${r.id}"
+                  title="${esc(r.label)}"
+                  ${this.gpuSuiteRunning ? 'disabled' : ''}
+                >
+                  ${r.shortLabel}
+                </button>`
+              ).join('')}
             </div>
 
             <div class="segmented" role="group" aria-label="Poziom obciążenia GPU">
@@ -5497,15 +6023,31 @@ export class SystemPulseApp {
         </div>
 
         <div class="panel stack-md">
-          <div class="panel-header" style="margin-bottom:0;">
-            <h2 class="panel-title">Wykres stabilności FPS i czasu klatki GPU</h2>
-            <span class="panel-caption">Lewa oś: Rzeczywiste FPS · Prawa oś: Czas klatki (ms)</span>
+          <div class="panel-header" style="margin-bottom:0;flex-wrap:wrap;gap:8px;">
+            <div>
+              <h2 class="panel-title">Wykres stabilności FPS i czasu klatki GPU</h2>
+              <span class="panel-caption">Lewa oś: Rzeczywiste FPS · Prawa oś: Czas klatki (ms)</span>
+            </div>
+            <span id="gpu-live-stability-alert-slot"></span>
           </div>
           <div id="gpu-live-chart">
             ${this.renderGpuChartHtml(g)}
           </div>
           <p style="margin:0;font-size:12px;color:var(--text-muted);">
             Tryb <strong>Bez limitu FPS</strong> pomija blokadę VSync monitora i używa nieblokującej bariery <span class="font-mono">WebGL2 fenceSync</span> z adaptacyjnym skalowaniem rozdzielczości anty-freeze, dzięki czemu zliczane są wyłącznie faktycznie wyrenderowane klatki GPU bez zawieszania interfejsu.
+          </p>
+        </div>
+
+        <div class="panel stack-md">
+          <div class="panel-header" style="margin-bottom:0;">
+            <h2 class="panel-title">Stabilność GPU w czasie (D3.js — bieżąca sesja stres-testu)</h2>
+            <span class="panel-caption">Interaktywny wykres D3.js · Oś Y: Stabilność (%) · Progi referencyjne 90% / 75% · Najedź kursorem, aby sprawdzić próbkę</span>
+          </div>
+          <div id="gpu-stability-d3-chart">
+            <!-- Rendered via D3 -->
+          </div>
+          <p style="margin:0;font-size:12px;color:var(--text-muted);">
+            Wykres śledzi procentową stabilność spójności klatek GPU w czasie trwania bieżącej sesji stres-testu. Przełącz okno czasowe (Cała sesja / 60s / 30s) lub najedź na krzywą, aby przeanalizować spadki poniżej 75% i czas klatki.
           </p>
         </div>
 
@@ -5621,6 +6163,19 @@ export class SystemPulseApp {
       });
     });
 
+    host.querySelectorAll<HTMLButtonElement>('[data-gpu-res]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (this.gpuSuiteRunning) return;
+        const res = (btn.dataset.gpuRes || '1080p') as BenchmarkResolutionId;
+        gpuStressEngine.setResolution(res);
+        this.gpuState = this.processGpuMetrics(gpuStressEngine.getMetrics());
+        host.querySelectorAll<HTMLButtonElement>('[data-gpu-res]').forEach((b) => {
+          b.classList.toggle('active', b.dataset.gpuRes === res);
+        });
+        this.patchGpuLive();
+      });
+    });
+
     host.querySelectorAll<HTMLButtonElement>('[data-gpu-preset]').forEach((btn) => {
       btn.addEventListener('click', () => {
         if (this.gpuSuiteRunning) return;
@@ -5660,6 +6215,39 @@ export class SystemPulseApp {
         gpuStressEngine.start();
       }
       this.patchGpuLive();
+    });
+
+    this.renderGpuStabilityChart(g);
+  }
+
+  private renderGpuStabilityChart(g: GpuStressMetrics = this.gpuState): void {
+    const stabilityPoints = g.telemetry.map((t) => ({
+      timeSec: t.timeSec,
+      stabilityPct:
+        typeof t.stabilityPct === 'number' && Number.isFinite(t.stabilityPct)
+          ? t.stabilityPct
+          : g.stabilityPct,
+      fps: t.fps,
+      frameTimeMs: t.frameTimeMs,
+      thermalThrottle: Boolean(t.thermalThrottle),
+    }));
+
+    const liveAlertSlot = this.root.querySelector<HTMLElement>('#gpu-live-stability-alert-slot');
+    if (liveAlertSlot) {
+      const alertState = evaluateGpuStabilityAlert(stabilityPoints, g.running);
+      liveAlertSlot.innerHTML = renderGpuStabilityAlertIndicatorHtml(alertState, g.running);
+    }
+
+    const stabilityChartEl = this.root.querySelector<HTMLElement>('#gpu-stability-d3-chart');
+    if (!stabilityChartEl) return;
+    renderGpuStabilityD3Chart(stabilityChartEl, stabilityPoints, {
+      height: 220,
+      windowMode: this.gpuStabilityWindowMode,
+      isLive: g.running,
+      onWindowModeChange: (mode) => {
+        this.gpuStabilityWindowMode = mode;
+        this.renderGpuStabilityChart();
+      },
     });
   }
 
@@ -5828,13 +6416,16 @@ export class SystemPulseApp {
       const tempC = liveTemp !== null ? liveTemp : g.estTempC;
       const resTxt = g.renderWidth && g.renderHeight ? `${g.renderWidth}×${g.renderHeight}` : 'Auto';
       const scaleTxt = `${g.adaptiveThrottleActive ? 'Auto ' : ''}${g.renderScalePct ?? 100}%`;
+      const resBadge = getBenchmarkResolutionSpec(
+        g.resolution || gpuStressEngine.getResolution()
+      ).shortLabel;
       hudLive.innerHTML = `
         <span>Scena: <strong class="status-cyan">${esc(activeSceneMeta.shortName)}</strong></span>
         <span>FPS: <strong class="status-cyan">${g.fps.toLocaleString('pl-PL')}</strong> (Śr. ${g.avgFps} · 1% Low ${g.low1PctFps})</span>
         <span>Wynik GPU: <strong class="${g.overallScore >= 80 ? 'status-ok' : g.overallScore >= 55 ? 'status-cyan' : 'status-warn'}">${g.overallScore > 0 ? `${g.overallScore}/100` : '—'}</strong></span>
         <span>Frame: <strong>${g.frameTimeMs} ms</strong></span>
         <span>Temp: <strong>${tempC.toFixed(1)} °C</strong> · <strong>${g.coreClockMhz || 2550} MHz</strong></span>
-        <span>Bufor: <strong>${resTxt} (${scaleTxt})</strong></span>
+        <span>Bufor: <strong class="status-cyan">${resBadge}</strong> · <strong>${resTxt} (${scaleTxt})</strong></span>
         <span>Tryb: <strong class="status-ok">${g.fpsMode === 'uncapped' ? 'Bez limitu FPS' : 'VSync (rAF)'}</strong></span>
       `;
     }
@@ -5875,6 +6466,7 @@ export class SystemPulseApp {
     if (chartEl) {
       chartEl.innerHTML = this.renderGpuChartHtml(g);
     }
+    this.renderGpuStabilityChart(g);
     const vramChartEl = this.root.querySelector<HTMLElement>('#gpu-vram-d3-chart');
     if (vramChartEl) {
       renderGpuVramUsageChartD3(
@@ -6457,6 +7049,12 @@ export class SystemPulseApp {
           </div>
         </div>
 
+        ${renderPowercfgBatteryReportSectionHtml(
+          this.powercfgReport,
+          this.powercfgRawText,
+          this.powercfgErrorMsg
+        )}
+
         <div class="panel stack-md">
           <div class="panel-header" style="margin-bottom:0;flex-wrap:wrap;gap:8px;">
             <div>
@@ -6567,6 +7165,49 @@ export class SystemPulseApp {
         batteryHealthService.setCapacities(pr.designMWh, pr.fullChargeMWh, true);
         this.emitDiagnosticChanged('battery-update', false);
       });
+    });
+
+    bindPowercfgBatteryReportEvents(host, this.powercfgReport, {
+      onParsed: (report, rawText) => {
+        this.powercfgReport = report;
+        this.powercfgRawText = rawText;
+        this.powercfgErrorMsg = '';
+        void this.recordLog(
+          'BATTERY',
+          report.overallHealthPct > 0 && report.overallHealthPct < 75 ? 'WARN' : 'OK',
+          'Analiza raportu Windows powercfg /batteryreport',
+          report.overallHealthPct > 0 ? `Kondycja ${report.overallHealthPct}%` : `${report.batteries.length} bat.`,
+          report.totalDesignCapacityMWh && report.totalFullChargeCapacityMWh
+            ? `${report.totalFullChargeCapacityMWh.toLocaleString('pl-PL')} / ${report.totalDesignCapacityMWh.toLocaleString('pl-PL')} mWh`
+            : 'Sparsowano',
+          `Wykryto ${report.batteries.length} baterię/baterie, cykle: ${report.totalCycleCount ?? 'brak'}, historia pojemności: ${report.capacityHistory.length} wpisów.`
+        );
+        this.renderBatteryView(host);
+      },
+      onCleared: () => {
+        this.powercfgReport = null;
+        this.powercfgRawText = '';
+        this.powercfgErrorMsg = '';
+        this.renderBatteryView(host);
+      },
+      onError: (message, rawText) => {
+        this.powercfgRawText = rawText;
+        this.powercfgErrorMsg = message;
+        this.renderBatteryView(host);
+      },
+      onApplyCalibration: (designMWh, fullChargeMWh, report) => {
+        batteryHealthService.setCapacities(designMWh, fullChargeMWh, true);
+        this.emitDiagnosticChanged('battery-update', false);
+        void this.recordLog(
+          'BATTERY',
+          'OK',
+          'Zastosowano pojemności z powercfg /batteryreport',
+          `${fullChargeMWh.toLocaleString('pl-PL')} / ${designMWh.toLocaleString('pl-PL')} mWh`,
+          report.overallHealthPct > 0 ? `${report.overallHealthPct}%` : 'Skalibrowano',
+          `Zaktualizowano Design Capacity i Full Charge Capacity z raportu Windows (${report.systemProductName || report.computerName || 'Laptop'}).`
+        );
+        this.renderBatteryView(host);
+      },
     });
 
     const thresholdInput = host.querySelector<HTMLInputElement>('#bat-power-threshold-input');

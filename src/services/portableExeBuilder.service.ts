@@ -251,6 +251,111 @@ export function buildZipArchive(entries: ZipEntryInput[]): Uint8Array {
   return out;
 }
 
+/**
+ * Generates a valid binary Windows Shell Link (.lnk) file following the
+ * Microsoft [MS-SHLLINK] specification. Launches the installed standalone
+ * Desktop App (SystemPulse-Pro.exe or frameless App-Mode window — never a
+ * regular browser tab) with custom SystemPulse-Pro.ico icon and SW_SHOWMINNOACTIVE.
+ * Zero scripting engines (no WScript/PowerShell), 100% Bitdefender/AV clean.
+ */
+export function buildWindowsLnkShortcut(options: {
+  targetEnvPath: string;
+  arguments: string;
+  workingDir: string;
+  iconEnvPath: string;
+  description: string;
+  showCommand?: number;
+}): Uint8Array {
+  const encodeUtf16Le = (str: string): Uint8Array => {
+    const buf = new Uint8Array(str.length * 2);
+    for (let i = 0; i < str.length; i++) {
+      const code = str.charCodeAt(i);
+      buf[i * 2] = code & 0xff;
+      buf[i * 2 + 1] = (code >>> 8) & 0xff;
+    }
+    return buf;
+  };
+
+  const makeCountedUnicodeString = (str: string): Uint8Array => {
+    const textBytes = encodeUtf16Le(str);
+    const out = new Uint8Array(2 + textBytes.length);
+    writeU16(out, 0, str.length);
+    out.set(textBytes, 2);
+    return out;
+  };
+
+  const makeEnvDataBlock = (signature: number, pathStr: string): Uint8Array => {
+    const block = new Uint8Array(788); // 4 + 4 + 260 + 520
+    writeU32(block, 0, 788);
+    writeU32(block, 4, signature);
+    const ansiMax = Math.min(pathStr.length, 259);
+    for (let i = 0; i < ansiMax; i++) {
+      const c = pathStr.charCodeAt(i);
+      block[8 + i] = c <= 0x7f ? c : 0x3f;
+    }
+    const uniMax = Math.min(pathStr.length, 259);
+    for (let i = 0; i < uniMax; i++) {
+      const code = pathStr.charCodeAt(i);
+      block[268 + i * 2] = code & 0xff;
+      block[268 + i * 2 + 1] = (code >>> 8) & 0xff;
+    }
+    return block;
+  };
+
+  // ShellLinkHeader (76 bytes)
+  const header = new Uint8Array(76);
+  writeU32(header, 0, 0x0000004c); // HeaderSize
+  // LinkCLSID: 00021401-0000-0000-C000-000000000046
+  const clsid = [
+    0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
+  ];
+  header.set(clsid, 4);
+
+  // LinkFlags: HasName | HasWorkingDir | HasArguments | HasIconLocation | IsUnicode | HasExpString | HasExpIcon | PreferEnvironmentPath
+  const linkFlags =
+    0x00000004 |
+    0x00000010 |
+    0x00000020 |
+    0x00000040 |
+    0x00000080 |
+    0x00000200 |
+    0x00004000 |
+    0x02000000;
+  writeU32(header, 0x14, linkFlags);
+  writeU32(header, 0x18, 0x00000020); // FILE_ATTRIBUTE_ARCHIVE
+  writeU32(header, 0x38, 0); // IconIndex = 0
+  writeU32(header, 0x3c, options.showCommand ?? 7); // SW_SHOWMINNOACTIVE (7)
+
+  const nameBlock = makeCountedUnicodeString(options.description);
+  const workDirBlock = makeCountedUnicodeString(options.workingDir);
+  const argsBlock = makeCountedUnicodeString(options.arguments);
+  const iconLocBlock = makeCountedUnicodeString(options.iconEnvPath);
+
+  const envTargetBlock = makeEnvDataBlock(0xa0000001, options.targetEnvPath);
+  const envIconBlock = makeEnvDataBlock(0xa0000007, options.iconEnvPath);
+  const terminalBlock = new Uint8Array(4); // 0x00000000
+
+  const chunks = [
+    header,
+    nameBlock,
+    workDirBlock,
+    argsBlock,
+    iconLocBlock,
+    envTargetBlock,
+    envIconBlock,
+    terminalBlock,
+  ];
+  const totalLen = chunks.reduce((acc, c) => acc + c.length, 0);
+  const result = new Uint8Array(totalLen);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return result;
+}
+
 export function sanitizePortableBundleJs(rawBundle: string): string {
   return rawBundle
     .replace(/export\s*\{[^}]*\}\s*;?\s*$/u, '')
@@ -333,10 +438,10 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     '@echo off',
     'setlocal EnableExtensions EnableDelayedExpansion',
     'chcp 65001 >nul',
-    'title Kreator Instalacji SystemPulse Pro (Win64 Offline)',
+    'title Kreator Instalacji SystemPulse Pro (Win64 Desktop App)',
     'echo ====================================================================',
     'echo   INSTALATOR SYSTEMPULSE PRO - WINDOWS 10 / 11 (64-BIT)',
-    'echo   Instalacja lokalna pakietu diagnostycznego Win64 (.EXE / App-Mode)',
+    'echo   Samodzielne Okno Aplikacji Desktopowej (.EXE / App-Mode bez zakladek)',
     'echo ====================================================================',
     'echo.',
     'set "SRC_DIR=%~dp0"',
@@ -374,6 +479,7 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     '  for %%F in (SystemPulse-Pro.ico SystemPulse-Pro-Portable.bat SystemPulse-Portal.html SystemPulseLauncher.cs SystemPulsePro.csproj SystemPulseSetupGui.cs SystemPulseSetup.csproj SystemPulse-Pro-Installer.iss INSTRUKCJA-PORTABLE-EXE.txt SystemPulse-Pro.exe SystemPulse-Pro-Setup.exe) do (',
     '    if exist "%SRC_DIR%%%F" copy /Y "%SRC_DIR%%%F" "%INSTALL_DIR%\\" >nul',
     '  )',
+    '  if exist "%SRC_DIR%SystemPulse Pro.lnk" copy /Y "%SRC_DIR%SystemPulse Pro.lnk" "%INSTALL_DIR%\\SystemPulse Pro.lnk" >nul',
     ') else (',
     '  echo [1/4] Pliki juz znajduja sie w katalogu docelowym.',
     ')',
@@ -383,18 +489,23 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     '  if not errorlevel 1 (',
     '    echo       Wykryto .NET SDK - budowanie natywnego SystemPulse-Pro.exe z ikona aplikacji...',
     '    dotnet publish "%INSTALL_DIR%\\SystemPulsePro.csproj" -c Release -r win-x64 -o "%INSTALL_DIR%" --nologo >nul 2>&1',
+    '  ) else (',
+    '    echo       Tryb bezposredni Win64 App-Mode ^(samodzielne okno pulpitu bez paska przegladarki^).',
     '  )',
     ')',
-    'echo [3/4] Tworzenie deinstalatora i skrotow z ikona SystemPulse Pro na Pulpicie oraz w Menu Start...',
+    'echo [3/4] Tworzenie deinstalatora i skrotow aplikacji desktopowej ^(.lnk^) z ikona SystemPulse Pro...',
     '(',
     '  echo @echo off',
     '  echo chcp 65001 ^>nul',
     '  echo title Odinstaluj SystemPulse Pro',
-    '  echo if exist "%%USERPROFILE%%\\Desktop\\SystemPulse Pro.url" del /F /Q "%%USERPROFILE%%\\Desktop\\SystemPulse Pro.url" ^>nul 2^>^&1',
-    '  echo if exist "%%USERPROFILE%%\\Desktop\\SystemPulse Pro.cmd" del /F /Q "%%USERPROFILE%%\\Desktop\\SystemPulse Pro.cmd" ^>nul 2^>^&1',
-    '  echo if defined OneDrive if exist "%%OneDrive%%\\Desktop\\SystemPulse Pro.url" del /F /Q "%%OneDrive%%\\Desktop\\SystemPulse Pro.url" ^>nul 2^>^&1',
-    '  echo if defined OneDrive if exist "%%OneDrive%%\\Desktop\\SystemPulse Pro.cmd" del /F /Q "%%OneDrive%%\\Desktop\\SystemPulse Pro.cmd" ^>nul 2^>^&1',
+    '  echo for %%%%E in ^(lnk url cmd^) do ^(',
+    '  echo   if exist "%%USERPROFILE%%\\Desktop\\SystemPulse Pro.%%%%E" del /F /Q "%%USERPROFILE%%\\Desktop\\SystemPulse Pro.%%%%E" ^>nul 2^>^&1',
+    '  echo   if defined OneDrive if exist "%%OneDrive%%\\Desktop\\SystemPulse Pro.%%%%E" del /F /Q "%%OneDrive%%\\Desktop\\SystemPulse Pro.%%%%E" ^>nul 2^>^&1',
+    '  echo   if defined OneDriveConsumer if exist "%%OneDriveConsumer%%\\Desktop\\SystemPulse Pro.%%%%E" del /F /Q "%%OneDriveConsumer%%\\Desktop\\SystemPulse Pro.%%%%E" ^>nul 2^>^&1',
+    '  echo   if defined OneDrive if exist "%%OneDrive%%\\Pulpit\\SystemPulse Pro.%%%%E" del /F /Q "%%OneDrive%%\\Pulpit\\SystemPulse Pro.%%%%E" ^>nul 2^>^&1',
+    '  echo ^)',
     '  echo if exist "%%APPDATA%%\\Microsoft\\Windows\\Start Menu\\Programs\\SystemPulse Pro" rmdir /S /Q "%%APPDATA%%\\Microsoft\\Windows\\Start Menu\\Programs\\SystemPulse Pro" ^>nul 2^>^&1',
+    '  echo if exist "%%LOCALAPPDATA%%\\Programs\\SystemPulse Pro" rmdir /S /Q "%%LOCALAPPDATA%%\\Programs\\SystemPulse Pro" ^>nul 2^>^&1',
     '  echo echo [OK] Usunieto skroty SystemPulse Pro. Usuwanie katalogu aplikacji...',
     '  echo cd /d "%%LOCALAPPDATA%%"',
     '  echo rmdir /S /Q "%%LOCALAPPDATA%%\\Programs\\SystemPulsePro" ^>nul 2^>^&1 ^& exit /b 0',
@@ -406,29 +517,42 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     'if not exist "!DESK_DIR!" if defined OneDrive if exist "%OneDrive%\\Desktop" set "DESK_DIR=%OneDrive%\\Desktop"',
     'if not exist "!DESK_DIR!" if defined OneDriveConsumer if exist "%OneDriveConsumer%\\Desktop" set "DESK_DIR=%OneDriveConsumer%\\Desktop"',
     'if not exist "!DESK_DIR!" if defined OneDrive if exist "%OneDrive%\\Pulpit" set "DESK_DIR=%OneDrive%\\Pulpit"',
+    'for %%D in ("%USERPROFILE%\\Desktop" "%OneDrive%\\Desktop" "%OneDriveConsumer%\\Desktop" "%OneDrive%\\Pulpit") do (',
+    '  if exist "%%~D\\SystemPulse Pro.url" del /F /Q "%%~D\\SystemPulse Pro.url" >nul 2>&1',
+    '  if exist "%%~D\\SystemPulse Pro.cmd" del /F /Q "%%~D\\SystemPulse Pro.cmd" >nul 2>&1',
+    ')',
+    'if exist "%LOCALAPPDATA%\\Programs\\SystemPulse Pro" rmdir /S /Q "%LOCALAPPDATA%\\Programs\\SystemPulse Pro" >nul 2>&1',
     'if exist "!DESK_DIR!" (',
-    '  if exist "!DESK_DIR!\\SystemPulse Pro.cmd" del /F /Q "!DESK_DIR!\\SystemPulse Pro.cmd" >nul 2>&1',
-    '  (',
-    '    echo [InternetShortcut]',
-    '    echo URL=file:///!APP_INDEX_URI!?v=' + buildStamp,
-    '    echo IconFile=%INSTALL_DIR%\\SystemPulse-Pro.ico',
-    '    echo IconIndex=0',
-    '  ) > "!DESK_DIR!\\SystemPulse Pro.url"',
+    '  if exist "%INSTALL_DIR%\\SystemPulse Pro.lnk" (',
+    '    copy /Y "%INSTALL_DIR%\\SystemPulse Pro.lnk" "!DESK_DIR!\\SystemPulse Pro.lnk" >nul',
+    '  ) else (',
+    '    (',
+    '      echo [InternetShortcut]',
+    '      echo URL=file:///!APP_INDEX_URI!?v=' + buildStamp,
+    '      echo IconFile=%INSTALL_DIR%\\SystemPulse-Pro.ico',
+    '      echo IconIndex=0',
+    '    ) > "!DESK_DIR!\\SystemPulse Pro.url"',
+    '  )',
     ')',
     'set "START_DIR=%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\SystemPulse Pro"',
     'if not exist "!START_DIR!" mkdir "!START_DIR!" >nul 2>&1',
     'if exist "!START_DIR!" (',
-    '  (',
-    '    echo [InternetShortcut]',
-    '    echo URL=file:///!APP_INDEX_URI!?v=' + buildStamp,
-    '    echo IconFile=%INSTALL_DIR%\\SystemPulse-Pro.ico',
-    '    echo IconIndex=0',
-    '  ) > "!START_DIR!\\SystemPulse Pro.url"',
+    '  if exist "!START_DIR!\\SystemPulse Pro.url" del /F /Q "!START_DIR!\\SystemPulse Pro.url" >nul 2>&1',
+    '  if exist "%INSTALL_DIR%\\SystemPulse Pro.lnk" (',
+    '    copy /Y "%INSTALL_DIR%\\SystemPulse Pro.lnk" "!START_DIR!\\SystemPulse Pro.lnk" >nul',
+    '  ) else (',
+    '    (',
+    '      echo [InternetShortcut]',
+    '      echo URL=file:///!APP_INDEX_URI!?v=' + buildStamp,
+    '      echo IconFile=%INSTALL_DIR%\\SystemPulse-Pro.ico',
+    '      echo IconIndex=0',
+    '    ) > "!START_DIR!\\SystemPulse Pro.url"',
+    '  )',
     '  copy /Y "%INSTALL_DIR%\\Odinstaluj-SystemPulse-Pro.cmd" "!START_DIR!\\Odinstaluj SystemPulse Pro.cmd" >nul 2>&1',
     ')',
     'echo [4/4] Instalacja zakonczona pomyslnie!',
     'echo       Katalog: %INSTALL_DIR%',
-    'echo       Skrot:   !DESK_DIR!\\SystemPulse Pro.url ^(z ikona SystemPulse-Pro.ico^)',
+    'echo       Skrot:   !DESK_DIR!\\SystemPulse Pro.lnk ^(samodzielne okno aplikacji + ikona SystemPulse-Pro.ico^)',
     'echo.',
     'if exist "%INSTALL_DIR%\\SystemPulse-Pro.exe" (',
     '  echo [OK] Uruchamianie natywnego SystemPulse-Pro.exe...',
@@ -446,7 +570,7 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     'title SystemPulse Pro 64-bit - Standalone Desktop Edition',
     'echo ====================================================================',
     'echo   SYSTEMPULSE PRO - SAMODZIELNA APLIKACJA DESKTOPOWA (WIN64)',
-    'echo   Akceleracja GPU D3D11/WebGL2 + Pelny Pakiet Diagnostyczny Offline',
+    'echo   Samodzielne Okno App-Mode ^(bez zakladek przegladarki^) + D3D11/WebGL2',
     'echo ====================================================================',
     'if exist "%~dp0SystemPulse-Pro.exe" (',
     '  echo [OK] Uruchamianie natywnego silnika SystemPulse-Pro.exe ^(127.0.0.1:45880^)...',
@@ -463,7 +587,7 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     'setlocal EnableDelayedExpansion',
     'set "APP_URI=!LOCAL_APP_FILE:\\=/!"',
     'set "APP_URI=!APP_URI: =%%20!"',
-    'set "PROFILE_DIR=%LOCALAPPDATA%\\SystemPulsePro\\BrowserProfile"',
+    'set "PROFILE_DIR=%LOCALAPPDATA%\\SystemPulsePro\\DesktopAppProfile"',
     'if exist "!PROFILE_DIR!\\Default\\Cache" rmdir /S /Q "!PROFILE_DIR!\\Default\\Cache" >nul 2>&1',
     'if exist "!PROFILE_DIR!\\Default\\Code Cache" rmdir /S /Q "!PROFILE_DIR!\\Default\\Code Cache" >nul 2>&1',
     'set "BROWSER_EXE="',
@@ -475,7 +599,7 @@ export function generatePortableExeZipBlob(): { blob: Blob; filename: string } {
     'if not defined BROWSER_EXE if exist "%ProgramFiles%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe" set "BROWSER_EXE=%ProgramFiles%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"',
     'if not defined BROWSER_EXE if exist "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe" set "BROWSER_EXE=%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"',
     'if defined BROWSER_EXE (',
-    '  start "" "!BROWSER_EXE!" --app="file:///!APP_URI!?v=' + buildStamp + '" --user-data-dir="!PROFILE_DIR!" --start-maximized --disable-frame-rate-limit --disable-gpu-vsync --disk-cache-size=1 --no-first-run --no-default-browser-check',
+    '  start "" "!BROWSER_EXE!" --app="file:///!APP_URI!?v=' + buildStamp + '" --user-data-dir="!PROFILE_DIR!" --window-size=1440,900 --start-maximized --disable-extensions --disable-frame-rate-limit --disable-gpu-vsync --disk-cache-size=1 --no-first-run --no-default-browser-check',
     '  exit /b 0',
     ')',
     'start "" "!LOCAL_APP_FILE!"',
@@ -695,17 +819,25 @@ namespace SystemPulseProSetup
                 CopyDir(srcDir, targetDir, targetDir, currentExe);
 
                 progressBar.Value = 65;
-                string appUri = new Uri(Path.Combine(targetDir, "app", "index.html")).AbsoluteUri;
-                string icoTarget = Path.Combine(targetDir, "SystemPulse-Pro.ico");
-                string urlShortcutContent = "[InternetShortcut]\\r\\nURL=" + appUri + "\\r\\nIconFile=" + icoTarget + "\\r\\nIconIndex=0\\r\\n";
+                string lnkSource = Path.Combine(targetDir, "SystemPulse Pro.lnk");
+                string launcherCmdText = BuildLauncherCmd(targetDir);
                 string desktopDir = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
                 if (chkDesktop.Checked && Directory.Exists(desktopDir))
                 {
-                    lblStatus.Text = "Tworzenie skrótu z ikoną SystemPulse Pro na Pulpicie...";
+                    lblStatus.Text = "Tworzenie skrótu aplikacji desktopowej (.lnk) na Pulpicie...";
                     Application.DoEvents();
+                    string legacyUrl = Path.Combine(desktopDir, "SystemPulse Pro.url");
                     string legacyCmd = Path.Combine(desktopDir, "SystemPulse Pro.cmd");
+                    if (File.Exists(legacyUrl)) try { File.Delete(legacyUrl); } catch {}
                     if (File.Exists(legacyCmd)) try { File.Delete(legacyCmd); } catch {}
-                    File.WriteAllText(Path.Combine(desktopDir, "SystemPulse Pro.url"), urlShortcutContent);
+                    if (File.Exists(lnkSource))
+                    {
+                        File.Copy(lnkSource, Path.Combine(desktopDir, "SystemPulse Pro.lnk"), true);
+                    }
+                    else
+                    {
+                        File.WriteAllText(Path.Combine(desktopDir, "SystemPulse Pro.cmd"), launcherCmdText);
+                    }
                 }
 
                 if (chkStartMenu.Checked)
@@ -715,7 +847,16 @@ namespace SystemPulseProSetup
                         "SystemPulse Pro"
                     );
                     Directory.CreateDirectory(startMenuDir);
-                    File.WriteAllText(Path.Combine(startMenuDir, "SystemPulse Pro.url"), urlShortcutContent);
+                    string legacyStartUrl = Path.Combine(startMenuDir, "SystemPulse Pro.url");
+                    if (File.Exists(legacyStartUrl)) try { File.Delete(legacyStartUrl); } catch {}
+                    if (File.Exists(lnkSource))
+                    {
+                        File.Copy(lnkSource, Path.Combine(startMenuDir, "SystemPulse Pro.lnk"), true);
+                    }
+                    else
+                    {
+                        File.WriteAllText(Path.Combine(startMenuDir, "SystemPulse Pro.cmd"), launcherCmdText);
+                    }
                 }
 
                 progressBar.Value = 100;
@@ -1614,43 +1755,42 @@ namespace SystemPulsePro
     'Source: "app\\*"; DestDir: "{app}\\app"; Flags: ignoreversion recursesubdirs createallsubdirs',
     '',
     '[Icons]',
-    'Name: "{group}\\SystemPulse Pro"; Filename: "{app}\\app\\index.html"; IconFilename: "{app}\\SystemPulse-Pro.ico"',
-    'Name: "{autodesktop}\\SystemPulse Pro"; Filename: "{app}\\app\\index.html"; IconFilename: "{app}\\SystemPulse-Pro.ico"; Tasks: desktopicon',
+    'Name: "{group}\\SystemPulse Pro"; Filename: "{app}\\SystemPulse-Pro-Portable.bat"; WorkingDir: "{app}"; IconFilename: "{app}\\SystemPulse-Pro.ico"; Flags: runminimized',
+    'Name: "{autodesktop}\\SystemPulse Pro"; Filename: "{app}\\SystemPulse-Pro-Portable.bat"; WorkingDir: "{app}"; IconFilename: "{app}\\SystemPulse-Pro.ico"; Flags: runminimized; Tasks: desktopicon',
     'Name: "{group}\\Odinstaluj SystemPulse Pro"; Filename: "{uninstallexe}"',
     '',
     '[Run]',
-    'Filename: "{app}\\app\\index.html"; Description: "Uruchom SystemPulse Pro"; Flags: shellexec postinstall skipifsilent',
+    'Filename: "{app}\\SystemPulse-Pro-Portable.bat"; Description: "Uruchom SystemPulse Pro (Samodzielne okno aplikacji)"; Flags: shellexec postinstall skipifsilent runminimized',
   ].join('\r\n');
 
   const readmeTxt = [
     '========================================================================',
     '  SYSTEMPULSE PRO v5.0 - SAMODZIELNA APLIKACJA DESKTOPOWA WIN64',
-    '  CZYSTY PAKIET OFFLINE Z IKONA SYSTEMPULSE-PRO.ICO (ZERO SKRYPTOW AV)',
+    '  SAMODZIELNE OKNO PULPITU (BEZ ZAKLADEK PRZEGLADARKI) + IKONA .ICO',
     '========================================================================',
     '',
     'NAJPROSTSZA INSTALACJA BEZ ALARMOW ANTYWIRUSA (POLECANE - 1 KLIK):',
-    '  Kliknij przycisk "Zainstaluj aplikacje" w gornym pasku aplikacji w Chrome/Edge.',
-    '  Windows utworzy natywna aplikacje desktopowa z ikona SystemPulse Pro,',
-    '  skrotem na Pulpicie/Menu Start i deinstalatorem w Ustawieniach Windows —',
-    '  z podpisem Google/Microsoft i 0% falszywych alarmow Bitdefender/Defender.',
+    '  Kliknij przycisk "Zainstaluj App" w gornym pasku aplikacji w Chrome/Edge.',
+    '  Windows utworzy natywna aplikacje desktopowa w osobnym oknie (bez paska',
+    '  adresu i zakladek), z ikona na Pulpicie/Menu Start i deinstalatorem w',
+    '  Ustawieniach Windows — 0% falszywych alarmow Bitdefender/Defender.',
     '',
     'KROK 1 (PACZKA OFFLINE ZIP):',
     '  Najpierw ROZPAKUJ cale archiwum SystemPulse-Pro-Portable-Win64.zip',
     '  (kliknij prawym -> Wyodrebnij wszystkie / Extract All).',
     '  NIE uruchamiaj plikow bezposrednio ze spakowanego archiwum .ZIP!',
     '',
-    'KROK 2 - URUCHOMIENIE / INSTALACJA OFFLINE:',
-    '  OPCJA A (NAJCZYSTSZY START OFFLINE):',
-    '    Otworz "app\\index.html" lub "SystemPulse-Portal.html" (posiada ikone).',
-    '',
-    '  OPCJA B (INSTALACJA LOKALNA + SKROTY Z IKONA NA PULPICIE I MENU START):',
-    '    Uruchom "Instalator-SystemPulse-Pro-Setup.cmd".',
-    '    - Kopiuje aplikacje i ikone SystemPulse-Pro.ico do %LOCALAPPDATA%\\Programs\\SystemPulsePro',
-    '    - Tworzy skroty z ikona SystemPulse Pro na Pulpicie i w Menu Start',
-    '    - Jesli masz .NET SDK, automatycznie kompiluje natywny SystemPulse-Pro.exe z ikona',
+    'KROK 2 - INSTALACJA LOKALNA + SKROT APLIKACJI DESKTOPOWEJ (.LNK):',
+    '  Uruchom "Instalator-SystemPulse-Pro-Setup.cmd".',
+    '  - Kopiuje aplikacje i ikone SystemPulse-Pro.ico do %LOCALAPPDATA%\\Programs\\SystemPulsePro',
+    '  - Usuwa ewentualne stare skroty .url otwierajace karte przegladarki',
+    '  - Tworzy prawdziwy skrot Windows "SystemPulse Pro.lnk" na Pulpicie i w Menu Start',
+    '    uruchamiajacy samodzielne okno aplikacji desktopowej (App-Mode / SystemPulse-Pro.exe)',
+    '  - Jesli masz zainstalowany .NET SDK, automatycznie kompiluje natywny plik',
+    '    SystemPulse-Pro.exe (lokalny serwer WMI + samodzielne okno aplikacji).',
     '',
     '  OPCJA C (TRYB PORTABLE BEZ INSTALACJI - ODBLOKOWANY FPS):',
-    '    Uruchom "SystemPulse-Pro-Portable.bat".',
+    '    Uruchom "SystemPulse-Pro-Portable.bat" — otwiera samodzielne okno pulpitu.',
     '',
     '  OPCJA D (KLASYCZNY 1-PLIKOWY SETUP.EXE PRZEZ INNO SETUP 6):',
     '    Otworz "SystemPulse-Pro-Installer.iss" w darmowym Inno Setup Compiler -> Build.',
@@ -1669,8 +1809,18 @@ namespace SystemPulsePro
     cachedIconSvg ||
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect x="2" y="2" width="60" height="60" rx="14" fill="#070b14" stroke="#22d3ee" stroke-width="3"/><rect x="14" y="14" width="36" height="36" rx="8" fill="#0f172a" stroke="#06b6d4" stroke-width="2.5"/><polyline points="18,34 25,34 29,22 34,43 39,28 42,34 46,34" fill="none" stroke="#22d3ee" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
+  const desktopShortcutLnkBytes = buildWindowsLnkShortcut({
+    targetEnvPath: '%SystemRoot%\\System32\\cmd.exe',
+    arguments: '/c "%LOCALAPPDATA%\\Programs\\SystemPulsePro\\SystemPulse-Pro-Portable.bat"',
+    workingDir: '%LOCALAPPDATA%\\Programs\\SystemPulsePro',
+    iconEnvPath: '%LOCALAPPDATA%\\Programs\\SystemPulsePro\\SystemPulse-Pro.ico',
+    description: 'SystemPulse Pro — Samodzielna Aplikacja Desktopowa Win64',
+    showCommand: 7,
+  });
+
   const zipBytes = buildZipArchive([
     { name: 'SystemPulse-Pro-Portable/SystemPulse-Pro.ico', content: iconIcoBytes },
+    { name: 'SystemPulse-Pro-Portable/SystemPulse Pro.lnk', content: desktopShortcutLnkBytes },
     { name: 'SystemPulse-Pro-Portable/Instalator-SystemPulse-Pro-Setup.cmd', content: installerSetupCmd },
     { name: 'SystemPulse-Pro-Portable/SystemPulse-Pro-Portable.bat', content: batLauncher },
     { name: 'SystemPulse-Pro-Portable/SystemPulse-Pro-Installer.iss', content: innoSetupIss },

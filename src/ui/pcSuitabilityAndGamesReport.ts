@@ -1194,8 +1194,8 @@ export function renderPcSuitabilityAndGamesReport(ctx: PcSuitabilityInputContext
           <div style="font-size:32px;margin-bottom:8px;">🎮📊</div>
           <h3 style="margin:0 0 8px;font-size:18px;color:#f8fafc;">Jakie gry obsłuży ten PC / Laptop? — Wymagany pomiar</h3>
           <p style="margin:0 auto 12px;max-width:680px;color:#94a3b8;font-size:13px;line-height:1.55;">
-            Wykryto sprzęt: <strong style="color:#e2e8f0;">${escHtml(hw.gpuLabel)}</strong> · <strong style="color:#e2e8f0;">${hw.cpuCores} wątków CPU</strong> (klasa ~${hw.vramEstGb} GB VRAM).
-            Aby uniknąć sztywnych zgadywanek i wyliczyć <strong style="color:#38bdf8;">rzeczywiste FPS dla 13 popularnych gier</strong> (CS2, Cyberpunk 2077 RT, Wukong, Wiedźmin 3, Alan Wake 2, Forza 5), uruchom najpierw test wydajności podzespołów.
+            Wykryto sprzęt: <strong style="color:#e2e8f0;">${escHtml(hw.gpuLabel.replace(/^ANGLE\s*\([^,]+,\s*/i, '').replace(/\s*\(0x[0-9a-f]+\).*$/i, '').replace(/\s+Direct3D11.*$/i, '').trim() || hw.gpuLabel)}</strong> · <strong style="color:#e2e8f0;">${hw.cpuCores} wątków CPU</strong> (klasa ~${hw.vramEstGb} GB VRAM).
+            Aby uniknąć sztywnych zgadywanek i wyliczyć <strong style="color:#38bdf8;">rzeczywiste FPS dla 50 najnowszych gier</strong> (CS2, Cyberpunk 2077 RT, Spider-Man 2, 007 First Light, EA FC / FIFA 2027, GTA VI, Wiedźmin 3, Alan Wake 2), uruchom najpierw test wydajności podzespołów.
           </p>
           <div class="sp-calibration-pills" style="justify-content:center;margin-bottom:16px;">
             <button type="button" class="sp-cal-pill sp-cal-pill--pending" data-open-mod="cpu">○ CPU: brak testu</button>

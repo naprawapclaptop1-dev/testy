@@ -233,6 +233,7 @@ export interface GpuTelemetryPoint {
   timeSec: number;
   fps: number;
   frameTimeMs: number;
+  stabilityPct?: number;
   estTempC: number;
   allocatedVramMB: number;
   textureVramMB: number;
@@ -290,6 +291,8 @@ export type GpuSceneMode =
   | 'cyber_rain_neon'
   | 'magma_caldera_sim';
 
+export type BenchmarkResolutionId = '1080p' | '2k' | '4k' | '8k';
+
 export interface GpuStressMetrics {
   running: boolean;
   sceneMode: GpuSceneMode;
@@ -297,6 +300,7 @@ export interface GpuStressMetrics {
   workloadNote: string;
   preset: GpuLoadPreset;
   fpsMode: GpuFpsMode;
+  resolution?: BenchmarkResolutionId;
   instanceCount: number;
   triangles: number;
   drawCalls: number;
@@ -752,6 +756,7 @@ export interface GameBenchMetrics {
   preset: GameQualityPreset;
   fpsMode: GpuFpsMode;
   fpsCap?: GameFpsCap;
+  resolution?: BenchmarkResolutionId;
   renderScale: number;
   upscalingMode?: GameUpscalingMode;
   upscalingPct?: number;
@@ -872,6 +877,7 @@ export interface ScheduledTestItem {
   ramSizeMB?: number;
   gpuPreset?: GpuLoadPreset;
   gpuFpsMode?: GpuFpsMode;
+  resolution?: BenchmarkResolutionId;
 }
 
 export interface SchedulerStepResult {

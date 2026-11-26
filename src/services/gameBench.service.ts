@@ -17,6 +17,7 @@ import {
 } from './aaaVisuals';
 import { createCinematicGradePass } from './cinematicPostFx';
 import {
+  BenchmarkResolutionId,
   GameAaMode,
   GameAiProfile,
   GameAoMode,
@@ -37,6 +38,7 @@ import {
   GpuTelemetryPoint,
 } from '../types';
 import { thermalMonitorService } from './thermalMonitor.service';
+import { computeSafeBenchmarkBufferSize } from '../utils/benchmarkResolution';
 import { gameAudioService } from './gameAudio.service';
 import {
   createAircraftCarrierModel,
@@ -1913,6 +1915,7 @@ export class GameBenchService {
   private interactiveMode = false;
   private gameId: GameSceneId = 'hyperion';
   private preset: GameQualityPreset = 'ultra';
+  private targetResolution: BenchmarkResolutionId = '1080p';
   private fpsMode: GpuFpsMode = 'vsync';
   private fpsCap: GameFpsCap = 0;
   private bloomEnabled = true;
@@ -2236,6 +2239,7 @@ export class GameBenchService {
       gameId: gameMeta.id,
       gameTitle: gameMeta.title,
       preset: this.preset,
+      resolution: this.targetResolution,
       fpsMode: this.fpsMode,
       fpsCap: this.fpsCap,
       renderScale: cfg.renderScale,
@@ -4937,18 +4941,43 @@ export class GameBenchService {
     renderer.toneMappingExposure = this.exposure;
   }
 
+  public getResolution(): BenchmarkResolutionId {
+    return this.targetResolution;
+  }
+
+  public setResolution(res: BenchmarkResolutionId): void {
+    this.targetResolution = res;
+    this.metrics.resolution = res;
+    if (this.mountEl) {
+      const w = Math.max(320, this.mountEl.clientWidth || 1280);
+      const h = Math.max(240, this.mountEl.clientHeight || 600);
+      this.applyPresetScale(w, h);
+    }
+    this.emitMetrics();
+  }
+
   private applyPresetScale(w: number, h: number): void {
     if (!this.renderer) return;
     const cfg = GAME_PRESETS[this.preset];
     const dynScale = this.dynamicResolution ? this.dynResFactor : 1.0;
     const upscaleFactor = this.upscalingMode === 'native' ? 1.0 : Math.max(0.5, Math.min(1.0, (this.upscalingPct + 25) / 100));
-    const effPixelRatio = Math.max(0.6, Math.min(2.5, (window.devicePixelRatio || 1) * cfg.renderScale * dynScale * upscaleFactor));
-    this.renderer.setPixelRatio(effPixelRatio);
-    this.renderer.setSize(w, h, false);
-    this.composer?.setPixelRatio(effPixelRatio);
-    this.composer?.setSize(w, h);
-    const drawW = Math.round(w * effPixelRatio);
-    const drawH = Math.round(h * effPixelRatio);
+    const gl = this.renderer.getContext();
+    const maxHwDim = Number(gl?.getParameter?.(gl.MAX_RENDERBUFFER_SIZE) || 8192);
+    const buf = computeSafeBenchmarkBufferSize(this.targetResolution, dynScale * upscaleFactor, maxHwDim);
+    const drawW = buf.drawWidth;
+    const drawH = buf.drawHeight;
+
+    this.renderer.setPixelRatio(1);
+    this.renderer.setSize(drawW, drawH, false);
+    this.renderer.domElement.style.width = '100%';
+    this.renderer.domElement.style.height = '100%';
+    this.renderer.domElement.style.display = 'block';
+    this.composer?.setPixelRatio(1);
+    this.composer?.setSize(drawW, drawH);
+    if (this.camera && h > 0) {
+      this.camera.aspect = w / h;
+      this.camera.updateProjectionMatrix();
+    }
     if (this.bloomPass) {
       this.bloomPass.strength = cfg.bloomStrength * 0.72;
       this.bloomPass.enabled = this.bloomEnabled;
@@ -4963,9 +4992,11 @@ export class GameBenchService {
         ? 'Native 100%'
         : `${this.upscalingMode.toUpperCase().replace('_', ' ')} (${this.upscalingPct}%)`;
     const fgLabel = this.frameGenMode === 'off' ? (this.smoothMotionEnabled ? ' + SmoothMotion' : '') : ` + ${this.frameGenMode.toUpperCase()}`;
+    const effRmSteps = cfg.raymarchSteps + buf.extraSupersampleSteps;
+    this.metrics.resolution = this.targetResolution;
     this.metrics.renderScale = Number((cfg.renderScale * dynScale * (this.upscalingPct / 100)).toFixed(2));
-    this.metrics.raymarchSteps = cfg.raymarchSteps;
-    this.metrics.resolutionLabel = `${drawW} × ${drawH} (${upLabel}${fgLabel} · ${cfg.raymarchSteps} RM)`;
+    this.metrics.raymarchSteps = effRmSteps;
+    this.metrics.resolutionLabel = `${buf.spec.shortLabel} · ${drawW} × ${drawH}${buf.cappedByHardware ? ' SSAA' : ''} (${upLabel}${fgLabel} · ${effRmSteps} RM)`;
   }
 
   private bindInteractiveEvents(canvas: HTMLCanvasElement): void {

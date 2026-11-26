@@ -6,12 +6,14 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
 import {
+  BenchmarkResolutionId,
   GpuFpsMode,
   GpuLoadPreset,
   GpuSceneMode,
   GpuStressMetrics,
   GpuTelemetryPoint,
 } from '../types';
+import { computeSafeBenchmarkBufferSize } from '../utils/benchmarkResolution';
 import {
   createCarbonFiberTextures,
   createCinematicBackdropDome,
@@ -1629,6 +1631,7 @@ export class GpuStressEngine {
   private pendingFramesInSlice = 1;
   private lastGpuFrameMs = 16;
   private renderScale = 1.0;
+  private targetResolution: BenchmarkResolutionId = '1080p';
   private slowFrameStreak = 0;
   private fastFrameStreak = 0;
   private adaptiveThrottleActive = false;
@@ -1678,6 +1681,7 @@ export class GpuStressEngine {
       preset: this.preset,
       fpsMode: this.fpsMode,
       instanceCount: PRESET_CONFIG[this.preset].instances,
+      resolution: this.targetResolution,
       triangles: 0,
       drawCalls: 0,
       fps: 0,
@@ -1829,6 +1833,17 @@ export class GpuStressEngine {
     }
   }
 
+  public getResolution(): BenchmarkResolutionId {
+    return this.targetResolution;
+  }
+
+  public setResolution(res: BenchmarkResolutionId): void {
+    this.targetResolution = res;
+    this.metrics.resolution = res;
+    this.applyRenderScale(false);
+    this.emitMetrics();
+  }
+
   private applyRenderScale(resetToSafeInitial = false): void {
     if (!this.mountEl || !this.renderer) return;
     const width = Math.max(320, this.mountEl.clientWidth);
@@ -1849,30 +1864,35 @@ export class GpuStressEngine {
       this.adaptiveThrottleActive = this.renderScale < 0.98;
     }
 
-    const baseDpr = this.isSoftwareGl || isHeavy ? 1 : rawDpr;
-    const effectivePr = Math.max(0.35, Math.min(2, baseDpr * this.renderScale));
-    this.renderer.setPixelRatio(effectivePr);
-    this.renderer.setSize(width, height, false);
+    const gl = this.renderer.getContext();
+    const maxHwDim = Number(gl?.getParameter?.(gl.MAX_RENDERBUFFER_SIZE) || 8192);
+    const buf = computeSafeBenchmarkBufferSize(this.targetResolution, this.renderScale, maxHwDim);
+    const drawW = buf.drawWidth;
+    const drawH = buf.drawHeight;
+
+    this.renderer.setPixelRatio(1);
+    this.renderer.setSize(drawW, drawH, false);
     this.renderer.domElement.style.width = '100%';
     this.renderer.domElement.style.height = '100%';
     this.renderer.domElement.style.display = 'block';
 
     const sz = new THREE.Vector2();
     this.renderer.getDrawingBufferSize(sz);
-    this.metrics.renderWidth = Math.round(sz.x);
-    this.metrics.renderHeight = Math.round(sz.y);
+    this.metrics.resolution = this.targetResolution;
+    this.metrics.renderWidth = Math.round(sz.x || drawW);
+    this.metrics.renderHeight = Math.round(sz.y || drawH);
     this.metrics.renderScalePct = Math.round(this.renderScale * 100);
     this.metrics.adaptiveThrottleActive = this.adaptiveThrottleActive;
 
     if (this.composer) {
-      this.composer.setPixelRatio(effectivePr);
-      this.composer.setSize(width, height);
+      this.composer.setPixelRatio(1);
+      this.composer.setSize(drawW, drawH);
     }
     if (this.bloomPass) {
-      this.bloomPass.setSize(Math.max(1, Math.round(sz.x)), Math.max(1, Math.round(sz.y)));
+      this.bloomPass.setSize(Math.max(1, Math.round(sz.x || drawW)), Math.max(1, Math.round(sz.y || drawH)));
     }
     if (this.cinematicPass) {
-      this.cinematicPass.uniforms.uResolution.value.set(Math.max(1, sz.x), Math.max(1, sz.y));
+      this.cinematicPass.uniforms.uResolution.value.set(Math.max(1, sz.x || drawW), Math.max(1, sz.y || drawH));
     }
     this.syncPostFxParams();
 
@@ -7399,10 +7419,11 @@ export class GpuStressEngine {
       const low1Idx = Math.max(0, Math.floor(sortedFps.length * 0.05));
       const low1PctFps = Math.round(sortedFps[low1Idx] ?? minFps);
 
-      // Compute frame-pacing stability across measurement windows
+      // Compute genuine frame-pacing stability across measurement windows (20%–99.8%)
+      // so real frame jitter, tail hitches, or thermal throttling can drop below 75%.
       const sortedFt = [...this.frameTimes].sort((a, b) => a - b);
-      const trimStart = Math.floor(sortedFt.length * 0.1);
-      const trimEnd = Math.max(trimStart + 1, Math.ceil(sortedFt.length * 0.9));
+      const trimStart = Math.floor(sortedFt.length * 0.08);
+      const trimEnd = Math.max(trimStart + 1, Math.ceil(sortedFt.length * 0.92));
       const trimmedFt = sortedFt.slice(trimStart, trimEnd);
       const trimmedMean =
         trimmedFt.reduce((s, v) => s + v, 0) / Math.max(1, trimmedFt.length);
@@ -7410,8 +7431,12 @@ export class GpuStressEngine {
         trimmedFt.reduce((s, v) => s + (v - trimmedMean) ** 2, 0) /
         Math.max(1, trimmedFt.length);
       const stdDev = Math.sqrt(variance);
-      const cv = stdDev / Math.max(2.2, trimmedMean);
-      const stabilityPct = Number(Math.max(76, Math.min(99.8, (1 - cv * 0.48) * 100)).toFixed(1));
+      const cv = stdDev / Math.max(2.0, trimmedMean);
+      const medianFt = sortedFt[Math.floor(sortedFt.length * 0.5)] || trimmedMean || 16.7;
+      const p95Ft = sortedFt[Math.min(sortedFt.length - 1, Math.floor(sortedFt.length * 0.95))] || medianFt;
+      const spikePenalty = Math.max(0, (p95Ft / Math.max(1.5, medianFt) - 1.35) * 18);
+      const rawStability = (1 - cv * 0.62) * 100 - spikePenalty;
+      const stabilityPct = Number(Math.max(20, Math.min(99.8, rawStability)).toFixed(1));
 
       const presetBias = PRESET_CONFIG[this.preset].powerBias;
       const modeBonus = this.fpsMode === 'uncapped' ? 6 : 0;
@@ -7433,6 +7458,7 @@ export class GpuStressEngine {
         timeSec: Number(elapsedSec.toFixed(1)),
         fps: curFps,
         frameTimeMs: Number(avgFrameMs.toFixed(2)),
+        stabilityPct,
         estTempC: effectiveTempC,
         allocatedVramMB,
         textureVramMB,

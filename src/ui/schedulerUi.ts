@@ -3,6 +3,7 @@ import {
   ScheduledTestType,
   SchedulerSummaryReport,
 } from '../types';
+import { getBenchmarkResolutionSpec } from '../utils/benchmarkResolution';
 import { iconSvg } from './icons';
 
 export interface SchedulerTestCatalogEntry {
@@ -103,6 +104,7 @@ export function createScheduledItem(type: ScheduledTestType): ScheduledTestItem 
       durationSec: type === 'gpu_all_scenes' ? 10 : 6,
       gpuPreset: 'high',
       gpuFpsMode: 'uncapped',
+      resolution: '1080p',
     };
   }
   if (type === 'game_ultra' || type === 'game_racing') {
@@ -112,6 +114,7 @@ export function createScheduledItem(type: ScheduledTestType): ScheduledTestItem 
       label: def.label,
       durationSec: type === 'game_racing' ? 8 : 7,
       gpuFpsMode: 'uncapped',
+      resolution: '1080p',
     };
   }
   if (type === 'display_cal' || type === 'psu_stress' || type === 'audio_sweep') {
@@ -163,13 +166,21 @@ export function describeItemConfig(item: ScheduledTestItem): string {
   if (item.type === 'cpu_stress') return `Czas: ${item.durationSec || 8}s · 100% wątków (Burn-in)`;
   if (item.type === 'ram') return `Bufor: ${item.ramSizeMB || 128} MB · 10 etapów MemTest86+`;
   if (item.type === 'gpu_stress') {
-    return `Czas: ${item.durationSec || 6}s · Preset: ${item.gpuPreset || 'high'} · ${item.gpuFpsMode === 'vsync' ? 'VSync' : 'Bez limitu FPS'}`;
+    const res = getBenchmarkResolutionSpec(item.resolution || '1080p').shortLabel;
+    return `Czas: ${item.durationSec || 6}s · ${res} · Preset: ${item.gpuPreset || 'high'} · ${item.gpuFpsMode === 'vsync' ? 'VSync' : 'Bez limitu FPS'}`;
   }
   if (item.type === 'gpu_all_scenes') {
-    return `Czas: ${item.durationSec || 10}s · Przelot przez sceny 3D WebGL · Bez limitu FPS`;
+    const res = getBenchmarkResolutionSpec(item.resolution || '1080p').shortLabel;
+    return `Czas: ${item.durationSec || 10}s · ${res} · Przelot przez sceny 3D WebGL · Bez limitu FPS`;
   }
-  if (item.type === 'game_ultra') return `Czas: ${item.durationSec || 7}s · HYPERION Ultra MAX`;
-  if (item.type === 'game_racing') return `Czas: ${item.durationSec || 8}s · Wyścig 3D Formula Cyber GP + Nitro`;
+  if (item.type === 'game_ultra') {
+    const res = getBenchmarkResolutionSpec(item.resolution || '1080p').shortLabel;
+    return `Czas: ${item.durationSec || 7}s · ${res} · HYPERION Ultra MAX`;
+  }
+  if (item.type === 'game_racing') {
+    const res = getBenchmarkResolutionSpec(item.resolution || '1080p').shortLabel;
+    return `Czas: ${item.durationSec || 8}s · ${res} · Wyścig 3D Formula Cyber GP + Nitro`;
+  }
   if (item.type === 'display_cal') return `Czas: ${item.durationSec || 5}s · Pomiar Hz, VSync Jitter i 32 plansz`;
   if (item.type === 'psu_stress') return `Czas: ${item.durationSec || 6}s · Stabilność 12V/5V/3.3V + Ripple mV`;
   if (item.type === 'audio_sweep') return `Czas: ${item.durationSec || 4}s · Sweep DSP 20Hz-20kHz + L/R`;

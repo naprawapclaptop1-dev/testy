@@ -1,0 +1,21 @@
+[
+  {
+    "id": "live_pc_mwwr8ff0_rgunm",
+    "name": "AMD Radeon RX 7900 XTX · 32T (Skan LIVE)",
+    "tierLabel": "S+ EKSTREMALNY",
+    "category": "Twój Zapisany PC",
+    "cpuSummary": "32 wątków · Multi: 2 432 590 pkt · Single: 125 162 pkt",
+    "gpuSummary": "AMD Radeon RX 7900 XTX · 179 FPS (1% Low: 32 FPS)",
+    "ramSummary": "RAM: 12190/7052 MB/s · 0.7 ns · 0 błędów",
+    "diskSummary": "Dysk: 2293.9/830.6 MB/s · SMART 100%",
+    "cpuScore": 100,
+    "gpuScore": 100,
+    "ramScore": 100,
+    "diskScore": 100,
+    "overallScore": 100,
+    "testedCount": 4,
+    "isCurrentPc": false,
+    "isUserSaved": true,
+    "savedAt": 1795681900891
+  }
+]

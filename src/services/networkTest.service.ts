@@ -874,274 +874,371 @@ export class NetworkTestService {
   }
 
   /**
-   * Executes a 100% REAL multi-stream HTTP download + upload measurement.
-   * - Download timer starts at request dispatch (`burstReqStartTs`) minus 1 baseline RTT, so local
-   *   antivirus proxies (e.g. Bitdefender Encrypted Web Scan) that buffer payloads before delivering
-   *   chunks to `reader.read()` cannot inflate download Mbps with localhost RAM-flush timings.
-   * - Upload uses 100% high-entropy Xorshift32 pseudo-random bytes (immune to zero-compression)
-   *   and counts bytes ONLY when the remote server returns HTTP 200 OK (`res.ok`), preventing
-   *   local OS TCP send buffer (`SO_SNDBUF` / `xhr.upload.onprogress`) from faking upload speed.
+   * Detects transparent HTTP compression (e.g. proxy/ISP gzip/br on Cloudflare's zero-filled __down)
+   * using PerformanceResourceTiming. Returns a wire-to-decoded correction factor in (0, 1].
    */
-  private async measureRealBandwidthPhase(
-    burstIndex: number,
-    direction: NetworkTransferDirection,
-    baselineRttMs: number,
-    lastMeasuredDlMbps: number,
-    lastMeasuredUlMbps: number,
-    onLiveSample?: (phase: 'down' | 'up', liveMbps: number, liveBytes: number) => void
-  ): Promise<{
-    downloadMbps: number;
-    uploadMbps: number;
-    bytesTransferred: number;
-    loadedPingMs: number;
-    sourceLabel: string;
-  }> {
-    const srv = this.getSelectedServer();
-    const configuredStreams = Math.max(4, Math.min(12, this.activeStreams));
-    const dlStreams = burstIndex === 1 ? Math.min(6, configuredStreams) : configuredStreams;
-
-    // Adaptive download chunk size per stream (~1.1s target wire transfer) so we don't force
-    // 200 MB per burst through AV proxies on medium links while still scaling up for 1G+ fiber.
-    let chunkBytes = 1_500_000;
-    if (burstIndex > 1) {
-      if (lastMeasuredDlMbps > 0) {
-        const targetBytesPerStream = Math.round(
-          ((lastMeasuredDlMbps * 1_000_000) / 8) * 1.1 / dlStreams
-        );
-        chunkBytes = Math.max(1_000_000, Math.min(10_000_000, targetBytesPerStream));
-      } else {
-        chunkBytes = 2_500_000;
+  private detectCompressionCorrectionFactor(urls: string[]): number {
+    if (typeof performance === 'undefined' || typeof performance.getEntriesByName !== 'function') {
+      return 1;
+    }
+    let totalEncoded = 0;
+    let totalDecoded = 0;
+    for (const url of urls) {
+      const entries = performance.getEntriesByName(url) as PerformanceResourceTiming[];
+      for (const e of entries) {
+        if (
+          typeof e.encodedBodySize === 'number' &&
+          typeof e.decodedBodySize === 'number' &&
+          e.encodedBodySize > 0 &&
+          e.decodedBodySize > 0
+        ) {
+          totalEncoded += e.encodedBodySize;
+          totalDecoded += e.decodedBodySize;
+        }
       }
     }
+    if (totalEncoded > 0 && totalDecoded > totalEncoded * 1.2) {
+      return Math.max(0.01, Math.min(1, totalEncoded / totalDecoded));
+    }
+    return 1;
+  }
 
-    const maxWindowMs = direction === 'both' ? 2400 : 3000;
-    const rttOffsetMs = Math.min(110, Math.max(8, baselineRttMs > 0 ? baselineRttMs : 24));
+  /**
+   * Sustained multi-second multi-stream HTTP Download test (Ookla / M-Lab NDT7 steady-state method):
+   * - Streams 25 MB payloads continuously across parallel workers for `durationMs` (5.5s standard).
+   * - Completely discards the first `warmupMs` (1.5s) to exclude TCP Slow-Start, TLS handshakes,
+   *   and local antivirus proxy (e.g. Bitdefender Encrypted Web Scan) initial buffer flushes.
+   * - Measures strictly `deltaBytes / deltaSec` inside the sustained steady-state window with ZERO
+   *   artificial time multipliers (`0.8`) and ZERO RTT subtraction tricks.
+   */
+  private async runSustainedDownload(options: {
+    durationMs: number;
+    warmupMs: number;
+    streams: number;
+    probeUrl: string;
+    onTick: (liveMbps: number, totalBytes: number, windowMbps: number | null) => void;
+    onLoadedPing: (latencyMs: number) => void;
+  }): Promise<{
+    sustainedMbps: number;
+    peakMbps: number;
+    totalBytes: number;
+    windowSamples: number[];
+    sourceLabel: string;
+  }> {
+    const { durationMs, warmupMs, streams, probeUrl, onTick, onLoadedPing } = options;
+    const workerCount = Math.max(3, Math.min(6, streams));
+    const chunkBytes = 25_000_000;
+    const isLocalOrigin =
+      typeof window !== 'undefined' &&
+      (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost');
 
-    let totalDownBytes = 0;
-    let burstReqStartTs = 0;
-    let lastChunkTs = 0;
-    let loadedPingMs = 0;
-    let verifiedColo = '';
-    let sourceLabel = 'Cloudflare Edge Multi-Stream (HTTPS)';
+    const runWorkers = async (useLocalFallback: boolean) => {
+      const tStart = performance.now();
+      let totalDownBytes = 0;
+      let verifiedColo = '';
+      let seqCounter = 0;
+      const requestedUrls: string[] = [];
+      const timeline: ThroughputTimelinePoint[] = [{ elapsedMs: 0, totalBytes: 0 }];
+      const windowSamples: number[] = [];
+      const activeCtrls = new Set<AbortController>();
+      let stopped = false;
 
-    const runDownload = direction === 'both' || direction === 'download';
-    const runUpload = direction === 'both' || direction === 'upload';
-
-    // Fire a loaded ping simultaneously during heavy traffic to measure real Bufferbloat
-    const loadedPingPromise = this.measureSingleHttpPing(srv.probeUrl, 2200);
-
-    const runDownloadStreams = async (useLocalFallback: boolean): Promise<number> => {
-      totalDownBytes = 0;
-      burstReqStartTs = performance.now();
-      lastChunkTs = burstReqStartTs;
-      let lastReportTs = burstReqStartTs;
-
-      const streamCtrls: AbortController[] = [];
-      const windowTimer = window.setTimeout(() => {
-        for (const c of streamCtrls) {
+      const abortAll = () => {
+        stopped = true;
+        for (const c of activeCtrls) {
           try {
             c.abort();
           } catch {
             // ignore
           }
         }
-      }, maxWindowMs + 400);
+        activeCtrls.clear();
+      };
+
+      const stopTimer = window.setTimeout(abortAll, durationMs);
+      let lastWindowPushMs = warmupMs;
+
+      const ticker = window.setInterval(() => {
+        if (this.abortRequested) {
+          abortAll();
+          return;
+        }
+        const elapsedMs = performance.now() - tStart;
+        timeline.push({ elapsedMs, totalBytes: totalDownBytes });
+        if (elapsedMs >= warmupMs + 450 && totalDownBytes > 0) {
+          const stats = computeSteadyStateThroughput(timeline, warmupMs);
+          let pushedWin: number | null = null;
+          if (elapsedMs - lastWindowPushMs >= 500 && stats.latestWindowMbps > 0) {
+            lastWindowPushMs = elapsedMs;
+            pushedWin = stats.latestWindowMbps;
+            windowSamples.push(pushedWin);
+          }
+          onTick(stats.sustainedMbps, totalDownBytes, pushedWin);
+        }
+      }, 250);
+
+      // Periodic loaded ping during heavy download to measure true Bufferbloat
+      const pingTicker = window.setInterval(() => {
+        if (stopped || this.abortRequested) return;
+        void this.measureSingleHttpPing(probeUrl, 1800).then((p) => {
+          if (p.ok && p.latencyMs > 0) onLoadedPing(p.latencyMs);
+        });
+      }, 900);
+
+      const workerLoop = async (workerIdx: number) => {
+        while (!stopped && !this.abortRequested && performance.now() - tStart < durationMs - 80) {
+          const reqId = ++seqCounter;
+          const ctrl = new AbortController();
+          activeCtrls.add(ctrl);
+          this.activeControllers.add(ctrl);
+          const url = useLocalFallback
+            ? `${window.location.origin}/api/speedtest/download?bytes=${8 * 1024 * 1024}&_r=${Date.now()}_${reqId}_${workerIdx}`
+            : this.getDownloadStreamUrl(chunkBytes, reqId, workerIdx);
+          requestedUrls.push(url);
+
+          try {
+            const res = await fetch(url, { cache: 'no-store', signal: ctrl.signal });
+            if (!res.ok) {
+              await new Promise((r) => setTimeout(r, 120));
+              continue;
+            }
+            if (!verifiedColo && !useLocalFallback) {
+              const colo = res.headers.get('cf-meta-colo') || '';
+              const city = res.headers.get('cf-meta-city') || '';
+              if (colo) verifiedColo = city ? `${colo} · ${city}` : colo;
+            }
+            if (res.body && typeof res.body.getReader === 'function') {
+              const reader = res.body.getReader();
+              while (!stopped && !this.abortRequested) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                totalDownBytes += value.byteLength;
+                if (performance.now() - tStart >= durationMs) {
+                  try {
+                    await reader.cancel();
+                  } catch {
+                    // ignore
+                  }
+                  break;
+                }
+              }
+            } else {
+              const buf = await res.arrayBuffer();
+              totalDownBytes += buf.byteLength;
+            }
+          } catch {
+            // Aborted at end of window or transient network error
+            if (stopped || this.abortRequested) break;
+            await new Promise((r) => setTimeout(r, 120));
+          } finally {
+            activeCtrls.delete(ctrl);
+            this.activeControllers.delete(ctrl);
+          }
+        }
+      };
 
       try {
-        await Promise.all(
-          Array.from({ length: dlStreams }, async (_, k) => {
-            if (this.abortRequested) return;
-            const ctrl = new AbortController();
-            streamCtrls.push(ctrl);
-            this.activeControllers.add(ctrl);
-
-            const url = useLocalFallback
-              ? `${window.location.origin}/api/speedtest/download?bytes=${4 * 1024 * 1024}&_r=${Date.now()}_${burstIndex}_${k}`
-              : this.getDownloadStreamUrl(chunkBytes, burstIndex, k);
-
-            try {
-              const res = await fetch(url, { cache: 'no-store', signal: ctrl.signal });
-              if (!res.ok) return;
-
-              if (!verifiedColo && !useLocalFallback) {
-                const colo = res.headers.get('cf-meta-colo') || '';
-                const city = res.headers.get('cf-meta-city') || '';
-                if (colo) {
-                  verifiedColo = city ? `${colo} · ${city}` : colo;
-                }
-              }
-
-              if (res.body && typeof res.body.getReader === 'function') {
-                const reader = res.body.getReader();
-                while (!this.abortRequested) {
-                  const { done, value } = await reader.read();
-                  if (done) break;
-                  const now = performance.now();
-                  if (now > lastChunkTs) lastChunkTs = now;
-                  totalDownBytes += value.byteLength;
-
-                  const wallElapsedMs = now - burstReqStartTs;
-                  if (onLiveSample && wallElapsedMs >= 420 && now - lastReportTs >= 160) {
-                    lastReportTs = now;
-                    const wireMs = Math.max(wallElapsedMs * 0.8, wallElapsedMs - rttOffsetMs);
-                    const sec = Math.max(0.1, wireMs / 1000);
-                    const liveMbps = Number((((totalDownBytes * 8) / 1_000_000) / sec).toFixed(1));
-                    onLiveSample('down', liveMbps, totalDownBytes);
-                  }
-
-                  if (wallElapsedMs >= maxWindowMs) {
-                    try {
-                      await reader.cancel();
-                    } catch {
-                      // ignore
-                    }
-                    break;
-                  }
-                }
-              } else {
-                const buf = await res.arrayBuffer();
-                const tBody1 = performance.now();
-                if (tBody1 > lastChunkTs) lastChunkTs = tBody1;
-                totalDownBytes += buf.byteLength;
-              }
-            } catch {
-              // Aborted at window limit or connection error
-            } finally {
-              this.activeControllers.delete(ctrl);
-            }
-          })
-        );
+        await Promise.all(Array.from({ length: workerCount }, (_, idx) => workerLoop(idx)));
       } finally {
-        window.clearTimeout(windowTimer);
+        window.clearTimeout(stopTimer);
+        window.clearInterval(ticker);
+        window.clearInterval(pingTicker);
+        abortAll();
       }
-      return totalDownBytes;
+
+      const finalElapsedMs = performance.now() - tStart;
+      timeline.push({ elapsedMs: finalElapsedMs, totalBytes: totalDownBytes });
+
+      const compressionFactor = useLocalFallback ? 1 : this.detectCompressionCorrectionFactor(requestedUrls);
+      const correctedTimeline =
+        compressionFactor < 1
+          ? timeline.map((p) => ({ elapsedMs: p.elapsedMs, totalBytes: Math.round(p.totalBytes * compressionFactor) }))
+          : timeline;
+      const correctedBytes = Math.round(totalDownBytes * compressionFactor);
+      const stats = computeSteadyStateThroughput(correctedTimeline, warmupMs);
+      const correctedWindows =
+        compressionFactor < 1
+          ? windowSamples.map((v) => Number((v * compressionFactor).toFixed(1)))
+          : windowSamples;
+
+      return {
+        sustainedMbps: stats.sustainedMbps,
+        peakMbps: stats.peakMbps,
+        totalBytes: correctedBytes,
+        windowSamples: correctedWindows.length > 0 ? correctedWindows : stats.sustainedMbps > 0 ? [stats.sustainedMbps] : [],
+        sourceLabel: useLocalFallback
+          ? 'Localhost Bridge (.EXE) — Pętla lokalna (Tryb Offline)'
+          : verifiedColo
+            ? `Cloudflare Edge [${verifiedColo}] (Real HTTPS Steady-State)`
+            : 'Cloudflare Edge Multi-Stream (Real HTTPS Steady-State)',
+      };
     };
 
-    if (runDownload) {
-      await runDownloadStreams(false);
-      if (verifiedColo) {
-        sourceLabel = `Cloudflare Edge [${verifiedColo}] (Real HTTPS)`;
-      }
-      if (
-        totalDownBytes === 0 &&
-        !this.abortRequested &&
-        (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost')
-      ) {
-        const localBytes = await runDownloadStreams(true);
-        if (localBytes > 0) {
-          sourceLabel = 'Localhost Bridge (.EXE) — Pętla lokalna (Tryb Offline)';
-        }
-      }
+    const primary = await runWorkers(false);
+    if (primary.totalBytes === 0 && !this.abortRequested && isLocalOrigin) {
+      return runWorkers(true);
     }
+    return primary;
+  }
 
-    const loadedRes = await loadedPingPromise;
-    loadedPingMs = loadedRes.ok ? loadedRes.latencyMs : 0;
+  /**
+   * Sustained multi-second multi-stream HTTP Upload test:
+   * - Sends high-entropy incompressible Xorshift32 payloads back-to-back across parallel workers.
+   * - Counts bytes ONLY upon confirmed HTTP 200 OK from the remote server (`res.ok`), preventing
+   *   local OS TCP send buffer (`SO_SNDBUF`) or AV proxy buffers from faking upload speed.
+   * - Discards the first `warmupMs` (1.5s) so buffers are 100% saturated before steady-state measurement.
+   */
+  private async runSustainedUpload(options: {
+    durationMs: number;
+    warmupMs: number;
+    streams: number;
+    probeUrl: string;
+    preferLocalFallback: boolean;
+    onTick: (liveMbps: number, totalBytes: number, windowMbps: number | null) => void;
+    onLoadedPing: (latencyMs: number) => void;
+  }): Promise<{
+    sustainedMbps: number;
+    peakMbps: number;
+    totalBytes: number;
+    windowSamples: number[];
+    sourceLabel: string;
+  }> {
+    const { durationMs, warmupMs, streams, probeUrl, preferLocalFallback, onTick, onLoadedPing } = options;
+    const workerCount = Math.max(2, Math.min(4, Math.round(streams / 2)));
+    const isLocalOrigin =
+      typeof window !== 'undefined' &&
+      (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost');
 
-    const rawDlWallMs = Math.max(0, lastChunkTs - burstReqStartTs);
-    const dlWireMs = Math.max(rawDlWallMs * 0.8, rawDlWallMs - rttOffsetMs);
-    const dlSec = dlWireMs > 0 ? dlWireMs / 1000 : 0;
-    const downloadMbps =
-      runDownload && totalDownBytes > 0 && dlSec >= 0.05
-        ? Number((((totalDownBytes * 8) / 1_000_000) / dlSec).toFixed(1))
-        : 0;
+    // Pre-generate 4 MB of incompressible Xorshift32 pseudo-random bytes once
+    const masterPool = new Uint8Array(4 * 1024 * 1024);
+    this.fillHighEntropyUploadPayload(masterPool, Date.now() ^ 0x517cc1b7);
 
-    // 2. Real Multi-Stream Upload: High-entropy incompressible payload + strict HTTP 200 OK confirmation
-    let totalUpBytes = 0;
-    let uploadMbps = 0;
-    if (runUpload && !this.abortRequested) {
-      const upStreams = Math.max(
-        3,
-        Math.min(6, direction === 'upload' ? Math.min(6, configuredStreams) : Math.min(4, Math.round(configuredStreams * 0.5)))
-      );
+    const runWorkers = async (useLocalFallback: boolean) => {
+      const tStart = performance.now();
+      let confirmedUpBytes = 0;
+      let seqCounter = 0;
+      let adaptiveChunkSize = 512 * 1024; // Starts at 512 KB, adapts smoothly up to 4 MB
+      const timeline: ThroughputTimelinePoint[] = [{ elapsedMs: 0, totalBytes: 0 }];
+      const windowSamples: number[] = [];
+      const activeCtrls = new Set<AbortController>();
+      let stopped = false;
 
-      let uploadChunkSize = 512 * 1024; // 512 KB default calibration per stream
-      if (burstIndex > 1 && lastMeasuredUlMbps > 0) {
-        const targetUpBytesPerStream = Math.round(
-          ((lastMeasuredUlMbps * 1_000_000) / 8) * 0.85 / upStreams
-        );
-        uploadChunkSize = Math.max(256 * 1024, Math.min(2560 * 1024, targetUpBytesPerStream));
-      }
+      const abortAll = () => {
+        stopped = true;
+        for (const c of activeCtrls) {
+          try {
+            c.abort();
+          } catch {
+            // ignore
+          }
+        }
+        activeCtrls.clear();
+      };
 
-      const upPayload = new Uint8Array(uploadChunkSize);
-      this.fillHighEntropyUploadPayload(upPayload, (burstIndex * 0x45d9f3b) ^ Date.now());
+      const stopTimer = window.setTimeout(abortAll, durationMs + 300);
+      let lastWindowPushMs = warmupMs;
 
-      const isLocalOrigin =
-        window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost';
-      const useLocalUp = sourceLabel.startsWith('Localhost');
+      const ticker = window.setInterval(() => {
+        if (this.abortRequested) {
+          abortAll();
+          return;
+        }
+        const elapsedMs = performance.now() - tStart;
+        timeline.push({ elapsedMs, totalBytes: confirmedUpBytes });
+        if (elapsedMs >= warmupMs + 500 && confirmedUpBytes > 0) {
+          const stats = computeSteadyStateThroughput(timeline, warmupMs);
+          let pushedWin: number | null = null;
+          if (elapsedMs - lastWindowPushMs >= 500 && stats.latestWindowMbps > 0) {
+            lastWindowPushMs = elapsedMs;
+            pushedWin = stats.latestWindowMbps;
+            windowSamples.push(pushedWin);
+          }
+          onTick(stats.sustainedMbps, confirmedUpBytes, pushedWin);
+        }
+      }, 250);
 
-      const runUploadPass = async (localFallback: boolean): Promise<{ bytes: number; sec: number }> => {
-        const tUp0 = performance.now();
-        let confirmedUpBytes = 0;
-        let lastUpAckTs = tUp0;
+      const pingTicker = window.setInterval(() => {
+        if (stopped || this.abortRequested) return;
+        void this.measureSingleHttpPing(probeUrl, 1800).then((p) => {
+          if (p.ok && p.latencyMs > 0) onLoadedPing(p.latencyMs);
+        });
+      }, 950);
 
-        const sendOneStream = async (k: number): Promise<number> => {
-          if (this.abortRequested) return 0;
-          const url = localFallback
-            ? `${window.location.origin}/api/speedtest/upload?_r=${Date.now()}_${burstIndex}_${k}`
-            : this.getUploadEndpointUrl(burstIndex, k);
+      const workerLoop = async (workerIdx: number) => {
+        while (!stopped && !this.abortRequested && performance.now() - tStart < durationMs) {
+          const reqId = ++seqCounter;
+          const sz = adaptiveChunkSize;
+          const maxOffset = Math.max(0, masterPool.byteLength - sz);
+          const offset = maxOffset > 0 ? ((reqId * 65521 + workerIdx * 4093) % maxOffset) : 0;
+          const payload = masterPool.subarray(offset, offset + sz);
 
           const ctrl = new AbortController();
+          activeCtrls.add(ctrl);
           this.activeControllers.add(ctrl);
-          const timer = window.setTimeout(() => ctrl.abort(), maxWindowMs + 1800);
+          const url = useLocalFallback
+            ? `${window.location.origin}/api/speedtest/upload?_r=${Date.now()}_${reqId}_${workerIdx}`
+            : this.getUploadEndpointUrl(reqId, workerIdx);
+
+          const chunkT0 = performance.now();
           try {
             const res = await fetch(url, {
               method: 'POST',
-              body: upPayload,
+              body: payload,
               cache: 'no-store',
               signal: ctrl.signal,
             });
-            if (!res.ok) return 0;
-            const now = performance.now();
-            confirmedUpBytes += uploadChunkSize;
-            if (now > lastUpAckTs) lastUpAckTs = now;
-
-            const upWallMs = now - tUp0;
-            if (onLiveSample && upWallMs >= 250 && confirmedUpBytes > 0) {
-              const upWireMs = Math.max(upWallMs * 0.8, upWallMs - rttOffsetMs);
-              const liveUpMbps = Number(
-                (((confirmedUpBytes * 8) / 1_000_000) / Math.max(0.08, upWireMs / 1000)).toFixed(1)
-              );
-              onLiveSample('up', liveUpMbps, totalDownBytes + confirmedUpBytes);
+            if (!res.ok) {
+              await new Promise((r) => setTimeout(r, 120));
+              continue;
             }
-            return uploadChunkSize;
+            const chunkMs = Math.max(1, performance.now() - chunkT0);
+            confirmedUpBytes += sz;
+            timeline.push({ elapsedMs: performance.now() - tStart, totalBytes: confirmedUpBytes });
+
+            // Adapt chunk size so each POST takes ~300-650ms (smooth steady-state saturation without huge tail latency)
+            if (chunkMs < 180 && adaptiveChunkSize < 4 * 1024 * 1024) {
+              adaptiveChunkSize = Math.min(4 * 1024 * 1024, adaptiveChunkSize * 2);
+            } else if (chunkMs > 1200 && adaptiveChunkSize > 256 * 1024) {
+              adaptiveChunkSize = Math.max(256 * 1024, Math.round(adaptiveChunkSize / 2));
+            }
           } catch {
-            return 0;
+            if (stopped || this.abortRequested) break;
+            await new Promise((r) => setTimeout(r, 120));
           } finally {
-            window.clearTimeout(timer);
+            activeCtrls.delete(ctrl);
             this.activeControllers.delete(ctrl);
           }
-        };
-
-        const sentPerStream = await Promise.all(
-          Array.from({ length: upStreams }, (_, k) => sendOneStream(k))
-        );
-        const bytes = sentPerStream.reduce((a, b) => a + b, 0);
-        const totalUpWallMs = Math.max(0, lastUpAckTs - tUp0);
-        const totalUpWireMs = Math.max(totalUpWallMs * 0.8, totalUpWallMs - rttOffsetMs);
-        const sec = Math.max(0.08, totalUpWireMs / 1000);
-        return { bytes, sec };
+        }
       };
 
-      let upPass = await runUploadPass(useLocalUp);
-      if (upPass.bytes === 0 && !useLocalUp && isLocalOrigin && !this.abortRequested) {
-        upPass = await runUploadPass(true);
-        if (upPass.bytes > 0) {
-          sourceLabel = 'Localhost Bridge (.EXE) — Pętla lokalna (Tryb Offline)';
-        }
+      try {
+        await Promise.all(Array.from({ length: workerCount }, (_, idx) => workerLoop(idx)));
+      } finally {
+        window.clearTimeout(stopTimer);
+        window.clearInterval(ticker);
+        window.clearInterval(pingTicker);
+        abortAll();
       }
-      totalUpBytes = upPass.bytes;
-      if (totalUpBytes > 0) {
-        uploadMbps = Number((((totalUpBytes * 8) / 1_000_000) / upPass.sec).toFixed(1));
-      }
-    }
 
-    return {
-      downloadMbps,
-      uploadMbps,
-      bytesTransferred: totalDownBytes + totalUpBytes,
-      loadedPingMs,
-      sourceLabel,
+      const finalElapsedMs = performance.now() - tStart;
+      timeline.push({ elapsedMs: finalElapsedMs, totalBytes: confirmedUpBytes });
+      const stats = computeSteadyStateThroughput(timeline, warmupMs);
+      return {
+        sustainedMbps: stats.sustainedMbps,
+        peakMbps: stats.peakMbps,
+        totalBytes: confirmedUpBytes,
+        windowSamples: windowSamples.length > 0 ? windowSamples : stats.sustainedMbps > 0 ? [stats.sustainedMbps] : [],
+        sourceLabel: useLocalFallback
+          ? 'Localhost Bridge (.EXE) — Pętla lokalna (Tryb Offline)'
+          : 'Cloudflare Edge Multi-Stream (Real HTTPS Steady-State)',
+      };
     };
+
+    const primary = await runWorkers(preferLocalFallback);
+    if (primary.totalBytes === 0 && !preferLocalFallback && isLocalOrigin && !this.abortRequested) {
+      return runWorkers(true);
+    }
+    return primary;
   }
 
   public async runTest(
@@ -1178,13 +1275,13 @@ export class NetworkTestService {
     const direction = this.transferDirection;
     const srv = this.getSelectedServer();
     const continuous = Boolean(options?.continuous);
-    const totalProbes = continuous ? 999999 : (options?.sampleCount ?? 24);
+    const pingProbeCount = continuous ? 6 : Math.max(8, Math.min(16, options?.sampleCount ?? 12));
 
     const result = this.createInitialState();
     result.status = 'running';
     result.continuousMode = continuous;
     result.transferDirection = direction;
-    result.targetSamples = continuous ? 0 : totalProbes;
+    result.targetSamples = continuous ? 0 : pingProbeCount;
     result.activeStreams = this.activeStreams;
     result.selectedServerId = srv.id;
     result.selectedServerName = `${srv.city} (${srv.country}) — ${srv.provider}`;
@@ -1193,42 +1290,22 @@ export class NetworkTestService {
 
     onProgress({ ...result });
 
-    // 1. Measure genuine DNS + TCP + TLS handshake cold RTT before warm pings
-    const coldPing = await this.measureSingleHttpPing(srv.probeUrl, 2500);
-    const warmupPing = await this.measureSingleHttpPing(srv.probeUrl, 2500);
-    if (coldPing.ok && warmupPing.ok) {
-      result.dnsLookupMs = Number(Math.max(0.2, coldPing.latencyMs - warmupPing.latencyMs).toFixed(1));
-    } else if (coldPing.ok) {
-      result.dnsLookupMs = coldPing.latencyMs;
-    }
-
     const samples: NetworkPingSample[] = [];
     const speedSamples: NetworkSpeedSample[] = [];
     const loadedPings: number[] = [];
-    let failed = 0;
+    let totalPingAttempts = 0;
+    let failedPings = 0;
     let totalBytesTransferred = 0;
-    const speedProbeInterval = continuous ? 1 : totalProbes <= 16 ? 3 : 4;
 
-    for (let i = 1; i <= totalProbes; i++) {
-      if (this.abortRequested) break;
-
-      const pingRes = await this.measureSingleHttpPing(srv.probeUrl, 2400);
-      if (!pingRes.ok) failed++;
-
-      samples.push({
-        seq: i,
-        latencyMs: pingRes.ok ? pingRes.latencyMs : 0,
-        ok: pingRes.ok,
-      });
-      if (samples.length > 120) samples.shift();
-
+    const recomputePingStats = () => {
       const validLats = samples.filter((s) => s.ok && s.latencyMs > 0).map((s) => s.latencyMs);
       if (validLats.length > 0) {
         result.pingMinMs = Number(Math.min(...validLats).toFixed(1));
         result.pingMaxMs = Number(Math.max(...validLats).toFixed(1));
-        result.pingAvgMs = Number(
-          (validLats.reduce((a, b) => a + b, 0) / validLats.length).toFixed(1)
-        );
+        const sorted = [...validLats].sort((a, b) => a - b);
+        // Drop single highest outlier when >= 6 warm probes (prevents one GC pause from skewing ping)
+        const trimmed = sorted.length >= 6 ? sorted.slice(0, -1) : sorted;
+        result.pingAvgMs = Number((trimmed.reduce((a, b) => a + b, 0) / trimmed.length).toFixed(1));
 
         if (validLats.length > 1) {
           let diffSum = 0;
@@ -1237,86 +1314,7 @@ export class NetworkTestService {
           }
           result.jitterMs = Number((diffSum / (validLats.length - 1)).toFixed(1));
         }
-      }
 
-      if (i === 1 || i % speedProbeInterval === 0 || i === totalProbes) {
-        const burstIdx = speedSamples.length + 1;
-        const baseRtt = result.pingMinMs > 0 ? result.pingMinMs : warmupPing.ok ? warmupPing.latencyMs : 24;
-        const burst = await this.measureRealBandwidthPhase(
-          burstIdx,
-          direction,
-          baseRtt,
-          result.downloadEstMbps || 0,
-          result.uploadEstMbps || 0,
-          (phase, liveMbps, liveBytes) => {
-            if (this.abortRequested) return;
-            if (phase === 'down') {
-              result.downloadEstMbps = liveMbps;
-              if (result.peakDownloadMbps === 0) {
-                result.peakDownloadMbps = liveMbps;
-              }
-            } else {
-              result.uploadEstMbps = liveMbps;
-              if (result.peakUploadMbps === 0) {
-                result.peakUploadMbps = liveMbps;
-              }
-            }
-            result.transferredMB = Number(((totalBytesTransferred + liveBytes) / (1024 * 1024)).toFixed(1));
-            onProgress({ ...result });
-          }
-        );
-
-        if (this.abortRequested && burst.bytesTransferred === 0) break;
-
-        result.effectiveType = burst.sourceLabel;
-        totalBytesTransferred += burst.bytesTransferred;
-        if (burst.loadedPingMs > 0) loadedPings.push(burst.loadedPingMs);
-
-        speedSamples.push({
-          seq: speedSamples.length + 1,
-          downloadMbps: burst.downloadMbps,
-          uploadMbps: burst.uploadMbps,
-        });
-        if (speedSamples.length > 60) speedSamples.shift();
-
-        const validDl = speedSamples.map((s) => s.downloadMbps).filter((v) => v > 0);
-        const validUl = speedSamples.map((s) => s.uploadMbps).filter((v) => v > 0);
-
-        if (validDl.length > 0 && (direction === 'both' || direction === 'download')) {
-          const sortedDl = [...validDl].sort((a, b) => a - b);
-          const trimmedDl = sortedDl.length >= 3 ? sortedDl.slice(1) : sortedDl;
-          result.downloadEstMbps = Number(
-            (trimmedDl.reduce((a, b) => a + b, 0) / trimmedDl.length).toFixed(1)
-          );
-          result.peakDownloadMbps = Number(Math.max(...validDl).toFixed(1));
-        } else if (direction === 'upload') {
-          result.downloadEstMbps = 0;
-          result.peakDownloadMbps = 0;
-        }
-        if (validUl.length > 0 && (direction === 'both' || direction === 'upload')) {
-          const sortedUl = [...validUl].sort((a, b) => a - b);
-          const trimmedUl = sortedUl.length >= 3 ? sortedUl.slice(1) : sortedUl;
-          result.uploadEstMbps = Number(
-            (trimmedUl.reduce((a, b) => a + b, 0) / trimmedUl.length).toFixed(1)
-          );
-          result.peakUploadMbps = Number(Math.max(...validUl).toFixed(1));
-        } else if (direction === 'download') {
-          result.uploadEstMbps = 0;
-          result.peakUploadMbps = 0;
-        }
-
-        result.transferredMB = Number((totalBytesTransferred / (1024 * 1024)).toFixed(1));
-
-        if (loadedPings.length > 0 && result.pingMinMs > 0) {
-          const avgLoaded = loadedPings.reduce((a, b) => a + b, 0) / loadedPings.length;
-          result.bufferbloatMs = Number(Math.max(0, avgLoaded - result.pingMinMs).toFixed(1));
-        } else {
-          result.bufferbloatMs = Number(Math.max(0, result.pingMaxMs - result.pingMinMs).toFixed(1));
-        }
-      }
-
-      result.packetLossPct = Number(((failed / i) * 100).toFixed(1));
-      if (validLats.length > 0) {
         const effectiveLatency = result.pingAvgMs + result.jitterMs * 2 + 10;
         const rFactor = Math.max(
           10,
@@ -1333,10 +1331,15 @@ export class NetworkTestService {
         result.voipMosScore = Number(Math.max(1.0, Math.min(4.5, mos)).toFixed(2));
         result.cdnEdgeMs = result.pingMinMs;
       }
+      result.packetLossPct =
+        totalPingAttempts > 0 ? Number(((failedPings / totalPingAttempts) * 100).toFixed(1)) : 0;
 
-      result.samples = [...samples];
-      result.speedSamples = [...speedSamples];
-      result.progress = continuous ? 100 : Math.min(99, Math.round((i / totalProbes) * 100));
+      if (loadedPings.length > 0 && result.pingMinMs > 0) {
+        const avgLoaded = loadedPings.reduce((a, b) => a + b, 0) / loadedPings.length;
+        result.bufferbloatMs = Number(Math.max(0, avgLoaded - result.pingMinMs).toFixed(1));
+      } else if (result.pingMaxMs > 0 && result.pingMinMs > 0) {
+        result.bufferbloatMs = Number(Math.max(0, result.pingMaxMs - result.pingMinMs).toFixed(1));
+      }
 
       if (!navigator.onLine || result.packetLossPct >= 50) {
         result.qualityGrade = 'OFFLINE';
@@ -1347,12 +1350,154 @@ export class NetworkTestService {
       } else {
         result.qualityGrade = 'DOBRA';
       }
+      result.samples = [...samples];
+      result.speedSamples = [...speedSamples];
+    };
 
-      onProgress({ ...result });
-      if (!this.abortRequested) {
-        await new Promise((r) => setTimeout(r, 45));
-      }
+    // 1. Measure genuine cold DNS + TCP + TLS handshake RTT before warm idle pings
+    const coldPing = await this.measureSingleHttpPing(srv.probeUrl, 2500);
+    const warmupPing = await this.measureSingleHttpPing(srv.probeUrl, 2500);
+    if (coldPing.ok && warmupPing.ok) {
+      result.dnsLookupMs = Number(Math.max(0.2, coldPing.latencyMs - warmupPing.latencyMs).toFixed(1));
+    } else if (coldPing.ok) {
+      result.dnsLookupMs = coldPing.latencyMs;
     }
+
+    const runOneCycle = async (cycleIdx: number) => {
+      const probesThisCycle = cycleIdx === 0 ? pingProbeCount : 4;
+      for (let i = 1; i <= probesThisCycle; i++) {
+        if (this.abortRequested) return;
+        const p = await this.measureSingleHttpPing(srv.probeUrl, 2200);
+        totalPingAttempts++;
+        if (!p.ok) failedPings++;
+        samples.push({
+          seq: totalPingAttempts,
+          latencyMs: p.ok ? p.latencyMs : 0,
+          ok: p.ok,
+        });
+        if (samples.length > 120) samples.shift();
+        recomputePingStats();
+        result.progress = continuous ? 100 : Math.min(22, Math.round((i / probesThisCycle) * 20) + 2);
+        onProgress({ ...result });
+        if (!this.abortRequested) await new Promise((r) => setTimeout(r, 40));
+      }
+
+      if (this.abortRequested) return;
+
+      const runDownload = direction === 'both' || direction === 'download';
+      const runUpload = direction === 'both' || direction === 'upload';
+      let usedLocalFallback = false;
+
+      // 2. Sustained Multi-Second Steady-State Download Phase
+      if (runDownload && !this.abortRequested) {
+        const dlDurationMs = continuous ? 3200 : 5600;
+        const dlWarmupMs = continuous ? 1000 : 1500;
+        const dlStartBytes = totalBytesTransferred;
+        const dlRes = await this.runSustainedDownload({
+          durationMs: dlDurationMs,
+          warmupMs: dlWarmupMs,
+          streams: this.activeStreams,
+          probeUrl: srv.probeUrl,
+          onLoadedPing: (lat) => loadedPings.push(lat),
+          onTick: (liveMbps, phaseBytes, winMbps) => {
+            if (this.abortRequested) return;
+            result.downloadEstMbps = liveMbps;
+            if (winMbps !== null) {
+              speedSamples.push({
+                seq: speedSamples.length + 1,
+                downloadMbps: winMbps,
+                uploadMbps: result.uploadEstMbps || 0,
+              });
+              if (speedSamples.length > 60) speedSamples.shift();
+              result.speedSamples = [...speedSamples];
+            }
+            result.transferredMB = Number(((dlStartBytes + phaseBytes) / (1024 * 1024)).toFixed(1));
+            result.progress = continuous
+              ? 100
+              : Math.min(runUpload ? 62 : 96, 22 + Math.round((speedSamples.length / 8) * (runUpload ? 38 : 72)));
+            onProgress({ ...result });
+          },
+        });
+
+        totalBytesTransferred += dlRes.totalBytes;
+        usedLocalFallback = dlRes.sourceLabel.startsWith('Localhost');
+        result.effectiveType = dlRes.sourceLabel;
+        if (dlRes.sustainedMbps > 0) {
+          result.downloadEstMbps = dlRes.sustainedMbps;
+          result.peakDownloadMbps = Math.max(result.peakDownloadMbps ?? 0, dlRes.peakMbps, dlRes.sustainedMbps);
+        }
+        result.transferredMB = Number((totalBytesTransferred / (1024 * 1024)).toFixed(1));
+        recomputePingStats();
+        result.progress = continuous ? 100 : runUpload ? 62 : 98;
+        onProgress({ ...result });
+      } else if (direction === 'upload') {
+        result.downloadEstMbps = 0;
+        result.peakDownloadMbps = 0;
+      }
+
+      // 3. Sustained Multi-Second Steady-State Upload Phase
+      if (runUpload && !this.abortRequested) {
+        const ulDurationMs = continuous ? 3200 : 5200;
+        const ulWarmupMs = continuous ? 1000 : 1500;
+        const ulStartBytes = totalBytesTransferred;
+        let ulTicks = 0;
+        const ulRes = await this.runSustainedUpload({
+          durationMs: ulDurationMs,
+          warmupMs: ulWarmupMs,
+          streams: this.activeStreams,
+          probeUrl: srv.probeUrl,
+          preferLocalFallback: usedLocalFallback,
+          onLoadedPing: (lat) => loadedPings.push(lat),
+          onTick: (liveMbps, phaseBytes, winMbps) => {
+            if (this.abortRequested) return;
+            result.uploadEstMbps = liveMbps;
+            if (winMbps !== null) {
+              if (runDownload && ulTicks < speedSamples.length) {
+                // Pair upload curve cleanly onto existing timeline points for a balanced dual chart
+                speedSamples[ulTicks] = {
+                  ...speedSamples[ulTicks],
+                  uploadMbps: winMbps,
+                };
+              } else {
+                speedSamples.push({
+                  seq: speedSamples.length + 1,
+                  downloadMbps: runDownload ? result.downloadEstMbps : 0,
+                  uploadMbps: winMbps,
+                });
+                if (speedSamples.length > 60) speedSamples.shift();
+              }
+              ulTicks++;
+              result.speedSamples = [...speedSamples];
+            }
+            result.transferredMB = Number(((ulStartBytes + phaseBytes) / (1024 * 1024)).toFixed(1));
+            result.progress = continuous
+              ? 100
+              : Math.min(98, (runDownload ? 62 : 24) + Math.round((ulTicks / 7) * (runDownload ? 34 : 72)));
+            onProgress({ ...result });
+          },
+        });
+
+        totalBytesTransferred += ulRes.totalBytes;
+        if (!runDownload) result.effectiveType = ulRes.sourceLabel;
+        if (ulRes.sustainedMbps > 0) {
+          result.uploadEstMbps = ulRes.sustainedMbps;
+          result.peakUploadMbps = Math.max(result.peakUploadMbps ?? 0, ulRes.peakMbps, ulRes.sustainedMbps);
+        }
+        result.transferredMB = Number((totalBytesTransferred / (1024 * 1024)).toFixed(1));
+        recomputePingStats();
+        result.progress = continuous ? 100 : 99;
+        onProgress({ ...result });
+      } else if (direction === 'download') {
+        result.uploadEstMbps = 0;
+        result.peakUploadMbps = 0;
+      }
+    };
+
+    let cycle = 0;
+    do {
+      await runOneCycle(cycle);
+      cycle++;
+    } while (continuous && !this.abortRequested);
 
     const probes = this.getCachedServerProbes();
     const probeIdx = probes.findIndex((p) => p.id === srv.id);
@@ -1376,6 +1521,115 @@ export class NetworkTestService {
     this.activeXhrs.clear();
     return result;
   }
+}
+
+export interface ThroughputTimelinePoint {
+  elapsedMs: number;
+  totalBytes: number;
+}
+
+export interface SteadyStateThroughputResult {
+  sustainedMbps: number;
+  peakMbps: number;
+  latestWindowMbps: number;
+  steadyBytes: number;
+  steadyDurationSec: number;
+}
+
+/**
+ * Pure scientific steady-state throughput estimator (Ookla / M-Lab NDT7 sliding-window model).
+ * - Excludes initial `warmupMs` slow-start / proxy-buffer ramp-up completely.
+ * - Uses strict wall-clock `deltaBytes / deltaSec` with ZERO artificial time scaling.
+ * - Computes 1.0-second rolling windows inside steady-state for honest peak calculation
+ *   (immune to 50 ms RAM/proxy burst spikes).
+ */
+export function computeSteadyStateThroughput(
+  timeline: ThroughputTimelinePoint[],
+  warmupMs = 1500
+): SteadyStateThroughputResult {
+  if (!timeline || timeline.length < 2) {
+    return { sustainedMbps: 0, peakMbps: 0, latestWindowMbps: 0, steadyBytes: 0, steadyDurationSec: 0 };
+  }
+
+  const sorted = [...timeline].sort((a, b) => a.elapsedMs - b.elapsedMs);
+  const last = sorted[sorted.length - 1];
+  if (last.totalBytes <= 0 || last.elapsedMs < 100) {
+    return { sustainedMbps: 0, peakMbps: 0, latestWindowMbps: 0, steadyBytes: 0, steadyDurationSec: 0 };
+  }
+
+  // Find exact steady-state start point at t >= warmupMs (with linear interpolation for precision)
+  let baseElapsedMs = 0;
+  let baseBytes = 0;
+  const hasSteadyWindow = last.elapsedMs >= warmupMs + 500;
+  if (hasSteadyWindow) {
+    let idx = sorted.findIndex((p) => p.elapsedMs >= warmupMs);
+    if (idx <= 0) {
+      baseElapsedMs = sorted[0].elapsedMs;
+      baseBytes = sorted[0].totalBytes;
+    } else {
+      const prev = sorted[idx - 1];
+      const curr = sorted[idx];
+      const span = Math.max(1, curr.elapsedMs - prev.elapsedMs);
+      const frac = Math.max(0, Math.min(1, (warmupMs - prev.elapsedMs) / span));
+      baseElapsedMs = warmupMs;
+      baseBytes = prev.totalBytes + (curr.totalBytes - prev.totalBytes) * frac;
+    }
+  } else {
+    baseElapsedMs = sorted[0].elapsedMs;
+    baseBytes = sorted[0].totalBytes;
+  }
+
+  let steadyBytes = Math.max(0, last.totalBytes - baseBytes);
+  let steadySec = Math.max(0.1, (last.elapsedMs - baseElapsedMs) / 1000);
+
+  // Ultra-slow link fallback where all confirmed chunks arrived before warmup boundary
+  if (steadyBytes <= 0 && last.totalBytes > 0) {
+    steadyBytes = last.totalBytes;
+    steadySec = Math.max(0.1, last.elapsedMs / 1000);
+  }
+
+  const sustainedMbps = Number((((steadyBytes * 8) / 1_000_000) / steadySec).toFixed(1));
+
+  // Rolling 1.0-second windows strictly inside the steady-state region
+  const steadyPoints = sorted.filter((p) => p.elapsedMs >= baseElapsedMs);
+  const rollingWindows: number[] = [];
+  for (let i = 0; i < steadyPoints.length; i++) {
+    const pEnd = steadyPoints[i];
+    if (pEnd.elapsedMs - baseElapsedMs < 900) continue;
+    // Find latest point at least 900ms prior to pEnd (and >= baseElapsedMs)
+    let pStart: ThroughputTimelinePoint | null = null;
+    for (let j = i - 1; j >= 0; j--) {
+      if (pEnd.elapsedMs - steadyPoints[j].elapsedMs >= 900) {
+        pStart = steadyPoints[j];
+        break;
+      }
+    }
+    if (!pStart) continue;
+    const dBytes = Math.max(0, pEnd.totalBytes - pStart.totalBytes);
+    const dSec = (pEnd.elapsedMs - pStart.elapsedMs) / 1000;
+    if (dBytes > 0 && dSec >= 0.85) {
+      rollingWindows.push(Number((((dBytes * 8) / 1_000_000) / dSec).toFixed(1)));
+    }
+  }
+
+  const latestWindowMbps =
+    rollingWindows.length > 0 ? rollingWindows[rollingWindows.length - 1] : sustainedMbps;
+
+  let peakMbps = sustainedMbps;
+  if (rollingWindows.length > 0) {
+    const sortedWin = [...rollingWindows].sort((a, b) => a - b);
+    const p90Idx = Math.min(sortedWin.length - 1, Math.floor((sortedWin.length - 1) * 0.9));
+    // Clamp absurd single-window proxy stall+flush bursts to at most 1.35x sustained steady-state
+    peakMbps = Number(Math.max(sustainedMbps, Math.min(sortedWin[p90Idx], sustainedMbps * 1.35)).toFixed(1));
+  }
+
+  return {
+    sustainedMbps,
+    peakMbps,
+    latestWindowMbps,
+    steadyBytes: Math.round(steadyBytes),
+    steadyDurationSec: Number(steadySec.toFixed(2)),
+  };
 }
 
 export const networkTestService = new NetworkTestService();
